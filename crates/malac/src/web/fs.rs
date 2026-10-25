@@ -1,6 +1,7 @@
-//! `GET /api/fs?path=`: subdirectories of a directory, for a directory
-//! picker. Only directories below `daemon.browse_root` (the home directory
-//! by default) are listed.
+//! `GET /api/fs?path=`: what a directory holds, for folder and file
+//! pickers: its subdirectories, and with `files=true` its files too. Only
+//! directories below `daemon.browse_root` (the home directory by default)
+//! are listed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,9 +32,12 @@ const MAX_ENTRIES: usize = 1000;
 pub(super) struct FsQuery {
     /// Absolute, `~/...`, or relative to the root. Defaults to the root.
     path: Option<String>,
-    /// Include directories whose name starts with a dot.
+    /// Include entries whose name starts with a dot.
     #[serde(default)]
     hidden: bool,
+    /// List files as well as directories.
+    #[serde(default)]
+    files: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,7 +56,20 @@ struct Listing {
 struct Entry {
     name: String,
     path: PathBuf,
+    kind: Kind,
+    /// Bytes, for files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    /// For directories.
     markers: Vec<&'static str>,
+}
+
+/// Directories sort before files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Directory,
+    File,
 }
 
 pub(super) async fn list(
@@ -60,9 +77,10 @@ pub(super) async fn list(
     Query(query): Query<FsQuery>,
 ) -> Response {
     let root = state.hub.options().browse_root.clone();
-    let listing =
-        tokio::task::spawn_blocking(move || listing(&root, query.path.as_deref(), query.hidden))
-            .await;
+    let listing = tokio::task::spawn_blocking(move || {
+        listing(&root, query.path.as_deref(), query.hidden, query.files)
+    })
+    .await;
     match listing {
         Ok(Ok(listing)) => Json(listing).into_response(),
         Ok(Err(err)) => {
@@ -96,7 +114,7 @@ impl std::fmt::Display for OutsideRoot {
 
 impl std::error::Error for OutsideRoot {}
 
-fn listing(root: &Path, path: Option<&str>, hidden: bool) -> Result<Listing> {
+fn listing(root: &Path, path: Option<&str>, hidden: bool, files: bool) -> Result<Listing> {
     let root = root
         .canonicalize()
         .with_context(|| format!("cannot open {}", root.display()))?;
@@ -116,19 +134,36 @@ fn listing(root: &Path, path: Option<&str>, hidden: bool) -> Result<Listing> {
     let mut entries: Vec<Entry> = std::fs::read_dir(&path)
         .with_context(|| format!("cannot list {}", path.display()))?
         .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| hidden || !name.starts_with('.'))
-        .map(|name| {
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !hidden && name.starts_with('.') {
+                return None;
+            }
             let full = path.join(&name);
-            Entry {
-                markers: markers(&full),
-                path: full,
-                name,
+            // Symbolic links count as what they point to.
+            let meta = std::fs::metadata(&full).ok()?;
+            if meta.is_dir() {
+                Some(Entry {
+                    markers: markers(&full),
+                    path: full,
+                    name,
+                    kind: Kind::Directory,
+                    size: None,
+                })
+            } else if files && meta.is_file() {
+                Some(Entry {
+                    path: full,
+                    name,
+                    kind: Kind::File,
+                    size: Some(meta.len()),
+                    markers: Vec::new(),
+                })
+            } else {
+                None
             }
         })
         .collect();
-    entries.sort_by_key(|e| e.name.to_lowercase());
+    entries.sort_by_key(|e| (e.kind, e.name.to_lowercase()));
     let truncated = entries.len() > MAX_ENTRIES;
     entries.truncate(MAX_ENTRIES);
     Ok(Listing {
@@ -165,14 +200,28 @@ mod tests {
         std::fs::create_dir(root.path().join(".cache")).unwrap();
         std::fs::write(root.path().join("file.txt"), "").unwrap();
 
-        let top = listing(root.path(), None, false).unwrap();
+        let top = listing(root.path(), None, false, false).unwrap();
         let names: Vec<&str> = top.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["app", "Notes"]);
         assert_eq!(top.entries[0].markers, [".git", "Cargo.toml"]);
         assert!(top.parent.is_none());
-        assert_eq!(listing(root.path(), None, true).unwrap().entries.len(), 3);
+        assert_eq!(
+            listing(root.path(), None, true, false)
+                .unwrap()
+                .entries
+                .len(),
+            3
+        );
 
-        let inner = listing(root.path(), Some("app"), false).unwrap();
+        let with_files = listing(root.path(), None, false, true).unwrap();
+        let names: Vec<&str> = with_files.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["app", "Notes", "file.txt"], "folders first");
+        let file = with_files.entries.last().unwrap();
+        assert_eq!(file.kind, Kind::File);
+        assert_eq!(file.size, Some(0));
+        assert!(with_files.entries[0].size.is_none());
+
+        let inner = listing(root.path(), Some("app"), false, false).unwrap();
         assert_eq!(inner.markers, [".git", "Cargo.toml"]);
         assert_eq!(inner.parent.as_deref(), Some(top.path.as_path()));
     }
@@ -182,9 +231,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let inside = root.path().join("inside");
         std::fs::create_dir(&inside).unwrap();
-        let err = listing(&inside, Some(".."), false).unwrap_err();
+        let err = listing(&inside, Some(".."), false, true).unwrap_err();
         assert!(err.is::<OutsideRoot>());
-        let err = listing(&inside, Some("/"), false).unwrap_err();
+        let err = listing(&inside, Some("/"), false, true).unwrap_err();
         assert!(err.is::<OutsideRoot>());
     }
 }

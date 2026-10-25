@@ -184,6 +184,7 @@ impl Server {
         });
         let api = Router::new()
             .route("/api/state", get(api_state))
+            .route("/api/sessions", get(api_sessions))
             .route(
                 "/api/sessions/{id}",
                 get(api_session).delete(settings::delete_session),
@@ -420,6 +421,36 @@ async fn api_state(State(state): Shared) -> Result<Json<Value>, ApiError> {
     })))
 }
 
+#[derive(Deserialize)]
+struct SessionsQuery {
+    /// Only sessions started in this directory.
+    cwd: Option<PathBuf>,
+    limit: Option<usize>,
+    /// Include subagent sessions.
+    #[serde(default)]
+    subagents: bool,
+}
+
+/// Saved sessions, newest first, from the daemon's session index.
+async fn api_sessions(Query(query): Query<SessionsQuery>) -> Result<Json<Value>, ApiError> {
+    let limit = query.limit.unwrap_or(50).min(1000);
+    let cwd = query.cwd.map(|c| c.canonicalize().unwrap_or(c));
+    let sessions = tokio::task::spawn_blocking(move || {
+        // Filtering by directory reads more heads to find enough matches.
+        let scanned = if cwd.is_some() { limit.max(500) } else { limit };
+        let all = session::list(query.subagents, scanned)?;
+        Ok::<_, anyhow::Error>(
+            all.into_iter()
+                .filter(|s| cwd.as_ref().is_none_or(|c| s.meta.cwd == *c))
+                .take(limit)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .context("the session index task failed")??;
+    Ok(Json(json!({ "sessions": sessions })))
+}
+
 async fn api_session(Path(id): Path<String>) -> Response {
     match session::load(&id) {
         Ok(t) => {
@@ -494,6 +525,7 @@ async fn api_command(
             client_ref: request.client_ref,
             agent: None,
             tab: None,
+            workspace: None,
             attachments: Vec::new(),
         },
     };
@@ -576,7 +608,9 @@ async fn client_socket(state: Arc<AppState>, socket: WebSocket, version: Option<
     let (reply_tx, mut replies) = mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
         loop {
+            // Biased, so a command's broadcasts go out before its reply.
             let text: String = tokio::select! {
+                biased;
                 message = outbox.recv() => match message {
                     Ok(text) => text.to_string(),
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -615,6 +649,7 @@ async fn client_socket(state: Arc<AppState>, socket: WebSocket, version: Option<
                         client_ref: Some(r),
                         agent: None,
                         tab: None,
+                        workspace: None,
                         attachments: Vec::new(),
                     }),
                     Err(err) => Some(ServerMessage::Error {

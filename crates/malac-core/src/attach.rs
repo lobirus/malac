@@ -52,6 +52,32 @@ pub fn is_attachment(text: &str) -> bool {
     text.starts_with(TAG)
 }
 
+/// Recalled memories are attached to a prompt in a block starting so.
+const RECALLED: &str = "<recalled-memories>";
+
+/// What the user typed, without attached files or recalled memories.
+pub fn typed_text(content: &[Block]) -> String {
+    content
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text } if !is_attachment(text) && !text.starts_with(RECALLED) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The block that names an image sent with a prompt, as attached images have.
+pub fn image_header(name: &str, bytes: u64) -> String {
+    format!(
+        "{TAG}path=\"{}\" kind=\"image\" size=\"{}\"></attachment>",
+        escape(name),
+        human_size(bytes)
+    )
+}
+
 /// The path named by an attachment block.
 pub fn attached_path(text: &str) -> Option<String> {
     let rest = text.strip_prefix(TAG)?.strip_prefix("path=\"")?;
@@ -113,12 +139,12 @@ fn image_type(path: &Path) -> Option<&'static str> {
 }
 
 fn image(path: PathBuf, shown: &str, size: u64, media_type: &str) -> Result<Attachment> {
-    let header = format!(
-        "{TAG}path=\"{}\" kind=\"image\" size=\"{}\">",
-        escape(shown),
-        human_size(size)
-    );
     if size > MAX_IMAGE_BYTES {
+        let header = format!(
+            "{TAG}path=\"{}\" kind=\"image\" size=\"{}\">",
+            escape(shown),
+            human_size(size)
+        );
         let note = format!(
             "the image is {}, more than the {} limit",
             human_size(size),
@@ -137,7 +163,7 @@ fn image(path: PathBuf, shown: &str, size: u64, media_type: &str) -> Result<Atta
     let data = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
     Ok(Attachment {
         blocks: vec![
-            Block::text(format!("{header}</attachment>")),
+            Block::text(image_header(shown, size)),
             Block::Image {
                 media_type: media_type.to_owned(),
                 data: BASE64.encode(data),

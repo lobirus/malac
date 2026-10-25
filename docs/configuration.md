@@ -158,17 +158,18 @@ The agent has two tools for its own configuration. `malac_settings` shows the co
 | Key | Default | Meaning |
 |---|---|---|
 | `idle_minutes` | `120` | Exit after this long with no clients, running agents, jobs or pending approvals; `0` never exits |
-| `browse_root` | home directory | The directory picker (`GET /api/fs`) lists only directories below this (`~/` allowed) |
+| `browse_root` | home directory | The folder and file pickers (`GET /api/fs`) list only what is below this (`~/` allowed) |
 
 The daemon reads `[daemon]`, `[web]`, `[update]` and `[control]` from the user config only. Each tab loads the full configuration for its own directory. The daemon keeps the environment it was started with, so after changing an API key variable, restart it (`malac daemon restart`) or store the key with `malac provider add --api-key-stdin`.
 
 ## `[ui]` and `[web]`
 
+The daemon always serves the web UI; `malac web` prints or opens its address.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
 | `ui.tui` | `true` | Full-screen terminal UI; `false` uses the line-based interface (`--plain`) |
-| `web.enabled` | `false` | Serve a web UI with every session that runs in its own process, for that session's runtime; the daemon always serves one |
-| `web.remote` | `false` | The daemon (and `--web`) listen on all interfaces instead of `web.host` |
+| `web.remote` | `false` | The daemon listens on all interfaces instead of `web.host` (or start it with `malac daemon start --remote`) |
 | `web.host` | `127.0.0.1` | Bind address when not remote |
 | `web.port` | `7700` | Port of the daemon and its web UI; any free port when it is taken |

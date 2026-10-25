@@ -13,7 +13,10 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::client::{self, DaemonFile};
 use crate::daemon::ServeArgs;
-use crate::protocol::{AttachmentInput, Command};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
+use crate::protocol::{AttachmentInput, Command, ImageInput};
 
 /// A connection the event loop takes over: the client, its events and the
 /// snapshot that opened it.
@@ -55,6 +58,7 @@ pub enum Reply {
 #[derive(Debug, Clone)]
 pub enum Rest {
     History { agent: AgentId },
+    Sessions,
     Models,
     Tools,
     Memory,
@@ -199,6 +203,11 @@ impl Backend {
         true
     }
 
+    /// Asks the daemon for saved sessions, newest first.
+    pub fn sessions(&self) {
+        self.get("/api/sessions?limit=200".into(), Rest::Sessions);
+    }
+
     pub fn discover_models(&self) {
         self.get("/api/models".into(), Rest::Models);
     }
@@ -275,13 +284,24 @@ impl App {
             None => tab.model.take(),
             Some(_) => None,
         };
+        // Pasted images travel with the prompt, so a daemon elsewhere gets them too.
+        let (pasted, files): (Vec<&Attachment>, Vec<&Attachment>) =
+            prompt.attachments.iter().partition(|a| a.inline.is_some());
         let command = Command::Prompt {
             tab: Some(id.clone()),
             agent: tab.agent.clone(),
             text: prompt.text.clone(),
-            images: Vec::new(),
-            attachments: prompt
-                .attachments
+            images: pasted
+                .iter()
+                .filter_map(|a| {
+                    Some(ImageInput {
+                        media_type: "image/png".into(),
+                        data: BASE64.encode(&a.inline.as_ref()?.0),
+                        name: Some(a.name.clone()),
+                    })
+                })
+                .collect(),
+            attachments: files
                 .iter()
                 .map(|a| AttachmentInput {
                     path: a.path.display().to_string(),
@@ -473,6 +493,17 @@ impl App {
                     summarize(&tools, name, input)
                 });
             }
+            (Rest::Sessions, Ok(value)) => {
+                self.sessions =
+                    serde_json::from_value(value["sessions"].clone()).unwrap_or_default();
+                self.recent = recent_sessions(&self.tab_cwd(), &self.tabs, &self.sessions);
+                let rows = self.session_rows();
+                if let Some(Overlay::Sessions(picker)) = &mut self.overlay {
+                    picker.set_rows(rows);
+                }
+            }
+            // The lists stay as they were.
+            (Rest::Sessions, Err(_)) => {}
             (Rest::Models, Ok(value)) => {
                 self.discovered =
                     serde_json::from_value(value["providers"].clone()).unwrap_or_default();
@@ -610,13 +641,13 @@ impl App {
     /// Folders sessions were started in, newest first, for the folder browser.
     pub fn recent_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = self.tabs.iter().map(|t| t.cwd.clone()).collect();
-        for summary in session::list(false, 200).unwrap_or_default() {
+        for summary in &self.sessions {
             if dirs.len() >= 8 {
                 break;
             }
-            let dir = summary.meta.cwd;
-            if !dirs.contains(&dir) && dir.is_dir() {
-                dirs.push(dir);
+            let dir = &summary.meta.cwd;
+            if !dirs.contains(dir) {
+                dirs.push(dir.clone());
             }
         }
         dirs.retain(|d| *d != self.tab_cwd());

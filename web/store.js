@@ -265,6 +265,9 @@ function receive(message) {
       return invalidate("home", "sidebar", "settings");
     case "mode":
       return modeChanged(message);
+    case "clients":
+      if (state.daemon) state.daemon.clients = message.clients;
+      return invalidate("settings", "home");
     case "notice":
       return toast(message.message, message.level === "error" ? "error" : message.level === "warning" ? "warning" : "info");
     case "reloaded":
@@ -404,7 +407,9 @@ function jobChanged(job) {
   invalidate("jobs", "sidebar", "tabs");
 }
 
-function modeChanged({ mode, tab }) {
+function modeChanged({ mode, tab, workspace }) {
+  // A mode for every tab names its workspace; it may be another one.
+  if (!tab && workspace && workspace !== state.workspace?.id) return;
   for (const t of state.workspace?.tabs ?? []) {
     if (!tab || t.id === tab) t.mode = mode;
   }
@@ -485,7 +490,7 @@ function syncTabState() {
 
 export async function loadHistoryList() {
   try {
-    const data = await api("/api/state");
+    const data = await api("/api/sessions?limit=100");
     state.sessions = data.sessions ?? [];
     for (const session of state.sessions) {
       session.title = cleanTitle(session.title);

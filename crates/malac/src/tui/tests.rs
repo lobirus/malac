@@ -735,6 +735,7 @@ async fn choosing_a_folder_opens_a_tab_there() {
         client_ref: None,
         agent: None,
         tab: Some("t2".into()),
+        workspace: None,
         attachments: Vec::new(),
     };
     app.on_update(Update::Reply(
@@ -903,6 +904,7 @@ async fn approvals_come_and_go_with_any_client() {
     pending.pending = vec![crate::protocol::PendingApproval {
         request: malac_core::permission::PermissionRequest {
             id: "r0".into(),
+            call_id: "c0".into(),
             agent: AGENT.into(),
             agent_label: "main".into(),
             tool: "edit".into(),

@@ -5271,6 +5271,11 @@ dl.kv.paths dt {
   gap: 4px;
 }
 
+.fs-size {
+  flex: none;
+  font-size: 12px;
+}
+
 .fs-name-field {
   display: grid;
   gap: 4px;

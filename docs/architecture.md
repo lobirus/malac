@@ -107,7 +107,7 @@ The protocol is described in [protocol.md](protocol.md); `client.rs` is a typed 
 
 ## Web UI and editor
 
-The daemon serves a single-page UI from the binary; `malac web` starts the daemon if needed and prints or opens its URL. API requests need the token, and requests from this machine must name a loopback host, which blocks DNS rebinding. The VS Code extension starts `malac web --port 0 --json-ready --cwd <dir>`, which prints one JSON line with the URL and token and then stays connected while the panel is open, and embeds the page in a webview. `--web` or `/web` in a session that runs in its own process serves a separate UI for that session's runtime.
+The daemon serves a single-page UI from the binary; `malac web` starts the daemon if needed and prints or opens its URL. API requests need the token, and requests from this machine must name a loopback host, which blocks DNS rebinding. The VS Code extension starts `malac web --port 0 --json-ready --cwd <dir>`, which prints one JSON line with the URL and token and then stays connected while the panel is open, and embeds the page in a webview. Only the line interface's in-process fallback (when the daemon cannot be reached) serves a separate UI, with `/web`, for its own runtime.
 
 ## Self-update
 

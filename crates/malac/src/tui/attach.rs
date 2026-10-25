@@ -1,8 +1,9 @@
 //! Files and images attached to a prompt, as chips above it: what a file
 //! is, recognising paths a terminal pastes for dropped files, and the
-//! clipboard's image on macOS. The daemon reads the files when the prompt
-//! is sent; the transcript shows them from the `[attached: …]` line its
-//! `user_message` event carries.
+//! clipboard's image on macOS. The daemon reads attached files when the
+//! prompt is sent; a pasted image has no file it could read, so its bytes
+//! travel with the prompt. The transcript shows both from the
+//! `[attached: …]` line the `user_message` event carries.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,18 @@ pub struct Attachment {
     pub kind: Kind,
     /// Bytes, or entries for a directory.
     pub size: u64,
+    /// A pasted image's PNG bytes, sent with the prompt instead of a path.
+    pub inline: Option<Inline>,
+}
+
+/// Image bytes carried by an attachment.
+#[derive(Clone, PartialEq)]
+pub struct Inline(pub Vec<u8>);
+
+impl std::fmt::Debug for Inline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Inline({} bytes)", self.0.len())
+    }
 }
 
 impl Attachment {
@@ -47,7 +60,21 @@ impl Attachment {
             name,
             kind,
             size,
+            inline: None,
         })
+    }
+
+    /// A PNG from the clipboard, named `name`.
+    pub fn pasted(name: String, png: Vec<u8>) -> Self {
+        Self {
+            path: PathBuf::from(&name),
+            kind: Kind::Image {
+                pixels: pixels_of(&png),
+            },
+            size: png.len() as u64,
+            name,
+            inline: Some(Inline(png)),
+        }
     }
 
     /// `▤ src/main.rs · 2.1 KB`, `▣ shot.png · 640×480 · 88 KB`, `▥ src/ · 12 entries`.
@@ -79,14 +106,7 @@ fn display_name(path: &Path, cwd: &Path) -> String {
             return relative.display().to_string();
         }
     }
-    // Pasted images live in a temporary folder whose path says nothing.
-    let temp = std::env::temp_dir();
-    let temp = temp.canonicalize().unwrap_or(temp);
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    match path.file_name() {
-        Some(name) if canonical.starts_with(&temp) => name.to_string_lossy().into_owned(),
-        _ => super::app::short_path(path),
-    }
+    super::app::short_path(path)
 }
 
 fn is_image(path: &Path) -> bool {
@@ -106,9 +126,12 @@ fn head(path: &Path, len: usize) -> Vec<u8> {
     buf
 }
 
-/// Image size from the PNG, GIF or JPEG header.
 fn pixels(path: &Path) -> Option<(u32, u32)> {
-    let data = head(path, 64 * 1024);
+    pixels_of(&head(path, 64 * 1024))
+}
+
+/// Image size from the PNG, GIF or JPEG header.
+fn pixels_of(data: &[u8]) -> Option<(u32, u32)> {
     let be32 = |at: usize| Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?));
     let be16 = |at: usize| Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?) as u32);
     let le16 = |at: usize| Some(u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?) as u32);
@@ -223,8 +246,9 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Saves the clipboard's image as a PNG in `dir`, through `osascript`.
-pub fn clipboard_image(dir: &Path) -> Result<PathBuf, String> {
+/// The clipboard's image as a PNG attachment, read through `osascript`
+/// by way of a temporary file in `dir`.
+pub fn clipboard_image(dir: &Path) -> Result<Attachment, String> {
     if !cfg!(target_os = "macos") {
         return Err("Ctrl-V attaches clipboard images on macOS only".into());
     }
@@ -255,7 +279,12 @@ pub fn clipboard_image(dir: &Path) -> Result<PathBuf, String> {
     }
     let output = command.output().map_err(|e| format!("osascript: {e}"))?;
     match String::from_utf8_lossy(&output.stdout).trim() {
-        "ok" => Ok(path),
+        "ok" => {
+            let png = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()));
+            let _ = std::fs::remove_file(&path);
+            let name = format!("pasted-{stamp}.png");
+            Ok(Attachment::pasted(name, png?))
+        }
         "none" => Err("no image on the clipboard".into()),
         _ => Err(format!(
             "could not read the clipboard: {}",

@@ -18,14 +18,20 @@ use malac_core::provider::{Completion, Delta, DeltaSink, Provider, Request};
 use serde_json::Value;
 
 /// A malac home for this test binary, with a mock model and no control
-/// service. Each test binary runs in its own process.
+/// service, whose pickers browse `browse/`. Each test binary runs in its
+/// own process.
 pub fn home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap().keep();
+        let browse = dir.join("browse");
+        std::fs::create_dir_all(browse.join("app/src")).unwrap();
+        std::fs::write(browse.join("app/Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(browse.join("app/notes.txt"), "hello\n").unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            r#"
+            format!(
+                r#"
 model = "mock/test"
 mode = "ask"
 
@@ -48,12 +54,26 @@ enabled = false
 
 [daemon]
 idle_minutes = 0
+browse_root = "{}"
 "#,
+                browse.display()
+            ),
         )
         .unwrap();
         unsafe { std::env::set_var("MALAC_HOME", &dir) };
         dir
     })
+}
+
+/// Runs one test at a time in this binary, on a home without workspaces,
+/// so tests do not see each other's.
+pub async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
+    let home = home();
+    let _ = std::fs::remove_dir_all(home.join("workspaces"));
+    let _ = std::fs::remove_file(home.join("state.json"));
+    guard
 }
 
 /// A project directory outside the malac home.

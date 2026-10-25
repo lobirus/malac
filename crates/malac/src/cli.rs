@@ -60,18 +60,6 @@ pub struct RunArgs {
     /// Name the new tab, or with -n the new workspace.
     #[arg(long)]
     pub name: Option<String>,
-    /// Also serve the web UI for this session (default: `web.enabled`).
-    #[arg(long, overrides_with = "no_web")]
-    pub web: bool,
-    /// Do not serve the web UI, even if `web.enabled` is set.
-    #[arg(long)]
-    pub no_web: bool,
-    /// Serve the web UI to other machines too (implies --web).
-    #[arg(long)]
-    pub web_remote: bool,
-    /// Port for the web UI (default: `web.port`, or any free port if taken).
-    #[arg(long)]
-    pub web_port: Option<u16>,
 }
 
 /// Options shared by the terminal and `malac web`.

@@ -4,14 +4,15 @@ mod common;
 
 use common::*;
 use malac::client::{Client, DaemonFile};
-use malac::protocol::{AttachmentInput, Command, ServerMessage, TabSpec};
+use malac::protocol::{AttachmentInput, Command, ImageInput, ServerMessage, TabSpec};
 use malac_core::attach::AttachmentKind;
 use malac_core::event::{Event, TurnStatus};
-use malac_core::permission::Decision;
+use malac_core::permission::{Decision, Mode};
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_clients_share_tabs_agents_and_approvals() {
+    let _guard = exclusive().await;
     let script = Scripted::new(vec![
         tool_call("c1", "bash", json!({ "command": "echo approved-run" })),
         answer("ran it"),
@@ -28,6 +29,11 @@ async fn two_clients_share_tabs_agents_and_approvals() {
 
     let (a, mut a_events, snapshot) = Client::connect(&file).await.unwrap();
     let (b, mut b_events, _) = Client::connect(&file).await.unwrap();
+    wait_for(&mut a_events, |m| match m {
+        ServerMessage::Clients { clients: 2 } => Some(()),
+        _ => None,
+    })
+    .await;
     assert_eq!(snapshot.daemon.version, env!("CARGO_PKG_VERSION"));
     assert!(!snapshot.daemon.version_mismatch);
     assert!(snapshot.workspace.is_none(), "nothing exists yet");
@@ -43,6 +49,7 @@ async fn two_clients_share_tabs_agents_and_approvals() {
         panic!("workspace_opened expected, got {opened:?}");
     };
     assert_eq!(workspace.name, "work");
+    let work = workspace.id.clone();
 
     let project = project(&[("notes.txt", "the secret word is pancake\n")]);
     let reply = a
@@ -88,6 +95,14 @@ async fn two_clients_share_tabs_agents_and_approvals() {
     };
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].kind, AttachmentKind::Text);
+    // A starting turn updates the workspace's running count.
+    wait_for(&mut b_events, |m| match m {
+        ServerMessage::WorkspaceUpdated { workspace } if workspace.id == work => {
+            (workspace.running == 1).then_some(())
+        }
+        _ => None,
+    })
+    .await;
 
     // Both clients see the question, tagged with the tab.
     let (request_id, event_tab) = wait_for(&mut a_events, |m| match m {
@@ -113,6 +128,7 @@ async fn two_clients_share_tabs_agents_and_approvals() {
     let (_late, _, snapshot) = Client::connect(&file).await.unwrap();
     assert_eq!(snapshot.pending.len(), 1);
     assert_eq!(snapshot.pending[0].request.id, request_id);
+    assert_eq!(snapshot.pending[0].request.call_id, "c1");
     assert_eq!(snapshot.pending[0].tab.as_deref(), Some(tab.as_str()));
     let view = snapshot.workspace.expect("the last workspace");
     assert_eq!(view.name, "work");
@@ -145,6 +161,19 @@ async fn two_clients_share_tabs_agents_and_approvals() {
     .await;
     assert_eq!(status, TurnStatus::Completed);
     assert_eq!(text, "ran it");
+    wait_for(&mut b_events, |m| match m {
+        ServerMessage::WorkspaceUpdated { workspace } if workspace.running == 0 => Some(()),
+        _ => None,
+    })
+    .await;
+    let sessions: serde_json::Value = a
+        .get(&format!("/api/sessions?cwd={}", project.display()))
+        .await
+        .unwrap();
+    let sessions = sessions["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["id"], agent.as_str());
+    assert_eq!(sessions[0]["title"], "run it", "titles skip attached files");
     let requests = script.requests.lock().unwrap().clone();
     let first = request_text(&requests[0]);
     assert!(
@@ -174,6 +203,23 @@ async fn two_clients_share_tabs_agents_and_approvals() {
     .await;
     assert_eq!(renamed.active_agent.as_deref(), Some(agent.as_str()));
 
+    a.request(Command::Mode {
+        mode: Mode::Edits,
+        tab: None,
+    })
+    .await
+    .unwrap();
+    let scope = wait_for(&mut b_events, |m| match m {
+        ServerMessage::Mode {
+            mode: Mode::Edits,
+            tab: None,
+            workspace,
+        } => Some(workspace.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(scope.as_deref(), Some(work.as_str()));
+
     let second = a
         .request(Command::AgentStart {
             tab: tab.clone(),
@@ -201,6 +247,37 @@ async fn two_clients_share_tabs_agents_and_approvals() {
         .find(|s| s.snapshot.info.id == helper)
         .unwrap();
     assert_eq!(helper_view.snapshot.model, "mock/fast");
+
+    // Closing takes an agent out of its tab, whether it ran or not.
+    for (closing, left) in [(&agent, vec![helper.clone()]), (&helper, vec![])] {
+        a.request(Command::AgentClose {
+            tab: tab.clone(),
+            agent: closing.clone(),
+        })
+        .await
+        .unwrap();
+        let after = wait_for(&mut b_events, |m| match m {
+            ServerMessage::TabUpdated { tab, .. } if tab.agents == left => Some(tab.clone()),
+            _ => None,
+        })
+        .await;
+        assert!(
+            after
+                .snapshots
+                .iter()
+                .all(|s| s.snapshot.info.id != *closing)
+        );
+        assert_eq!(after.active_agent, left.first().cloned());
+    }
+    assert!(hub.live_agents().is_empty(), "closed agents are unloaded");
+    let reopened = a
+        .request(Command::AgentOpen {
+            agent: agent.clone(),
+            tab: Some(tab.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reopened, ServerMessage::Ack { agent: Some(ref id), .. } if *id == agent));
 
     let busy_close = b
         .request(Command::TabClose {
@@ -236,6 +313,7 @@ async fn two_clients_share_tabs_agents_and_approvals() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rest_api_lists_directories_and_runs_commands() {
+    let _guard = exclusive().await;
     let script = Scripted::new(Vec::new());
     let daemon = start_daemon(script, false).await;
     let file = daemon.file().clone();
@@ -258,13 +336,46 @@ async fn rest_api_lists_directories_and_runs_commands() {
         .unwrap();
     assert_eq!(foreign_host.status(), 403, "DNS rebinding is refused");
 
-    let home = dirs::home_dir().unwrap();
+    let root = home().join("browse").canonicalize().unwrap();
     let listing: serde_json::Value = malac::client::get(&file, "/api/fs").await.unwrap();
     assert_eq!(
         std::path::Path::new(listing["root"].as_str().unwrap()),
-        home.canonicalize().unwrap()
+        root
     );
-    assert!(listing["entries"].is_array());
+    assert_eq!(listing["entries"][0]["name"], "app");
+    assert_eq!(listing["entries"][0]["kind"], "directory");
+    assert_eq!(listing["entries"][0]["markers"], json!(["Cargo.toml"]));
+    let folders: serde_json::Value = malac::client::get(&file, "/api/fs?path=app").await.unwrap();
+    let names: Vec<&str> = folders["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["src"], "folders only by default");
+    let files: serde_json::Value = malac::client::get(&file, "/api/fs?path=app&files=true")
+        .await
+        .unwrap();
+    let entries: Vec<(&str, &str, Option<u64>)> = files["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap(),
+                e["kind"].as_str().unwrap(),
+                e["size"].as_u64(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            ("src", "directory", None),
+            ("Cargo.toml", "file", Some(10)),
+            ("notes.txt", "file", Some(6)),
+        ]
+    );
     let outside = http
         .get(format!("{}/api/fs?path=/", file.url))
         .bearer_auth(&file.token)
@@ -274,8 +385,19 @@ async fn rest_api_lists_directories_and_runs_commands() {
     assert_eq!(
         outside.status(),
         403,
-        "the picker stays inside the home directory"
+        "the picker stays inside its root, files or not"
     );
+    let outside_files = http
+        .get(format!("{}/api/fs?path=/etc&files=true", file.url))
+        .bearer_auth(&file.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outside_files.status(), 403);
+    let sessions: serde_json::Value = malac::client::get(&file, "/api/sessions?limit=5")
+        .await
+        .unwrap();
+    assert!(sessions["sessions"].is_array());
 
     let reply: serde_json::Value = malac::client::post(
         &file,
@@ -308,5 +430,200 @@ async fn rest_api_lists_directories_and_runs_commands() {
         .unwrap();
     assert_eq!(stopped["stopping"], true);
     assert_eq!(hub.stopped().await, "stopped by a client");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tab_create_switches_a_connection_to_its_workspace() {
+    let _guard = exclusive().await;
+    let daemon = start_daemon(Scripted::new(Vec::new()), false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, mut events, snapshot) = Client::connect(&file).await.unwrap();
+    assert!(snapshot.workspace.is_none());
+
+    let project = project(&[]);
+    let reply = client
+        .request(Command::TabCreate(TabSpec {
+            cwd: project.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let ServerMessage::Ack {
+        tab: Some(tab),
+        workspace: Some(workspace),
+        ..
+    } = reply
+    else {
+        panic!("ack with a tab and its workspace expected, got {reply:?}");
+    };
+    // The announcement came before the reply.
+    let mut announced = None;
+    while let Ok(message) = events.try_recv() {
+        if let ServerMessage::TabCreated {
+            tab: created,
+            workspace: home,
+            ..
+        } = message
+        {
+            announced = Some((created.id, home));
+        }
+    }
+    assert_eq!(announced, Some((tab.clone(), workspace.clone())));
+
+    let reply = client
+        .request(Command::Snapshot { workspace: None })
+        .await
+        .unwrap();
+    let ServerMessage::Snapshot(snapshot) = reply else {
+        panic!("snapshot expected");
+    };
+    let view = snapshot
+        .workspace
+        .expect("the connection has a workspace now");
+    assert_eq!(view.id, workspace);
+    assert_eq!(view.name, "default");
+    assert_eq!(view.active_tab.as_deref(), Some(tab.as_str()));
+
+    hub.request_stop("done");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_running_agent_cancels_it() {
+    let _guard = exclusive().await;
+    let script = Scripted::new(vec![tool_call(
+        "c1",
+        "bash",
+        json!({ "command": "echo never" }),
+    )]);
+    let daemon = start_daemon(script, false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, mut events, _) = Client::connect(&file).await.unwrap();
+    let project = project(&[]);
+    let launched = client
+        .launch(malac::protocol::Launch {
+            workspace: malac::protocol::WorkspaceChoice::New,
+            cwd: project.clone(),
+            prompt: Some("run something".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (tab, agent) = (launched.tab.unwrap(), launched.agent.unwrap());
+    // Waiting for approval, so the turn is still running.
+    wait_for(&mut events, |m| match m {
+        ServerMessage::Event { envelope, .. } => {
+            matches!(envelope.event, Event::PermissionRequested { .. }).then_some(())
+        }
+        _ => None,
+    })
+    .await;
+    assert!(hub.agent_busy(&agent));
+
+    client
+        .request(Command::AgentClose {
+            tab: tab.clone(),
+            agent: agent.clone(),
+        })
+        .await
+        .unwrap();
+    let mut cancelled = false;
+    let mut resolved = false;
+    let mut removed = false;
+    while !(cancelled && resolved && removed) {
+        match wait_for(&mut events, |m| Some(m.clone())).await {
+            ServerMessage::Event { envelope, .. } => match envelope.event {
+                Event::TurnFinished { status, .. } => {
+                    assert_eq!(status, TurnStatus::Cancelled);
+                    cancelled = true;
+                }
+                Event::PermissionResolved { allowed, .. } => {
+                    assert!(!allowed);
+                    resolved = true;
+                }
+                _ => {}
+            },
+            ServerMessage::TabUpdated { tab: view, .. } if view.agents.is_empty() => removed = true,
+            _ => {}
+        }
+    }
+    assert!(hub.pending_requests().is_empty());
+    assert!(
+        malac_core::session::summary(&agent).is_some(),
+        "its session stays"
+    );
+
+    hub.request_stop("done");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pasted_images_travel_with_the_prompt() {
+    let _guard = exclusive().await;
+    let script = Scripted::new(vec![answer("a red square")]);
+    let daemon = start_daemon(script.clone(), false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, mut events, _) = Client::connect(&file).await.unwrap();
+    let project = project(&[]);
+    let reply = client
+        .request(Command::TabCreate(TabSpec {
+            cwd: project,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let ServerMessage::Ack { tab: Some(tab), .. } = reply else {
+        panic!("ack expected");
+    };
+    client
+        .request(Command::Prompt {
+            tab: Some(tab),
+            agent: None,
+            text: "what is this?".into(),
+            images: vec![ImageInput {
+                media_type: "image/png".into(),
+                data: "iVBORw0KGgo=".into(),
+                name: Some("pasted-1.png".into()),
+            }],
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+    let shown = wait_for(&mut events, |m| match m {
+        ServerMessage::Event { envelope, .. } => match &envelope.event {
+            Event::UserMessage { text } => Some(text.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    assert_eq!(shown, "what is this?\n\n[attached: pasted-1.png]");
+    wait_for(&mut events, |m| match m {
+        ServerMessage::Event { envelope, .. } => {
+            matches!(envelope.event, Event::TurnFinished { .. }).then_some(())
+        }
+        _ => None,
+    })
+    .await;
+    let request = script.last_request();
+    let images: Vec<&str> = request
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            malac_core::Block::Image { data, .. } => Some(data.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images, ["iVBORw0KGgo="]);
+
+    hub.request_stop("done");
     server.await.unwrap().unwrap();
 }

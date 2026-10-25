@@ -385,10 +385,9 @@ impl App {
         rows
     }
 
-    fn session_rows(&self) -> Vec<Row> {
-        session::list(false, 200)
-            .unwrap_or_default()
-            .into_iter()
+    pub(super) fn session_rows(&self) -> Vec<Row> {
+        self.sessions
+            .iter()
             .map(|s| {
                 let when = s
                     .updated
@@ -407,7 +406,7 @@ impl App {
                         .tabs
                         .iter()
                         .any(|t| t.agents.iter().any(|a| *a == s.meta.id)),
-                    value: s.meta.id,
+                    value: s.meta.id.clone(),
                 }
             })
             .collect()
@@ -668,6 +667,7 @@ impl App {
                 self.overlay = Some(Overlay::Menu(Menu::new(Place::Tabs, items, true)));
             }
             Action::Sessions => {
+                self.backend.sessions();
                 let picker = Picker::new(
                     PickKind::Session,
                     "Open session",

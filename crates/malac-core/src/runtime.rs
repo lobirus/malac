@@ -330,6 +330,23 @@ impl Runtime {
             .collect()
     }
 
+    /// Cancels an agent and its subagents and forgets them; their tasks end
+    /// with their turns. Their transcripts stay on disk.
+    pub fn remove_agent(&self, id: &str) {
+        self.cancel_tree(id);
+        let mut agents = self.agents.lock().unwrap();
+        let mut doomed = vec![id.to_owned()];
+        while let Some(next) = doomed.pop() {
+            let children: Vec<AgentId> = agents
+                .values()
+                .filter(|h| h.info().parent.as_deref() == Some(next.as_str()))
+                .map(|h| h.id.clone())
+                .collect();
+            agents.remove(&next);
+            doomed.extend(children);
+        }
+    }
+
     /// Cancels the agent's turn and those of all its descendants.
     pub fn cancel_tree(&self, id: &str) {
         if let Some(handle) = self.agent(id) {

@@ -165,6 +165,10 @@ pub struct ImageInput {
     pub media_type: String,
     /// Base64.
     pub data: String,
+    /// Shows the image as an attachment of this name, e.g. a pasted
+    /// screenshot; the image itself travels here, not as a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +264,10 @@ pub enum ServerMessage {
         agent: Option<AgentId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab: Option<TabId>,
+        /// The workspace the tab belongs to, for commands that create or
+        /// pick one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
     },
@@ -345,11 +353,18 @@ pub enum ServerMessage {
         #[serde(default)]
         tab: Option<TabId>,
     },
-    /// A permission mode changed: one tab's, or every tab's when `tab` is null.
+    /// A permission mode changed: one tab's, or every tab of `workspace`
+    /// when `tab` is null.
     Mode {
         mode: Mode,
         #[serde(default)]
         tab: Option<TabId>,
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+    },
+    /// The number of connected clients changed.
+    Clients {
+        clients: usize,
     },
     /// Settings were applied; refetch cached resources.
     Reloaded,

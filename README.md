@@ -79,7 +79,6 @@ malac -y add a --json flag to the export command and test it
 git diff | malac review this change
 malac                        # interactive
 malac -c                     # continue the last session in this directory
-malac --web                  # interactive, with the web UI attached
 malac web --open             # the daemon's web UI
 malac --plain -n             # a fresh workspace, served by the daemon
 malac daemon status          # what the daemon is doing
@@ -155,12 +154,11 @@ Permission prompts go to every connected client, and the first answer wins; a cl
 | `-w, --workspace <name\|id>` | Open a workspace (daemon clients) |
 | `--name <name>` | Name the new tab, or with `-n` the new workspace |
 | `--profile <name>` | Apply `[profiles.<name>]` from the config |
-| `--web` / `--no-web` | Serve the web UI for this session too, or not (default: `web.enabled`) |
-| `--web-remote` | Serve it to other machines as well (default: `web.remote`) |
-| `--web-port <port>` | Web UI port (default: `web.port`, or any free port) |
 | `--no-control` | Do not connect the control service |
 | `-v, --verbose` | Show model reasoning |
 | `--plain` | Line-based interface instead of the full-screen UI |
+
+The daemon serves the web UI for every session, so no flag is needed for it: `malac web` prints its address, and `web.remote = true` or `malac daemon start --remote` opens it to other machines.
 
 | Subcommand | |
 |---|---|
@@ -253,7 +251,7 @@ On macOS, desktop control needs Screen Recording and Accessibility. macOS grants
 
 `malac web` starts the daemon if needed and prints its UI address, `127.0.0.1:7700` by default, with a token that is part of the URL (kept in `~/.malac/daemon.token`; delete it to get a new one). The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts, and every setting can be changed from it.
 
-The web UI is local-only by default. `web.remote = true` (or starting the daemon with `--remote`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. `web.enabled = true` serves the UI alongside every interactive terminal session.
+The web UI is local-only by default. `web.remote = true` (or starting the daemon with `--remote`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. The daemon always serves the UI, so terminal sessions need no flag for it; `malac web` prints its address.
 
 The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. Download `malac-vscode-<version>.vsix` from the [latest release](https://github.com/lobirus/malac/releases/latest) and install it with `code --install-extension malac-vscode-<version>.vsix`, or via Extensions → … → Install from VSIX. The same file works in VS Code–compatible editors such as Cursor, Windsurf and VSCodium. It is not on the Marketplace yet. To work on it, open `editors/vscode` in VS Code and press F5, or:
 
@@ -281,7 +279,7 @@ Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "
 - **Your data stays local.** Transcripts are JSONL files in `~/.malac/sessions` and memories are Markdown files, both readable and deletable. Anything you paste into a prompt, including an API key, ends up in that session's transcript. Prefer `api_key_env` or `malac provider add --api-key-stdin`, which writes `~/.malac/credentials.toml` with owner-only permissions.
 - **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
 - **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.
-- **The web UI is local unless you say otherwise.** It needs the per-run token in the URL. `--web-remote` listens on your network over plain HTTP; use an SSH tunnel or a TLS proxy outside trusted networks.
+- **The web UI is local unless you say otherwise.** It needs the per-run token in the URL. `web.remote = true` (or `malac daemon start --remote`) listens on your network over plain HTTP; use an SSH tunnel or a TLS proxy outside trusted networks.
 - **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions and the daemon keep their version until you restart them (`malac daemon restart`).
 - **The daemon keeps running.** Agents started through it continue after the terminal closes, until they finish; the daemon itself exits after two idle hours. It keeps the environment it was started with, so restart it after changing API key variables.
 - **Models without vision** get screenshots described by `vision_model` when you mark them `vision = false`.

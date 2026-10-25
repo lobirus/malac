@@ -530,13 +530,26 @@ export function openFolderPicker({ start } = {}) {
 
 /**
  * A popover for attaching files or folders by path, relative to `cwd`.
- * Folders are listed for completion (the API lists folders only); a typed
- * file path is read by the daemon when the prompt is sent.
+ * It lists the folder's contents (`GET /api/fs?files=true`): a folder opens
+ * for browsing, a file attaches. A typed path is read by the daemon when
+ * the prompt is sent.
  */
+/** `512 B`, `2.1 KB`, `3.0 MB`, as the daemon writes sizes. */
+function byteSize(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
 export function openAttachPicker(anchor, { cwd, onAdd }) {
   const input = h("input", { class: "input", type: "text", placeholder: "src/main.rs or a folder", "aria-label": "Path to attach", autocomplete: "off", spellcheck: "false" });
-  const list = h("ul", { class: "fs-list compact", role: "listbox", "aria-label": "Folders" });
-  const note = h("p", { class: "muted small" }, "Paths are relative to ", h("span", { class: "path", title: cwd }, shortPath(cwd, 2)), ". Files are read when you send; folders attach as a listing.");
+  const list = h("ul", { class: "fs-list compact", role: "listbox", "aria-label": "Files and folders" });
+  const note = h("p", { class: "muted small" }, "Paths are relative to ", h("span", { class: "path", title: cwd }, shortPath(cwd, 2)), ". Files are read when you send; a folder attaches as a listing.");
   let timer = 0;
   let base = "";
   const suggest = async () => {
@@ -545,33 +558,37 @@ export function openAttachPicker(anchor, { cwd, onAdd }) {
     const prefix = value.slice(base.length).toLowerCase();
     const dir = `${cwd}/${base}`.replace(/\/+$/, "");
     try {
-      const listing = await api(`/api/fs?${new URLSearchParams({ path: dir })}`);
-      const entries = listing.entries.filter((e) => e.name.toLowerCase().startsWith(prefix)).slice(0, 12);
+      const listing = await api(`/api/fs?${new URLSearchParams({ path: dir, files: "true" })}`);
+      const entries = listing.entries.filter((e) => e.name.toLowerCase().startsWith(prefix)).slice(0, 40);
       setChildren(
         list,
         entries.length
-          ? entries.map((entry) =>
-              h(
+          ? entries.map((entry) => {
+              const folder = entry.kind === "directory";
+              const open = () => {
+                input.value = `${base}${entry.name}/`;
+                input.focus();
+                suggest();
+              };
+              const attachFile = () => {
+                onAdd(`${base}${entry.name}`);
+                input.value = base;
+                input.focus();
+                suggest();
+              };
+              return h(
                 "li",
                 {},
                 h(
                   "button",
-                  {
-                    class: "fs-entry",
-                    type: "button",
-                    role: "option",
-                    onclick: () => {
-                      input.value = `${base}${entry.name}/`;
-                      input.focus();
-                      suggest();
-                    },
-                  },
-                  icon("folder", 14),
-                  h("span", { class: "fs-name" }, `${entry.name}/`),
+                  { class: "fs-entry", type: "button", role: "option", title: folder ? "Open this folder" : "Attach this file", onclick: folder ? open : attachFile },
+                  icon(folder ? "folder" : "file", 14),
+                  h("span", { class: "fs-name" }, folder ? `${entry.name}/` : entry.name),
+                  folder ? null : h("span", { class: "fs-size muted tabular" }, byteSize(entry.size ?? 0)),
                 ),
-              ),
-            )
-          : h("li", { class: "empty-note" }, value ? "No folders match; a file path still works." : "No folders here."),
+              );
+            })
+          : h("li", { class: "empty-note" }, value ? "Nothing here matches; a typed path still works." : "This folder is empty."),
       );
     } catch (error) {
       setChildren(list, h("li", { class: "empty-note" }, error.status === 403 ? "That folder is outside what malac may browse." : "Type a path to attach."));

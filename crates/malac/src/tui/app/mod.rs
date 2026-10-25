@@ -14,7 +14,7 @@ use malac_core::agent::AgentInfo;
 use malac_core::config::{self, Config};
 use malac_core::event::{AgentId, Envelope, Event, Level, TurnStatus};
 use malac_core::permission::{Decision, Mode, PermissionRequest};
-use malac_core::session::{self, SessionSummary};
+use malac_core::session::SessionSummary;
 use malac_core::tools::Tool;
 use malac_core::update::Status;
 use malac_core::{AgentSnapshot, AgentStatus};
@@ -262,7 +262,7 @@ pub enum Update {
         list: Vec<String>,
     },
     /// The clipboard's image, saved to a file.
-    Pasted(Result<PathBuf, String>),
+    Pasted(Result<Attachment, String>),
     /// Reconnecting gave up, with why.
     Unreachable(String),
 }
@@ -396,6 +396,9 @@ pub struct App {
     /// Every agent of the workspace as last reported, kept current from events.
     pub snapshots: HashMap<AgentId, AgentSnapshot>,
     pub branch: Option<String>,
+    /// Saved top-level sessions, newest first, as the daemon lists them.
+    pub sessions: Vec<SessionSummary>,
+    /// Those started in the active tab's folder that no tab holds.
     pub recent: Vec<SessionSummary>,
     pub flash: Option<Flash>,
     /// Text selected in the transcript with the mouse.
@@ -485,6 +488,7 @@ impl App {
             geometry: Geometry::default(),
             snapshots: HashMap::new(),
             branch: None,
+            sessions: Vec::new(),
             recent: Vec::new(),
             flash: None,
             selection: None,
@@ -518,7 +522,7 @@ impl App {
             app.active = index;
         }
         app.branch = git_branch(&app.tab_cwd());
-        app.recent = recent_sessions(&app.tab_cwd(), &app.tabs);
+        app.recent = recent_sessions(&app.tab_cwd(), &app.tabs, &app.sessions);
         app
     }
 
@@ -834,13 +838,20 @@ impl App {
                     self.notice(level, message);
                 }
             }
-            ServerMessage::Mode { mode, tab } => {
-                for t in &mut self.tabs {
+            ServerMessage::Mode {
+                mode,
+                tab,
+                workspace,
+            } => {
+                // A mode for a whole workspace names it; one for a tab names the tab.
+                let here = tab.is_some() || workspace.as_deref().is_none_or(|w| self.is_ours(w));
+                for t in self.tabs.iter_mut().filter(|_| here) {
                     if tab.is_none() || t.id == tab {
                         t.mode = mode;
                     }
                 }
             }
+            ServerMessage::Clients { clients } => self.daemon.clients = clients,
             ServerMessage::Reloaded => self.flash_ok("settings applied"),
             ServerMessage::Lagged { skipped } => {
                 self.flash(format!("missed {skipped} updates; catching up"));
@@ -888,10 +899,10 @@ impl App {
             }
             Event::PermissionRequested {
                 request_id,
+                call_id,
                 tool,
                 summary,
                 input,
-                ..
             } if !self.approvals.iter().any(|a| a.request.id == *request_id) => {
                 let agent_label = self
                     .snapshots
@@ -900,6 +911,7 @@ impl App {
                     .unwrap_or_default();
                 self.approvals.push_back(Approval::new(PermissionRequest {
                     id: request_id.clone(),
+                    call_id: call_id.clone(),
                     agent: id.clone(),
                     agent_label,
                     tool: tool.clone(),
@@ -1031,6 +1043,8 @@ impl App {
         self.models = snapshot.models;
         self.default_model = snapshot.default_model;
         self.jobs = snapshot.jobs;
+        // Saved sessions come from the daemon, which may run elsewhere.
+        self.backend.sessions();
         match &snapshot.workspace {
             Some(workspace) => self.apply_workspace(workspace),
             None => {
@@ -1104,7 +1118,7 @@ impl App {
             .min(self.tabs.len() - 1);
         if switching {
             self.selection = None;
-            self.recent = recent_sessions(&self.tab_cwd(), &self.tabs);
+            self.recent = recent_sessions(&self.tab_cwd(), &self.tabs, &self.sessions);
         }
     }
 
@@ -1216,10 +1230,9 @@ impl App {
                     self.files.loading = false;
                 }
             }
-            Update::Pasted(Ok(path)) => {
-                if self.attach(&path) {
-                    self.flash_ok("attached the clipboard image");
-                }
+            Update::Pasted(Ok(image)) => {
+                self.attachments.push(image);
+                self.flash_ok("attached the clipboard image");
             }
             Update::Pasted(Err(err)) => self.flash(err),
             Update::Unreachable(err) => {
@@ -1417,13 +1430,17 @@ impl App {
 }
 
 /// Saved sessions started in `cwd` that no tab holds, for the welcome screen.
-fn recent_sessions(cwd: &Path, tabs: &[Tab]) -> Vec<SessionSummary> {
+pub(super) fn recent_sessions(
+    cwd: &Path,
+    tabs: &[Tab],
+    sessions: &[SessionSummary],
+) -> Vec<SessionSummary> {
     let held = |id: &str| tabs.iter().any(|t| t.agents.iter().any(|a| a == id));
-    session::list(false, 40)
-        .unwrap_or_default()
-        .into_iter()
+    sessions
+        .iter()
         .filter(|s| s.meta.cwd == cwd && !held(&s.meta.id) && !s.title.is_empty())
         .take(5)
+        .cloned()
         .collect()
 }
 

@@ -60,6 +60,9 @@ pub enum Decision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub id: String,
+    /// The tool call waiting for the answer.
+    #[serde(default)]
+    pub call_id: String,
     pub agent: AgentId,
     pub agent_label: String,
     pub tool: String,

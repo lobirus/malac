@@ -131,13 +131,14 @@ fn relay(
                         }
                         Event::PermissionRequested {
                             request_id,
+                            call_id,
                             tool,
                             summary,
                             input,
-                            ..
                         } => {
                             let request = PermissionRequest {
                                 id: request_id.clone(),
+                                call_id: call_id.clone(),
                                 agent: envelope.agent.clone(),
                                 agent_label: labels
                                     .get(&envelope.agent)

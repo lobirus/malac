@@ -71,6 +71,8 @@ pub struct Hub {
     providers: Mutex<Vec<(String, Arc<dyn Provider>)>>,
     out: broadcast::Sender<Arc<str>>,
     clients: AtomicUsize,
+    /// The running count last announced per workspace.
+    announced: Mutex<HashMap<WorkspaceId, usize>>,
     control: Mutex<ControlStatus>,
     stop: watch::Sender<Option<String>>,
     reload_lock: tokio::sync::Mutex<()>,
@@ -162,6 +164,7 @@ impl Hub {
             providers: Mutex::default(),
             out,
             clients: AtomicUsize::new(0),
+            announced: Mutex::default(),
             control: Mutex::new(control),
             stop,
             reload_lock: tokio::sync::Mutex::new(()),
@@ -242,8 +245,10 @@ impl Hub {
         }
     }
 
+    /// Counts a client while the guard lives, announcing every change.
     pub fn connected(&self) -> ClientGuard<'_> {
-        self.clients.fetch_add(1, Ordering::SeqCst);
+        let clients = self.clients.fetch_add(1, Ordering::SeqCst) + 1;
+        self.publish(&ServerMessage::Clients { clients });
         ClientGuard(self)
     }
 
@@ -283,6 +288,20 @@ impl Hub {
             clients: self.clients.load(Ordering::SeqCst),
             attached: self.is_attached(),
             remote: self.options.remote,
+        }
+    }
+
+    /// A reply naming the agent and tab a command acted on, and the tab's workspace.
+    fn ack(&self, agent: Option<AgentId>, tab: Option<TabId>) -> ServerMessage {
+        ServerMessage::Ack {
+            client_ref: None,
+            agent,
+            workspace: tab
+                .as_deref()
+                .and_then(|t| self.find_tab(t))
+                .map(|(w, _)| w),
+            tab,
+            attachments: Vec::new(),
         }
     }
 
@@ -383,6 +402,24 @@ impl Hub {
         workspaces.iter().map(|w| self.summary(w)).collect()
     }
 
+    /// Broadcasts `workspace_updated` when the workspace's number of running
+    /// agents differs from the one last announced.
+    fn running_changed(&self, workspace: &str) {
+        let Some(current) = self.workspace(workspace) else {
+            return;
+        };
+        let summary = self.summary(&current);
+        let changed = self
+            .announced
+            .lock()
+            .unwrap()
+            .insert(workspace.to_owned(), summary.running)
+            != Some(summary.running);
+        if changed {
+            self.publish(&ServerMessage::WorkspaceUpdated { workspace: summary });
+        }
+    }
+
     fn summary(&self, workspace: &Workspace) -> WorkspaceSummary {
         let running = workspace
             .tabs
@@ -417,9 +454,12 @@ impl Hub {
         let runtime = self.loaded_runtime(&tab.id);
         let live: Vec<AgentSnapshot> = runtime.as_ref().map(|r| r.agents()).unwrap_or_default();
         let mut agents = tab.agents.clone();
-        for snap in live.iter().filter(|s| s.info.parent.is_none()) {
-            if !agents.contains(&snap.info.id) {
-                agents.push(snap.info.id.clone());
+        // A terminal session's tab keeps no list; its runtime's agents are it.
+        if self.is_attached() {
+            for snap in live.iter().filter(|s| s.info.parent.is_none()) {
+                if !agents.contains(&snap.info.id) {
+                    agents.push(snap.info.id.clone());
+                }
             }
         }
         let mut snapshots: Vec<AgentView> = agents
@@ -653,25 +693,36 @@ impl Hub {
     }
 
     /// Relays a runtime's events to clients, tagged with its tab.
-    fn forward(&self, workspace: &str, tab: &str, runtime: &Runtime) {
+    /// Relays a runtime's events to clients, tagged with its tab, and
+    /// announces the workspace's running count when a turn starts or ends.
+    fn forward(self: &Arc<Self>, workspace: &str, tab: &str, runtime: &Runtime) {
         let mut events = runtime.bus.subscribe();
-        let out = self.out.clone();
+        let hub = Arc::downgrade(self);
         let (workspace, tab_id) = (workspace.to_owned(), tab.to_owned());
         let task = tokio::spawn(async move {
             loop {
-                let message = match events.recv().await {
-                    Ok(envelope) => ServerMessage::Event {
-                        tab: Some(tab_id.clone()),
-                        workspace: Some(workspace.clone()),
-                        envelope: Box::new(Envelope::clone(&envelope)),
-                    },
+                let (message, turn) = match events.recv().await {
+                    Ok(envelope) => {
+                        let turn = matches!(
+                            envelope.event,
+                            Event::UserMessage { .. } | Event::TurnFinished { .. }
+                        );
+                        let message = ServerMessage::Event {
+                            tab: Some(tab_id.clone()),
+                            workspace: Some(workspace.clone()),
+                            envelope: Box::new(Envelope::clone(&envelope)),
+                        };
+                        (message, turn)
+                    }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        ServerMessage::Lagged { skipped }
+                        (ServerMessage::Lagged { skipped }, false)
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                if let Ok(text) = serde_json::to_string(&message) {
-                    let _ = out.send(Arc::from(text));
+                let Some(hub) = hub.upgrade() else { break };
+                hub.publish(&message);
+                if turn {
+                    hub.running_changed(&workspace);
                 }
             }
         });
@@ -905,25 +956,25 @@ impl Hub {
             }
             Command::AgentStart { tab, model, label } => {
                 let handle = self.start_agent(&tab, model, label).await?;
-                ack(Some(handle.id), Some(tab))
+                self.ack(Some(handle.id), Some(tab))
             }
             Command::AgentOpen { agent, tab } => {
                 let (tab, handle) = self.open_agent(conn, &agent, tab.as_deref()).await?;
                 self.activate_agent(&tab, &handle.id)?;
-                ack(Some(handle.id), Some(tab))
+                self.ack(Some(handle.id), Some(tab))
             }
             Command::Resume { session } => {
                 let (tab, handle) = self.open_agent(conn, &session, None).await?;
                 self.activate_agent(&tab, &handle.id)?;
-                ack(Some(handle.id), Some(tab))
+                self.ack(Some(handle.id), Some(tab))
             }
             Command::AgentActivate { tab, agent } => {
                 self.activate_agent(&tab, &agent)?;
-                ack(Some(agent), Some(tab))
+                self.ack(Some(agent), Some(tab))
             }
             Command::AgentClose { tab, agent } => {
                 self.close_agent(&tab, &agent)?;
-                ack(Some(agent), Some(tab))
+                self.ack(Some(agent), Some(tab))
             }
             Command::Cancel { agent } => {
                 if let Some(runtime) = self
@@ -986,7 +1037,7 @@ impl Hub {
                 self.publish(&ServerMessage::WorkspaceUpdated {
                     workspace: self.summary(&workspace),
                 });
-                ack(None, None)
+                self.ack(None, None)
             }
             Command::WorkspaceDelete { workspace, force } => {
                 let id = self.resolve_workspace(&workspace)?;
@@ -994,15 +1045,15 @@ impl Hub {
                 if conn.workspace.as_deref() == Some(id.as_str()) {
                     conn.workspace = None;
                 }
-                ack(None, None)
+                self.ack(None, None)
             }
             Command::TabCreate(spec) => {
                 let tab = self.create_tab(conn, spec)?;
-                ack(None, Some(tab))
+                self.ack(None, Some(tab))
             }
             Command::TabClose { tab, force } => {
                 self.close_tab(&tab, force).await?;
-                ack(None, Some(tab))
+                self.ack(None, Some(tab))
             }
             Command::TabRename { tab, name } => {
                 let name = clean_name(&name)?;
@@ -1010,15 +1061,15 @@ impl Hub {
                     t.name = name;
                     Ok(())
                 })?;
-                ack(None, Some(tab))
+                self.ack(None, Some(tab))
             }
             Command::TabMove { tab, index } => {
                 self.move_tab(&tab, index)?;
-                ack(None, Some(tab))
+                self.ack(None, Some(tab))
             }
             Command::TabActivate { tab } => {
                 self.activate_tab(&tab)?;
-                ack(None, Some(tab))
+                self.ack(None, Some(tab))
             }
             Command::JobList => ServerMessage::Jobs {
                 client_ref: None,
@@ -1034,7 +1085,7 @@ impl Hub {
             },
             Command::JobKill { job } => {
                 self.host.jobs.kill(&job)?;
-                ack(None, None)
+                self.ack(None, None)
             }
             Command::ControlPermissions { request } => {
                 let control = self.check_control(request).await;
@@ -1086,10 +1137,16 @@ impl Hub {
             content.extend(attachment.blocks.iter().cloned());
             attached.push(attachment);
         }
-        content.extend(images.into_iter().map(|i| Block::Image {
-            media_type: i.media_type,
-            data: i.data,
-        }));
+        for image in images {
+            if let Some(name) = &image.name {
+                let bytes = image.data.len() as u64 * 3 / 4;
+                content.push(Block::text(attach::image_header(name, bytes)));
+            }
+            content.push(Block::Image {
+                media_type: image.media_type,
+                data: image.data,
+            });
+        }
         content.push(Block::text(text));
         let handle = match existing {
             Some(handle) => handle,
@@ -1100,6 +1157,7 @@ impl Hub {
         Ok(ServerMessage::Ack {
             client_ref: None,
             agent: Some(handle.id),
+            workspace: self.find_tab(&tab).map(|(w, _)| w),
             tab: Some(tab),
             attachments: attached,
         })
@@ -1174,48 +1232,55 @@ impl Hub {
         })
     }
 
+    /// Takes an agent out of its tab: a running one is cancelled with its
+    /// subagents and unloaded; its transcript stays and can be opened again.
     fn close_agent(&self, tab: &str, agent: &str) -> Result<()> {
         self.refuse_attached()?;
-        if self.live_agent(agent).is_some_and(|(_, h)| h.is_busy()) {
-            bail!("the agent is working; stop it first");
+        let (_, current) = self.tab(tab)?;
+        let runtime = self.loaded_runtime(tab);
+        let live = runtime.as_ref().is_some_and(|r| r.agent(agent).is_some());
+        if !live && !current.agents.iter().any(|a| a == agent) {
+            bail!("agent {agent} is not in this tab");
+        }
+        if let Some(runtime) = &runtime {
+            runtime.remove_agent(agent);
         }
         self.update_tab(tab, |t| {
-            let index = t
-                .agents
-                .iter()
-                .position(|a| a == agent)
-                .with_context(|| format!("agent {agent} is not in this tab"))?;
-            t.agents.remove(index);
-            if t.active_agent.as_deref() == Some(agent) {
-                t.active_agent = t
-                    .agents
-                    .get(index.min(t.agents.len().saturating_sub(1)))
-                    .cloned();
+            if let Some(index) = t.agents.iter().position(|a| a == agent) {
+                t.agents.remove(index);
+                if t.active_agent.as_deref() == Some(agent) {
+                    t.active_agent = t
+                        .agents
+                        .get(index.min(t.agents.len().saturating_sub(1)))
+                        .cloned();
+                }
             }
             Ok(())
         })
     }
 
+    /// Sets one tab's mode, or that of every tab of the connection's workspace.
     fn set_mode(&self, conn: &Conn, mode: Mode, tab: Option<&str>) -> Result<()> {
-        let tabs: Vec<TabId> = match tab {
-            Some(tab) => vec![self.tab(tab)?.1.id],
+        let (workspace, tabs): (Option<WorkspaceId>, Vec<TabId>) = match tab {
+            Some(tab) => {
+                let (workspace, tab) = self.tab(tab)?;
+                (Some(workspace), vec![tab.id])
+            }
             None => {
-                let mut tabs: Vec<TabId> = self
-                    .conn_workspace(conn)
-                    .and_then(|id| self.workspace(&id))
+                let workspace = self.conn_workspace(conn);
+                let tabs = workspace
+                    .as_deref()
+                    .and_then(|id| self.workspace(id))
                     .map(|w| w.tabs.iter().map(|t| t.id.clone()).collect())
                     .unwrap_or_default();
-                tabs.extend(self.runtimes.lock().unwrap().keys().cloned());
-                tabs.sort();
-                tabs.dedup();
-                tabs
+                (workspace, tabs)
             }
         };
         for id in &tabs {
             if let Some(runtime) = self.loaded_runtime(id) {
                 runtime.policy.set_mode(mode);
             }
-            if !self.is_attached() && self.find_tab(id).is_some() {
+            if !self.is_attached() {
                 self.update_tab(id, |t| {
                     t.options.mode = Some(mode);
                     Ok(())
@@ -1225,6 +1290,7 @@ impl Hub {
         self.publish(&ServerMessage::Mode {
             mode,
             tab: tab.map(str::to_owned),
+            workspace,
         });
         Ok(())
     }
@@ -1444,12 +1510,15 @@ impl Hub {
         self.tab_for_dir(&workspace, &home(), TabOptions::default())
     }
 
-    fn create_tab(&self, conn: &Conn, spec: TabSpec) -> Result<TabId> {
+    /// Adds a tab, or with `reuse` finds one, and makes its workspace the
+    /// connection's.
+    fn create_tab(&self, conn: &mut Conn, spec: TabSpec) -> Result<TabId> {
         self.refuse_attached()?;
         let workspace = match &spec.workspace {
             Some(selector) => self.resolve_workspace(selector)?,
             None => self.ensure_workspace(conn)?,
         };
+        conn.workspace = Some(workspace.clone());
         let cwd = spec
             .cwd
             .canonicalize()
@@ -1664,16 +1733,8 @@ pub struct ClientGuard<'a>(&'a Hub);
 
 impl Drop for ClientGuard<'_> {
     fn drop(&mut self) {
-        self.0.clients.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-fn ack(agent: Option<AgentId>, tab: Option<TabId>) -> ServerMessage {
-    ServerMessage::Ack {
-        client_ref: None,
-        agent,
-        tab,
-        attachments: Vec::new(),
+        let clients = self.0.clients.fetch_sub(1, Ordering::SeqCst) - 1;
+        self.0.publish(&ServerMessage::Clients { clients });
     }
 }
 
@@ -1826,6 +1887,7 @@ mod tests {
         let approvals = Arc::new(Approvals::default());
         let request = PermissionRequest {
             id: "r1".into(),
+            call_id: "c1".into(),
             agent: "a".into(),
             agent_label: "main".into(),
             tool: "bash".into(),

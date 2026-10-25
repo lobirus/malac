@@ -244,8 +244,6 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
-    /// Serve the web UI alongside every interactive terminal session.
-    pub enabled: bool,
     /// Listen on all interfaces so other machines can connect (token still required).
     pub remote: bool,
     /// Bind address when not remote.
@@ -256,7 +254,6 @@ pub struct WebConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             remote: false,
             host: "127.0.0.1".into(),
             port: 7700,

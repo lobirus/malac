@@ -43,7 +43,7 @@ The first message is always a `snapshot`. Everything after it is either a broadc
 
 ### Requests
 
-A command is a JSON object whose `type` names it. `client_ref` is optional; when present, the reply carries the same `client_ref`. Commands without a reply of their own are acknowledged with `{"type": "ack", "client_ref": …}` when they have a `client_ref`, and get no answer otherwise. A failed command gets `{"type": "error", "client_ref": …, "message": "…"}`. One connection's commands run one at a time, in order.
+A command is a JSON object whose `type` names it. `client_ref` is optional; when present, the reply carries the same `client_ref`. Commands without a reply of their own are acknowledged with `{"type": "ack", "client_ref": …}` when they have a `client_ref`, and get no answer otherwise. A failed command gets `{"type": "error", "client_ref": …, "message": "…"}`. One connection's commands run one at a time, in order, and the broadcasts a command causes (say `tab_created`) reach that connection before the command's reply.
 
 ```json
 { "type": "prompt", "tab": "01a17453-…", "text": "fix the failing test", "client_ref": "c7" }
@@ -55,14 +55,14 @@ A command is a JSON object whose `type` names it. `client_ref` is optional; when
 
 | `type` | Fields | Reply |
 |---|---|---|
-| `prompt` | `text`; `agent`? (prompt this agent, resuming it if saved); `tab`? (start a new top-level agent there; default: the connection's active tab); `images`? `[{media_type, data}]` (base64); `attachments`? `[{path}]`; `model`? (for a new agent) | `ack` with `agent`, `tab`, `attachments` |
+| `prompt` | `text`; `agent`? (prompt this agent, resuming it if saved); `tab`? (start a new top-level agent there; default: the connection's active tab); `images`? `[{media_type, data, name?}]` (base64; with a `name` the image shows as an attachment of that name, e.g. a pasted screenshot); `attachments`? `[{path}]`; `model`? (for a new agent) | `ack` with `agent`, `tab`, `workspace`, `attachments` |
 | `agent_start` | `tab`; `model`?; `label`? | `ack` with `agent`, `tab` |
 | `agent_open` | `agent`; `tab`? | `ack` with `agent`, `tab`. Loads a saved or live session into a tab: the tab that lists it, else `tab`, else a tab for the session's directory, created if needed. |
 | `agent_activate` | `tab`, `agent` | `ack` |
-| `agent_close` | `tab`, `agent` | `ack`. Removes an idle agent from the tab; its transcript stays. |
+| `agent_close` | `tab`, `agent` | `ack`; broadcasts `tab_updated`. Takes the agent out of the tab, cancelling it and its subagents if they run, and unloads it. Its transcript stays, so `agent_open` brings it back. |
 | `cancel` | `agent` | none. Cancels its turn and its subagents'. |
 | `approve` | `request_id`; `decision`: `allow`, `allow_session` or `deny` | none, or `error` when the request was already answered |
-| `mode` | `mode`: `ask`, `edits` or `autopilot`; `tab`? | none. Without `tab`, every tab of the connection's workspace. |
+| `mode` | `mode`: `ask`, `edits` or `autopilot`; `tab`? | none; broadcasts `mode`. Without `tab`, every tab of the connection's workspace. |
 | `model` | `agent`, `model` (`provider/model`) | none |
 | `compact` | `agent` | none |
 
@@ -86,7 +86,7 @@ Attachments resolve against the agent's directory (`~/` and absolute paths work 
 | `workspace_open` | `workspace` (id, unique id prefix of 4+ characters, or name) | `workspace_opened` |
 | `workspace_rename` | `workspace`, `name` | `ack`; broadcasts `workspace_updated` |
 | `workspace_delete` | `workspace`; `force`? | `ack`; broadcasts `workspace_deleted`. Refused while its agents run unless `force`, which cancels them. Transcripts stay. |
-| `tab_create` | `cwd`; `name`?; `workspace`?; `model`?; `mode`?; `profile`?; `no_control`?; `reuse`? | `ack` with `tab`; broadcasts `tab_created` and `workspace_updated`. The new tab becomes active. With `reuse`, an existing tab for `cwd` is activated instead. |
+| `tab_create` | `cwd`; `name`?; `workspace`?; `model`?; `mode`?; `profile`?; `no_control`?; `reuse`? | `ack` with `tab` and `workspace`; broadcasts `tab_created` and `workspace_updated` first. The new tab becomes active, and its workspace (the connection's, created as `default` if there is none) becomes the connection's. With `reuse`, an existing tab for `cwd` is activated instead. |
 | `tab_close` | `tab`; `force`? | `ack`; broadcasts `tab_closed`, `workspace_updated`. Refused while its agents run unless `force`. |
 | `tab_rename` | `tab`, `name` | `ack`; broadcasts `tab_updated` |
 | `tab_move` | `tab`, `index` | `ack`; broadcasts `tabs_reordered` |
@@ -151,7 +151,7 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
 }
 ```
 
-`workspace` is the connection's workspace: the last used one at first, `null` before any exists. `daemon.attached` is true when the server is a terminal session's own web UI (`--web` in a session that runs in its own process) rather than the daemon; workspace and tab commands are refused there. `update.installed` set means newer binaries are on disk and a restart picks them up.
+`workspace` is the connection's workspace: the last used one at first, `null` before any exists. `daemon.attached` is true when the server is a terminal session's own web UI (`/web` in a line session running without the daemon) rather than the daemon; workspace and tab commands are refused there. `update.installed` set means newer binaries are on disk and a restart picks them up.
 
 #### `event`
 
@@ -171,7 +171,7 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `type` | Fields | When |
 |---|---|---|
 | `workspace_created` | `workspace`: WorkspaceSummary | created |
-| `workspace_updated` | `workspace`: WorkspaceSummary | renamed, active tab changed, tab added or closed |
+| `workspace_updated` | `workspace`: WorkspaceSummary | renamed, active tab changed, tab added or closed, or its number of running agents changed |
 | `workspace_deleted` | `workspace`: id | deleted |
 | `tab_created` | `workspace`, `index`, `tab`: TabView | created |
 | `tab_updated` | `workspace`, `tab`: TabView | renamed, agents added, removed or activated, mode changed, runtime loaded |
@@ -179,7 +179,8 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `tabs_reordered` | `workspace`, `tabs`: ids in order | moved |
 | `job_started`, `job_finished` | `job`: JobView | a job starts or ends |
 | `control` | `control`: ControlStatus | the control service connected or its permissions were checked |
-| `mode` | `mode`, `tab` (null: every tab) | a mode changed |
+| `mode` | `mode`, `tab`, `workspace` | a mode changed: one tab's, or with `tab` null every tab of `workspace` |
+| `clients` | `clients` | a client connected or left |
 | `notice` | `level` (`info`, `warning`, `error`), `message`, `tab`? | e.g. a configuration warning or an unavailable MCP server while a tab loads |
 | `reloaded` | | settings were applied; idle tabs reload on next use |
 | `shutdown` | `reason` | the daemon is stopping (`signal`, `idle`, `stopped by a client`, …) |
@@ -190,7 +191,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 
 | `type` | Fields |
 |---|---|
-| `ack` | `client_ref`, `agent`?, `tab`?, `attachments`? |
+| `ack` | `client_ref`, `agent`?, `tab`?, `workspace`? (the tab's), `attachments`? |
 | `error` | `client_ref`, `message` |
 | `pong` | `client_ref` |
 | `launched` | `client_ref`, `workspace`: WorkspaceView, `tab`, `agent` |
@@ -234,7 +235,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 
 `status` is `idle`, `running`, `completed`, `failed` or `cancelled`.
 
-**PendingApproval** `{id, agent, agent_label, tool, summary, input, tab}`
+**PendingApproval** `{id, call_id, agent, agent_label, tool, summary, input, tab}`; `call_id` matches the `tool_use` block and the event's `call_id`.
 
 **JobView** `{id, command, cwd, pid, log, started, finished, exit_code, status, agent, tab}`, `status` being `running`, `exited` (see `exit_code`), `killed` or `unknown` (it ended while no daemon watched). `tab` is the tab of the agent that started it, when known.
 
@@ -253,7 +254,8 @@ All under the token. JSON in and out; failures are `{"error": "…"}` with statu
 | `GET /api/workspaces` | `{workspaces: [WorkspaceSummary]}` |
 | `GET /api/jobs` | `{jobs: [JobView]}` |
 | `GET /api/jobs/{id}/output?tail=` | `{job, text, size, truncated}` |
-| `GET /api/fs?path=&hidden=` | Subdirectories for a directory picker: `{path, parent, root, markers, entries: [{name, path, markers}], truncated}`. `markers` names what a directory holds among `.git`, `.malac`, `AGENTS.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`. `path` is absolute, `~/…` or relative to the root; only directories below `daemon.browse_root` (default: the home directory) are listed, at most 1000. `hidden=true` includes dot directories. |
+| `GET /api/fs?path=&hidden=&files=` | A directory's contents for folder and file pickers: `{path, parent, root, markers, entries: [{name, path, kind, size?, markers}], truncated}`. Entries are its subdirectories (`kind: "directory"`) and, with `files=true`, its files (`kind: "file"`, `size` in bytes) after them. `markers` names what a directory holds among `.git`, `.malac`, `AGENTS.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`. `path` is absolute, `~/…` or relative to the root; only what is below `daemon.browse_root` (default: the home directory) is listed, at most 1000 entries. `hidden=true` includes dot entries. |
+| `GET /api/sessions?cwd=&limit=&subagents=` | Saved sessions, newest first: `{sessions: [{id, label, parent, cwd, model, created, title, updated}]}`. `cwd` keeps those started in that directory; `limit` defaults to 50; `subagents=true` includes subagent sessions. `title` is the first prompt's typed text. Clients use this rather than reading `~/.malac/sessions`, so it works with a daemon on another machine. |
 | `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | A transcript (`meta`, `history`, `usage`); deleting also removes it from its tabs |
 | `GET /api/state` | The original web UI's state: the active tab's `cwd`, `mode`, `models` and `servers`, every live agent, recent sessions, pending requests |
 | `/api/settings`, `/api/models`, `/api/tools`, `/api/memory`, `/api/update`, `/api/providers/{name}/key` | Settings, as before. They act on the active tab's runtime; `POST /api/settings/apply` reloads idle tabs. |

@@ -500,7 +500,7 @@ impl Agent {
         mut content: Vec<Block>,
         cancel: &CancellationToken,
     ) -> Result<String> {
-        let text = typed_text(&content);
+        let text = attach::typed_text(&content);
         self.emit(Event::UserMessage {
             text: with_attachment_list(&text, &content),
         });
@@ -776,6 +776,7 @@ impl Agent {
         }
         let request = PermissionRequest {
             id: uuid::Uuid::now_v7().to_string(),
+            call_id: call.id.clone(),
             agent: self.shared.info.id.clone(),
             agent_label: self.shared.info.label.clone(),
             tool: tool.name().to_owned(),
@@ -785,7 +786,7 @@ impl Agent {
         self.set_activity(format!("waiting for approval: {}", request.tool));
         self.emit(Event::PermissionRequested {
             request_id: request.id.clone(),
-            call_id: call.id.clone(),
+            call_id: request.call_id.clone(),
             tool: request.tool.clone(),
             summary: request.summary.clone(),
             input: request.input.clone(),
@@ -899,18 +900,6 @@ impl Agent {
         }
         Some(messages)
     }
-}
-
-/// What the user typed, without attached files.
-fn typed_text(content: &[Block]) -> String {
-    content
-        .iter()
-        .filter_map(|b| match b {
-            Block::Text { text } if !attach::is_attachment(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// The typed text plus one line naming the attached files, for front ends.
@@ -1124,7 +1113,7 @@ mod tests {
             .unwrap()
             .blocks;
         content.push(Block::text("summarize"));
-        let text = typed_text(&content);
+        let text = attach::typed_text(&content);
         assert_eq!(text, "summarize");
         assert_eq!(
             with_attachment_list(&text, &content),

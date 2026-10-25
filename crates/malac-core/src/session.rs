@@ -191,10 +191,23 @@ fn read_head(path: &PathBuf) -> Option<(SessionMeta, String)> {
         match serde_json::from_str::<Record>(line) {
             Ok(Record::Meta(m)) => meta = Some(m),
             Ok(Record::Message { message }) if message.role == Role::User => {
-                title = crate::tools::truncate_chars(
-                    message.text().lines().next().unwrap_or_default(),
-                    80,
-                );
+                let typed = crate::attach::typed_text(&message.content);
+                title = match typed.lines().find(|l| !l.trim().is_empty()) {
+                    Some(line) => crate::tools::truncate_chars(line.trim(), 80),
+                    None => {
+                        let attached: Vec<String> = message
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                crate::message::Block::Text { text } => {
+                                    crate::attach::attached_path(text)
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        crate::tools::truncate_chars(&attached.join(", "), 80)
+                    }
+                };
                 break;
             }
             _ => {}
@@ -206,4 +219,45 @@ fn read_head(path: &PathBuf) -> Option<(SessionMeta, String)> {
 /// The most recent top-level session started in `cwd`.
 pub fn latest_in(cwd: &std::path::Path) -> Result<Option<SessionSummary>> {
     Ok(list(false, 200)?.into_iter().find(|s| s.meta.cwd == cwd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::Block;
+
+    fn head_of(messages: Vec<Message>) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let meta = SessionMeta {
+            id: "s".into(),
+            label: "main".into(),
+            parent: None,
+            cwd: dir.path().to_path_buf(),
+            model: "m/m".into(),
+            created: Utc::now(),
+        };
+        let mut lines = vec![serde_json::to_string(&Record::Meta(meta)).unwrap()];
+        for message in messages {
+            lines.push(serde_json::to_string(&Record::Message { message }).unwrap());
+        }
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        read_head(&path).unwrap().1
+    }
+
+    #[test]
+    fn titles_come_from_typed_text() {
+        let attached = Block::text(
+            "<attachment path=\"notes.txt\" size=\"5 B\">\n```txt\nhello\n```\n</attachment>",
+        );
+        let recalled = Block::text("<recalled-memories>\nold facts\n</recalled-memories>");
+        let title = head_of(vec![Message::user(vec![
+            recalled,
+            attached.clone(),
+            Block::text("\n  summarize the notes\nplease"),
+        ])]);
+        assert_eq!(title, "summarize the notes");
+        let title = head_of(vec![Message::user(vec![attached])]);
+        assert_eq!(title, "notes.txt");
+    }
 }

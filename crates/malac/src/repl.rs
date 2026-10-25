@@ -162,19 +162,13 @@ pub async fn run(args: RunArgs) -> Result<i32> {
 
     let handle = open_agent(&runtime, &args, &cwd)?;
     *main.write().unwrap() = handle.id.clone();
-    let mut session = Session {
+    let session = Session {
         runtime: runtime.clone(),
         handle,
         main,
         approver,
         web_urls: Vec::new(),
     };
-    let web = &runtime.config.web;
-    if (args.web || args.web_remote || web.enabled) && !args.no_web {
-        session
-            .serve_web(args.web_remote || web.remote, args.web_port)
-            .await?;
-    }
 
     let mut repl = Repl {
         session,

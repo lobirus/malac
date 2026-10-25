@@ -2266,7 +2266,6 @@ export class SettingsPage {
       this.group(
         "Web",
         [
-          this.field(["web", "enabled"], { type: "toggle", label: "Serve with terminal sessions", help: "Start this web UI next to every interactive terminal session.", default: false }),
           this.field(["web", "remote"], {
             type: "toggle",
             label: "Allow other machines",
@@ -2352,7 +2351,7 @@ export class SettingsPage {
           h("dt", {}, "Running for"),
           h("dd", { class: "tabular", title: fullTime(d.started) }, uptime),
           h("dt", {}, "Clients"),
-          h("dd", { class: "tabular" }, `${plural(i?.clients ?? d.clients, "client")} connected`),
+          h("dd", { class: "tabular" }, `${plural(d.clients ?? i?.clients, "client")} connected`),
           h("dt", {}, "Listening"),
           h("dd", {}, i?.url ?? location.origin, d.remote ? h("span", { class: "muted" }, " and on the network") : null),
           i
