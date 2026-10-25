@@ -200,7 +200,7 @@ On macOS, grant Screen Recording and Accessibility permissions to the terminal a
 
 The web UI is local-only by default. `malac web --remote` (or `web.remote = true`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. `web.enabled = true` serves the UI alongside every interactive terminal session.
 
-The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. To try it, open `editors/vscode` in VS Code and press F5, or:
+The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. Download `malac-vscode-<version>.vsix` from the [latest release](https://github.com/lobirus/malac/releases/latest) and install it with `code --install-extension malac-vscode-<version>.vsix`, or via Extensions → … → Install from VSIX. The same file works in VS Code–compatible editors such as Cursor, Windsurf and VSCodium. It is not on the Marketplace yet. To work on it, open `editors/vscode` in VS Code and press F5, or:
 
 ```bash
 cd editors/vscode && npm install && npx tsc -p . && code --extensionDevelopmentPath="$PWD" /path/to/project

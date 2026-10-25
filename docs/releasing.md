@@ -1,11 +1,12 @@
 # Releasing
 
-1. Bump `version` in the root `Cargo.toml` and run `cargo build` so `Cargo.lock` follows.
+1. Bump `version` in the root `Cargo.toml` and in `editors/vscode/package.json`, then run `cargo build` so `Cargo.lock` follows.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The `release` workflow builds:
    - `malac-<version>-aarch64-apple-darwin.tar.gz` and `malac-<version>-x86_64-apple-darwin.tar.gz`
    - `malac-<version>-macos.pkg`, a universal installer that puts both binaries in `/usr/local/bin`
    - `malac-<version>-x86_64-unknown-linux-gnu.tar.gz`
+   - `malac-vscode-<version>.vsix`, the VS Code extension
    - `SHA256SUMS`
 
    It then publishes them as a GitHub release with generated notes.
@@ -16,7 +17,7 @@
 
 ```bash
 scripts/package.sh                                   # this machine only
-scripts/package.sh aarch64-apple-darwin x86_64-apple-darwin --pkg
+scripts/package.sh aarch64-apple-darwin x86_64-apple-darwin --pkg --vscode
 ```
 
 The second form needs `rustup target add x86_64-apple-darwin`. Files land in `dist/`. Upload them with `gh release create v0.2.0 dist/*` if CI is unavailable.

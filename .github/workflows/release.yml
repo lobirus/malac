@@ -34,8 +34,24 @@ jobs:
           name: linux
           path: dist/malac-*
 
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          mkdir -p dist
+          cd editors/vscode && npm ci && npx --yes @vscode/vsce@3 package --out "../../dist/malac-vscode-$version.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode
+          path: dist/malac-*
+
   publish:
-    needs: [macos, linux]
+    needs: [macos, linux, vscode]
     runs-on: ubuntu-latest
     permissions:
       contents: write

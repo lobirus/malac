@@ -2,22 +2,25 @@
 # Builds release archives into dist/.
 #
 #   scripts/package.sh                      # this machine's target
-#   scripts/package.sh aarch64-apple-darwin x86_64-apple-darwin --pkg
+#   scripts/package.sh aarch64-apple-darwin x86_64-apple-darwin --pkg --vscode
 #
 # Each target becomes dist/malac-<version>-<target>.tar.gz. With --pkg on
 # macOS, the Apple targets are merged into one universal binary and wrapped
 # in dist/malac-<version>-macos.pkg, which installs to /usr/local/bin. Set
 # MALAC_SIGN_IDENTITY to a "Developer ID Installer" identity to sign it.
+# --vscode also packages the editor extension as malac-vscode-<version>.vsix.
 set -eu
 
 cd "$(dirname "$0")/.."
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
 dist="dist"
 pkg=false
+vscode=false
 targets=""
 for arg in "$@"; do
     case "$arg" in
         --pkg) pkg=true ;;
+        --vscode) vscode=true ;;
         *) targets="$targets $arg" ;;
     esac
 done
@@ -61,6 +64,10 @@ if $pkg; then
     rm -rf "$root"
 fi
 
-(cd "$dist" && shasum -a 256 malac-"$version"-* > SHA256SUMS)
+if $vscode; then
+    (cd editors/vscode && npm ci --silent && npx --yes @vscode/vsce@3 package --out "../../$dist/malac-vscode-$version.vsix")
+fi
+
+(cd "$dist" && shasum -a 256 malac-*"$version"* > SHA256SUMS)
 echo "Wrote:"
 ls -1 "$dist"
