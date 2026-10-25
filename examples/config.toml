@@ -1,8 +1,8 @@
 # ~/.malac/config.toml
 #
 # Project settings go in <repo>/.malac/config.toml. For safety a project file
-# cannot set mode, providers, mcp, control or permissions unless you set
-# `trust_project_config = true` here.
+# cannot set mode, providers, mcp, control, permissions, memory, web or update
+# unless you set `trust_project_config = true` here.
 
 model = "lora/default"
 small_model = "lora/fast"

@@ -42,7 +42,7 @@ With Homebrew:
 
 ```bash
 brew tap lobirus/malac https://github.com/lobirus/malac
-brew install --HEAD lobirus/malac/malac
+brew install lobirus/malac/malac
 ```
 
 From a checkout: `cargo install --path crates/malac && cargo install --path crates/malac-control`.
@@ -222,7 +222,7 @@ Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "
 
 - **Early software.** malac is at 0.1. macOS is the primary platform, Linux works, and Windows is untested. Expect rough edges and breaking config changes before 1.0.
 - **Autopilot means autopilot.** With `-y` the agent runs commands and edits files without asking. Deny rules still apply, but they are pattern matches, not a sandbox. Use it in repositories you can restore.
-- **Project config is restricted.** A repository's `.malac/config.toml` cannot set the mode, providers, MCP servers, control service or permissions unless you set `trust_project_config = true`. Cloning a repository is never enough to make malac run its commands.
+- **Project config is restricted.** A repository's `.malac/config.toml` cannot set the mode, providers, MCP servers, control service, permissions, memory, web UI or update settings unless you set `trust_project_config = true`. Cloning a repository is never enough to make malac run its commands.
 - **Your data stays local.** Transcripts are JSONL files in `~/.malac/sessions` and memories are Markdown files, both readable and deletable. Anything you paste into a prompt, including an API key, ends up in that session's transcript. Prefer `api_key_env` or `malac provider add --api-key-stdin`, which writes `~/.malac/credentials.toml` with owner-only permissions.
 - **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
 - **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.

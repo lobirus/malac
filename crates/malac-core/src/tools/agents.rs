@@ -87,7 +87,7 @@ async fn spawn(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         model: input["model"].as_str().map(str::to_owned),
         cwd: Some(ctx.cwd.clone()),
         agent_type,
-        read_only: input["read_only"].as_bool().unwrap_or(false),
+        read_only: input["read_only"].as_bool().unwrap_or(false) || parent_read_only(ctx),
     })?;
     let content = vec![Block::text(task)];
     if input["background"].as_bool().unwrap_or(false) {
@@ -106,6 +106,13 @@ async fn spawn(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         }
     };
     Ok(report(&handle, result))
+}
+
+/// A read-only agent must not escape its limits through a subagent.
+fn parent_read_only(ctx: &ToolContext) -> bool {
+    ctx.runtime
+        .agent(&ctx.agent)
+        .is_some_and(|parent| parent.info().read_only)
 }
 
 fn report(handle: &AgentHandle, result: Result<String>) -> ToolOutput {

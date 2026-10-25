@@ -44,6 +44,8 @@ pub struct AgentInfo {
     pub label: String,
     pub parent: Option<AgentId>,
     pub depth: u32,
+    /// Limited to tools that never need approval; its subagents inherit this.
+    pub read_only: bool,
     pub cwd: PathBuf,
     pub created: DateTime<Utc>,
 }
@@ -239,6 +241,7 @@ pub(crate) fn spawn(
                 label,
                 parent: t.meta.parent,
                 depth: spec.depth,
+                read_only: spec.read_only,
                 cwd,
                 created: t.meta.created,
             };
@@ -250,6 +253,7 @@ pub(crate) fn spawn(
                 label,
                 parent: spec.parent.clone(),
                 depth: spec.depth,
+                read_only: spec.read_only,
                 cwd,
                 created: Utc::now(),
             };

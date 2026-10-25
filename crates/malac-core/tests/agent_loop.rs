@@ -256,3 +256,46 @@ async fn configures_malac_through_its_own_tools() {
     let (shown, _) = tool_result_text(&script.last_request(), "c2").unwrap();
     assert!(shown.contains("show_thinking = true"));
 }
+
+#[tokio::test]
+async fn read_only_agents_spawn_only_read_only_subagents() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Scripted::new(vec![
+        tool_call(
+            "c1",
+            "agent_spawn",
+            json!({ "task": "look around", "label": "scout", "read_only": true }),
+        ),
+        tool_call(
+            "c2",
+            "agent_spawn",
+            json!({ "task": "delete things", "label": "helper" }),
+        ),
+        tool_call("c3", "bash", json!({ "command": "echo escaped" })),
+        answer("helper done"),
+        answer("scout done"),
+        answer("all done"),
+    ]);
+    let runtime = runtime(Mode::Autopilot, script.clone(), dir.path());
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    agent.prompt(vec![Block::text("explore")]).await.unwrap();
+
+    let helper = runtime
+        .agents()
+        .into_iter()
+        .find(|a| a.info.label == "helper")
+        .expect("helper spawned");
+    assert!(
+        helper.info.read_only,
+        "a read-only parent must produce read-only children"
+    );
+    let requests = script.requests.lock().unwrap();
+    let helper_turn = requests
+        .iter()
+        .find(|r| tool_result_text(r, "c3").is_some())
+        .unwrap();
+    let (result, is_error) = tool_result_text(helper_turn, "c3").unwrap();
+    assert!(is_error);
+    assert!(result.contains("unknown tool"));
+}
