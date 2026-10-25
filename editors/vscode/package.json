@@ -1,7 +1,7 @@
 {
   "name": "malac",
   "displayName": "malac",
-  "description": "Watch and steer malac coding agents from VS Code.",
+  "description": "Multi-Agent Loop for Autonomous Coding: watch and steer malac agents from VS Code",
   "version": "0.1.0",
   "publisher": "malac",
   "license": "MIT",

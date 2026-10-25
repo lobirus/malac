@@ -1,6 +1,6 @@
 # malac
 
-An autonomous coding agent for the terminal, with a web UI, a VS Code extension, and a control service for the desktop and browser. Written in Rust.
+**Multi-Agent Loop for Autonomous Coding.** An autonomous coding agent for the terminal, with a web UI, a VS Code extension, and a control service for the desktop and browser. Written in Rust. (*Malac* is also Hungarian for pig.)
 
 ```
 $ malac -y calc.py has a bug in add, fix it and verify with a python one-liner
@@ -25,13 +25,24 @@ Fixed `calc.py:2`: `add` returned `a - b`, now returns `a + b`. Verified with
 
 ## Install
 
+Release builds (a macOS `.pkg` installer and `.tar.gz` archives for macOS and Linux) are published on [GitHub releases](https://github.com/lobirus/malac/releases). The install script uses the latest release when there is one for your machine, and otherwise builds from source (it needs Rust 1.86 or newer from [rustup.rs](https://rustup.rs) or `brew install rust`) and puts `malac` and `malac-control` in `~/.local/bin`:
+
 ```bash
-git clone https://github.com/lobirus/malac && cd malac
-cargo install --path crates/malac
-cargo install --path crates/malac-control
+curl -fsSL https://raw.githubusercontent.com/lobirus/malac/main/install.sh | sh
 ```
 
-Requires Rust 1.86 or newer. macOS is the primary platform and Linux is supported. Windows is untested.
+Set `MALAC_INSTALL_DIR` to install elsewhere, `MALAC_VERSION` to pick a release, `MALAC_FROM_SOURCE=1` to always build, `MALAC_REF` to build a branch or tag, or `MALAC_SOURCE=.` to build the checkout you are in. See [docs/releasing.md](docs/releasing.md) for making a release.
+
+With Homebrew:
+
+```bash
+brew tap lobirus/malac https://github.com/lobirus/malac
+brew install --HEAD lobirus/malac/malac
+```
+
+From a checkout: `cargo install --path crates/malac && cargo install --path crates/malac-control`.
+
+macOS is the primary platform and Linux is supported. Windows is untested.
 
 ## Quick start
 
@@ -67,13 +78,16 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 | `--json` | Stream events as JSON lines |
 | `-c, --continue` / `-r, --resume <id>` | Continue a session |
 | `--profile <name>` | Apply `[profiles.<name>]` from the config |
-| `--web` | Serve the web UI for this session too |
+| `--web` / `--no-web` | Serve the web UI for this session too, or not (default: `web.enabled`) |
+| `--web-remote` | Serve it to other machines as well (default: `web.remote`) |
+| `--web-port <port>` | Web UI port (default: `web.port`, or any free port) |
 | `--no-control` | Do not connect the control service |
 | `-v, --verbose` | Show model reasoning |
 
 | Subcommand | |
 |---|---|
-| `malac web` | Web UI (`--port`, `--open`, `--json-ready`) |
+| `malac web` | Web UI (`--port`, `--remote`, `--open`, `--json-ready`) |
+| `malac models` | Every model your providers offer |
 | `malac sessions [list\|show <id>\|delete <id>]` | Saved transcripts, including subagents |
 | `malac provider add\|list\|models` | Providers and keys |
 | `malac config [path\|show]` | Configuration files and the merged result |
@@ -154,7 +168,9 @@ On macOS, grant Screen Recording and Accessibility permissions to the terminal a
 
 ## Web UI and VS Code
 
-`malac web` serves the UI on `127.0.0.1:7700` and protects it with a random token that is part of the printed URL. The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts.
+`malac web` serves the UI on `127.0.0.1:7700` and protects it with a random token that is part of the printed URL. The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts, and every setting can be changed from it.
+
+The web UI is local-only by default. `malac web --remote` (or `web.remote = true`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. `web.enabled = true` serves the UI alongside every interactive terminal session.
 
 The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. To try it, open `editors/vscode` in VS Code and press F5, or:
 
@@ -164,9 +180,28 @@ cd editors/vscode && npm install && npx tsc -p . && code --extensionDevelopmentP
 
 Set `malac.path` if `malac` is not on your `PATH`.
 
+## Updating
+
+`malac update` installs the latest release. Running sessions and subagents keep the version they started with, so updating is safe at any time. malac checks for new releases once a day and shows when one is available, in the terminal and in the web UI. Set `update.auto = true` to install them automatically.
+
 ## Configuration
 
+Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "allow cargo commands without asking". It changes its own configuration with the `malac_configure` tool, asking for approval first.
+
 `~/.malac/config.toml` for you, `.malac/config.toml` for a project, `AGENTS.md` (or `MALAC.md`, `CLAUDE.md`) for instructions. See [docs/configuration.md](docs/configuration.md) and [examples/config.toml](examples/config.toml).
+
+## Things to know
+
+- **Early software.** malac is at 0.1. macOS is the primary platform, Linux works, and Windows is untested. Expect rough edges and breaking config changes before 1.0.
+- **Autopilot means autopilot.** With `-y` the agent runs commands and edits files without asking. Deny rules still apply, but they are pattern matches, not a sandbox. Use it in repositories you can restore.
+- **Project config is restricted.** A repository's `.malac/config.toml` cannot set the mode, providers, MCP servers, control service or permissions unless you set `trust_project_config = true`. Cloning a repository is never enough to make malac run its commands.
+- **Your data stays local.** Transcripts are JSONL files in `~/.malac/sessions` and memories are Markdown files, both readable and deletable. Anything you paste into a prompt, including an API key, ends up in that session's transcript. Prefer `api_key_env` or `malac provider add --api-key-stdin`, which writes `~/.malac/credentials.toml` with owner-only permissions.
+- **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
+- **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.
+- **The web UI is local unless you say otherwise.** It needs the per-run token in the URL. `--web-remote` listens on your network over plain HTTP; use an SSH tunnel or a TLS proxy outside trusted networks.
+- **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions keep their version until you restart them.
+- **Models without vision** get screenshots described by `vision_model` when you mark them `vision = false`.
+- **Inside tmux or byobu**, mouse clicks reach the terminal UI only with `set -g mouse on`. Everything also works from the keyboard.
 
 ## Development
 

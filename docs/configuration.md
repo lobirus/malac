@@ -129,10 +129,25 @@ You review code changes. Report concrete problems with file:line references...
 
 Skills are `SKILL.md` files in `~/.malac/skills/<name>/`, `~/.claude/skills/<name>/`, `<project>/.malac/skills/<name>/` or `<project>/.claude/skills/<name>/`, with `name` and `description` frontmatter. Their descriptions are listed in the system prompt and the agent reads the file when a skill applies.
 
+## `[update]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `check` | `true` | Look for a newer release in the background, at most once a day |
+| `auto` | `false` | Install it automatically |
+
+Updates replace the binaries with an atomic rename, so running sessions and their subagents keep working on the version they started with; new sessions use the new one. `malac update` updates now, `malac update --check` only checks. Homebrew installs are updated with `brew upgrade lobirus/malac/malac`, and installs in a read-only directory (the `.pkg`) need the new installer or `sudo malac update`.
+
+## Configuring malac by asking it
+
+The agent has two tools for its own configuration. `malac_settings` shows the config files, this reference, the available models and the update status, and switches the current session's model. `malac_configure` sets or removes keys (comments in the file are kept and every change is validated), stores API keys and installs updates. `malac_configure` asks for approval unless you are in autopilot. Rules such as `malac_configure(set:ui.*)` pre-approve specific edits.
+
 ## `[ui]` and `[web]`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
-| `web.host` | `127.0.0.1` | `malac web` bind address |
-| `web.port` | `7700` | `malac web` port |
+| `web.enabled` | `false` | Serve the web UI with every interactive terminal session |
+| `web.remote` | `false` | Listen on all interfaces instead of `web.host` |
+| `web.host` | `127.0.0.1` | Bind address when not remote |
+| `web.port` | `7700` | Web UI port |
