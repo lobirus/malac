@@ -17,6 +17,14 @@
 - **Computer and browser control.** `malac-control` is a separate MCP service for screenshots, mouse and keyboard, and Chrome automation with isolated profiles. malac starts it automatically.
 - **MCP.** Connect any MCP server over stdio, streamable HTTP or WebSocket.
 
+## Why malac
+
+malac is opinionated. It is built around the way its author works, and it changes whenever that workflow does, to make everyday work faster and more comfortable. Defaults, keybindings and features follow from that, not from a roadmap or a committee.
+
+It is open source so anyone can use it without wondering what runs under the hood: every prompt, tool and network call is in this repository. It is shared as is, not run as a community project. Issues and ideas are welcome, but pull requests may not be merged if they pull it in a different direction.
+
+The name: *malac* is Hungarian for pig, which explains the mascot, and it is quick to type: five letters, three of them on the home row.
+
 ## Screenshots
 
 | Terminal UI | Web UI |
