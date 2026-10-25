@@ -10,7 +10,7 @@ Configuration is TOML, merged in this order (later wins, tables merge key by key
 
 `MALAC_HOME` moves `~/.malac` elsewhere. `malac config show` prints the merged result; `malac config path` prints the file locations.
 
-A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web` or `update`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
+A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web`, `update` or `profiles`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
 
 See [`examples/config.toml`](../examples/config.toml) for a complete example.
 
