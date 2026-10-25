@@ -301,55 +301,103 @@ export function popover(anchor, content, { align = "start", className = "", onCl
   return handle;
 }
 
+/**
+ * A modal dialog: traps Tab, closes on Escape or a backdrop click, and gives
+ * focus back to what had it. `initialFocus` picks the element to focus.
+ */
+export function modal({ title, body, footer, className = "", onClose, initialFocus }) {
+  const previous = document.activeElement;
+  let closed = false;
+  const close = (value) => {
+    if (closed) return;
+    closed = true;
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+    previous?.focus?.();
+    onClose?.(value);
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close(null);
+    } else if (event.key === "Tab") {
+      const focusable = [...overlay.querySelectorAll(FOCUSABLE)].filter((node) => !node.disabled && node.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  };
+  const box = h(
+    "div",
+    { class: `modal ${className}`.trim(), role: "dialog", "aria-modal": "true", "aria-label": title },
+    h("h2", { class: "modal-title" }, title),
+    h("div", { class: "modal-body" }, body),
+    footer ? h("div", { class: "modal-actions" }, footer) : null,
+  );
+  const overlay = h("div", { class: "modal-backdrop", onclick: (event) => event.target === overlay && close(null) }, box);
+  document.body.append(overlay);
+  document.addEventListener("keydown", onKey, true);
+  const target = initialFocus?.(box) ?? box.querySelector(".modal-body input, .modal-body textarea, .modal-body select") ?? box.querySelector("button");
+  target?.focus();
+  return { close, box };
+}
+
 /** A modal with a title, body and buttons. Resolves to the clicked button's value. */
 export function dialog({ title, body, buttons, className = "" }) {
   return new Promise((resolve) => {
-    const previous = document.activeElement;
-    const finish = (value) => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      previous?.focus?.();
-      resolve(value);
-    };
-    // Escape closes; Tab stays inside the dialog.
-    const onKey = (event) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        finish(null);
-      } else if (event.key === "Tab") {
-        const focusable = [...overlay.querySelectorAll(FOCUSABLE)].filter((node) => !node.disabled && node.offsetParent !== null);
-        if (!focusable.length) return;
-        const first = focusable[0];
-        const last = focusable.at(-1);
-        if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
-          event.preventDefault();
-          first.focus();
-        }
-      }
-    };
     const actions = buttons.map((button) =>
-      h("button", { class: `button ${button.kind ?? ""}`.trim(), type: "button", onclick: () => finish(button.value) }, button.label),
+      h("button", { class: `button ${button.kind ?? ""}`.trim(), type: "button", onclick: () => handle.close(button.value) }, button.label),
     );
-    const overlay = h(
-      "div",
-      { class: "modal-backdrop", onclick: (event) => event.target === overlay && finish(null) },
-      h(
-        "div",
-        { class: `modal ${className}`.trim(), role: "dialog", "aria-modal": "true", "aria-label": title },
-        h("h2", { class: "modal-title" }, title),
-        h("div", { class: "modal-body" }, body),
-        h("div", { class: "modal-actions" }, actions),
-      ),
-    );
-    document.body.append(overlay);
-    document.addEventListener("keydown", onKey, true);
     // The first field gets focus; otherwise Cancel for destructive dialogs, else the main action.
-    const field = overlay.querySelector(".modal-body input, .modal-body textarea, .modal-body select");
     const danger = actions.some((b) => b.classList.contains("danger"));
-    (field ?? (danger ? actions[0] : actions.find((b) => b.classList.contains("primary")) ?? actions[0]))?.focus();
+    const handle = modal({
+      title,
+      body,
+      footer: actions,
+      className,
+      onClose: (value) => resolve(value ?? null),
+      initialFocus: (box) =>
+        box.querySelector(".modal-body input, .modal-body textarea, .modal-body select") ??
+        (danger ? actions[0] : actions.find((b) => b.classList.contains("primary")) ?? actions[0]),
+    });
+  });
+}
+
+/** Asks for one line of text. Resolves to the trimmed text, or null. */
+export function promptDialog({ title, label, value = "", confirm = "Save", placeholder = "" }) {
+  return new Promise((resolve) => {
+    const input = h("input", { class: "input", type: "text", value, placeholder, "aria-label": label, autocomplete: "off", spellcheck: "false" });
+    const ok = h("button", { class: "button primary", type: "submit" }, confirm);
+    const form = h(
+      "form",
+      {
+        class: "prompt-form",
+        onsubmit: (event) => {
+          event.preventDefault();
+          if (input.value.trim()) handle.close(input.value.trim());
+        },
+      },
+      h("label", { class: "label" }, label),
+      input,
+    );
+    const handle = modal({
+      title,
+      body: form,
+      footer: [h("button", { class: "button", type: "button", onclick: () => handle.close(null) }, "Cancel"), ok],
+      onClose: (result) => resolve(result ?? null),
+    });
+    ok.addEventListener("click", (event) => {
+      event.preventDefault();
+      form.requestSubmit();
+    });
+    input.select();
   });
 }
 

@@ -181,9 +181,11 @@ pub fn header(
     if end < tabs.len() {
         b.push("›", bar.fg(t.dim));
     }
-    if fits_right {
+    if fits_right && !right.is_empty() {
         b.pad_to(width.saturating_sub(right_width), bar);
+        let start = b.x;
         b.push(format!("{right} "), bar.fg(t.dim));
+        b.spot(start, Target::Do(Action::Workspaces));
     }
     b.pad_to(width, bar);
     b.line(bar)
@@ -208,6 +210,10 @@ pub struct Status {
     /// `Some(remote)` while the web UI serves.
     pub web: Option<bool>,
     pub update: Option<String>,
+    /// The daemon runs another version than this terminal.
+    pub daemon: Option<String>,
+    /// What computer control is missing.
+    pub control: Option<&'static str>,
     pub branch: Option<String>,
     pub clock: String,
 }
@@ -334,6 +340,20 @@ pub fn status_line(status: &Status, width: u16) -> (Line<'static>, Vec<Spot>) {
             Some(Action::UpdateDialog),
         ));
     }
+    if let Some(daemon) = &status.daemon {
+        segments.push(segment(
+            vec![Span::styled(daemon.clone(), bar.fg(t.warning))],
+            4,
+            Some(Action::RestartDaemon),
+        ));
+    }
+    if let Some(control) = status.control {
+        segments.push(segment(
+            vec![Span::styled(control, bar.fg(t.warning))],
+            5,
+            Some(Action::RequestPermissions),
+        ));
+    }
     if let Some(branch) = &status.branch {
         segments.push(segment(
             vec![Span::styled(text::truncate(branch, 20).into_owned(), dim)],
@@ -446,12 +466,14 @@ mod tests {
 
     #[test]
     fn header_lists_menus_then_tabs() {
-        let (line, spots) = header(None, &tabs(2), 1, "malac 0.1.0", 100);
+        let (line, spots) = header(None, &tabs(2), 1, "default", 100);
         let text = line.to_string();
         assert!(text.starts_with(
             " Session  Model  Mode  Agents  View  Web  Help  │ 1 session 0 ✓  2 session 1 × "
         ));
-        assert!(text.ends_with("malac 0.1.0 "));
+        assert!(text.ends_with("default "), "the workspace's name");
+        let x = text.find("default").unwrap() as u16;
+        assert_eq!(spot_at(&spots, x), Some(&Target::Do(Action::Workspaces)));
         assert_eq!(text::width(&text), 100);
         let x = text.find("2 session").unwrap() as u16;
         assert_eq!(spot_at(&spots, x), Some(&Target::Tab(1)));
@@ -484,6 +506,8 @@ mod tests {
             approvals: 1,
             web: Some(false),
             update: None,
+            daemon: None,
+            control: None,
             branch: Some("main".into()),
             clock: "14:05".into(),
         }

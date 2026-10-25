@@ -91,22 +91,24 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 
 `malac` opens a full-screen terminal UI in the spirit of Midnight Commander and byobu. It works with the keyboard alone, and everything is also clickable.
 
-- **Header:** a menu bar (Session, Model, Mode, Agents, View, Web, Help; F9 opens it) and tabs, one per session.
-- **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, and subagents as live cards you can open, or pin as their own tab.
+- **Header:** a menu bar (Session, Model, Mode, Agents, View, Web, Help; F9 opens it), the workspace's tabs, one per project folder, and the workspace's name.
+- **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, and subagents as live cards you can open. A tab with several agents shows a switcher above it; F3 shows every agent as a list or a map.
 - **Footer:** a status line (model, mode, context, tokens and cost, running agents, pending approvals, web UI, git branch, update, clock) above a function-key bar.
 - **Dialogs:** permission requests (Allow / Always / Deny), a model picker across all providers, sessions, and help.
 
 | Key | | Key | |
 |---|---|---|---|
-| F1 | Help | Ctrl-T / Ctrl-W | New / close tab |
+| F1 | Help | Ctrl-T / Ctrl-W | New tab here / close tab |
 | F2, Ctrl-Y | Copy last answer | Alt-←/→, Alt-1…9 | Switch tab |
 | F3 | Agents view | Enter / Alt-Enter | Send / new line |
 | F4, Ctrl-P | Model picker | Esc, F8 | Stop the running turn |
 | F5, Shift-Tab | Cycle mode | Ctrl-G | Toggle sidebar |
 | F9, Ctrl-O | Menu bar | Ctrl-S | Mouse off, for selecting text |
-| F10 | Quit | Right-click | Context menu |
+| F10 | Quit (agents keep running) | Right-click | Context menu |
+| Alt-↑/↓, Ctrl-N | Switch agent / new agent in the tab | Drag, double-click | Select and copy text |
+| @, Ctrl-V | Attach a file / a clipboard image | Ctrl-R | Reconnect to the daemon |
 
-`--plain` (or `ui.tui = false`) uses a line-based interface instead, as a client of the daemon (see below). `-p`, `--json` and piped input always print plainly and run in-process. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
+Both it and `--plain` (or `ui.tui = false`, a line-based interface) are clients of the daemon (see below). `-p`, `--json` and piped input always print plainly and run in-process. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
 
 ## Workspaces and tabs
 
@@ -123,7 +125,7 @@ malac --plain -c                      # attach the last session of this director
 malac workspaces                      # list; rename <ws> <name>; delete <ws>
 ```
 
-The web UI and the editor extension share the daemon's workspaces. The full-screen terminal UI still runs its sessions in its own process; it becomes a daemon client next, and `-n`, `-w` and `--name` apply there once it does.
+The terminal UI, the web UI and the editor extension share the daemon's workspaces: `malac` reopens the last workspace where you left it, `-n` starts a clean one, `-w` opens one, `--name` names the tab (or, with `-n`, the workspace), and `malac "<prompt>"` adds a tab for the prompt. Several terminals can work on one workspace at once, and agents keep running when they close.
 
 ## The daemon
 

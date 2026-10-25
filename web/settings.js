@@ -5,11 +5,11 @@
 // configuration), so defaults are never written out; inherited values are
 // shown as placeholders.
 
-import { clone, confirmDialog, h, local, plural, setChildren, shortPath, toast } from "./dom.js";
+import { clone, confirmDialog, formatDuration, fullTime, h, local, plural, setChildren, shortPath, toast } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { markdownNode } from "./markdown.js";
-import { api, markAllStale, refresh, resource, state } from "./store.js";
-import { TAGLINE, updatePanel } from "./views.js";
+import { api, checkControl, markAllStale, refresh, resource, state } from "./store.js";
+import { TAGLINE, controlSummary, updatePanel } from "./views.js";
 import { modelPicker, toggle } from "./widgets.js";
 
 export const SECTIONS = [
@@ -58,7 +58,7 @@ const DEFAULTS = {
 };
 const NAME = /^[A-Za-z0-9_-]+$/;
 const RULE = /^[\w*?.\-]+(\(.*\))?$/;
-const TOP_SECTIONS = ["permissions", "control", "memory", "agents", "ui", "web", "update"];
+const TOP_SECTIONS = ["permissions", "control", "memory", "agents", "ui", "web", "update", "daemon"];
 
 // Paths and values
 
@@ -189,6 +189,7 @@ function validateUser(doc) {
   checkInt(errors, doc, ["agents", "max_concurrent"], { min: 1, max: 64, label: "Max concurrent" });
   checkInt(errors, doc, ["memory", "recall_limit"], { min: 1, max: 100, label: "Recall limit" });
   checkInt(errors, doc, ["web", "port"], { min: 0, max: 65535, label: "Port" });
+  checkInt(errors, doc, ["daemon", "idle_minutes"], { min: 0, label: "Idle minutes" });
   if (isObject(doc.memory?.vector)) {
     checkUrl(errors, doc, ["memory", "vector", "url"], ["http", "https"]);
     if (doc.memory.vector.collection === "") errors.set("memory.vector.collection", "A collection name is required");
@@ -461,7 +462,7 @@ export class SettingsPage {
     const bump = (id) => (counts[id] = (counts[id] ?? 0) + 1);
     for (const key of this.errors.keys()) {
       const head = key.split(".")[0];
-      const map = { update: "about", max_steps: "general", agents: "agents", memory: "memory", web: "interface", providers: "providers", models: "models", mcp: "mcp", permissions: "permissions", profiles: "profiles", control: "control" };
+      const map = { daemon: "interface", update: "about", max_steps: "general", agents: "agents", memory: "memory", web: "interface", providers: "providers", models: "models", mcp: "mcp", permissions: "permissions", profiles: "profiles", control: "control" };
       bump(map[head] ?? "general");
     }
     for (let i = 0; i < this.controlErrors.size; i += 1) bump("control");
@@ -1604,23 +1605,22 @@ export class SettingsPage {
 
   controlSection() {
     const tools = resource("tools").data;
-    const live = tools?.servers?.find((s) => s.name === "control");
-    const enabled = getPath(this.draft, ["control", "enabled"]) ?? this.data.effective.control?.enabled ?? true;
+    const control = state.control;
+    const summary = controlSummary(control);
     const controlTools = (tools?.tools ?? []).filter((t) => /^(browser|computer)_/.test(t.name));
     const profiles = Object.entries(this.control.browser?.profiles ?? {});
-    const statusLine = !enabled
-      ? h("span", { class: "status muted" }, h("span", { class: "dot idle" }), "Disabled")
-      : live
-        ? live.error
-          ? h("span", { class: "status bad", title: live.error }, h("span", { class: "dot failed" }), "Unavailable")
-          : h("span", { class: "status ok" }, h("span", { class: "dot ok" }), `Connected, ${plural(live.tools, "tool")}`)
-        : h("span", { class: "status muted" }, h("span", { class: "dot idle" }), "Not running");
     return [
       this.group(
         "Status",
         [
-          h("div", { class: "card-row" }, h("span", {}, "Control service"), statusLine),
-          live?.error ? h("p", { class: "field-error block" }, live.error) : null,
+          h(
+            "div",
+            { class: "card-row" },
+            h("span", {}, "Control service"),
+            h("span", { class: `status ${summary.kind}` }, h("span", { class: `dot ${summary.dot}` }), summary.text),
+          ),
+          control?.error ? h("p", { class: "field-note" }, icon("info", 14), control.error) : null,
+          this.permissionsBlock(control),
           controlTools.length ? h("div", { class: "chips static" }, controlTools.map((t) => h("span", { class: "chip", title: t.description }, t.name))) : null,
         ],
         { description: "malac-control drives a browser and the desktop for agents. It runs next to malac or as a separate service." },
@@ -1660,6 +1660,60 @@ export class SettingsPage {
         ],
       ),
     ];
+  }
+
+  // macOS grants Screen Recording and Accessibility to the app that runs
+  // malac-control; requesting them opens the system prompts.
+  permissionsBlock(control) {
+    if (!control?.connected) return null;
+    const p = control.permissions;
+    const state3 = (value) =>
+      value === true
+        ? h("span", { class: "status ok" }, h("span", { class: "dot ok" }), "Granted")
+        : value === false
+          ? h("span", { class: "status warn" }, h("span", { class: "dot waiting" }), "Not granted")
+          : h("span", { class: "status muted" }, "Not needed here");
+    const check = async (request) => {
+      if (request) {
+        const ok = await confirmDialog({
+          title: "Request permissions?",
+          message: "macOS shows its Screen Recording and Accessibility prompts and opens System Settings at the missing ones.",
+          confirm: "Request permissions",
+        });
+        if (!ok) return;
+      }
+      try {
+        await checkControl(request);
+        this.render();
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+    const missing = p && (p.screen_recording === false || p.accessibility === false);
+    return h(
+      "div",
+      { class: "permissions-block" },
+      p
+        ? h(
+            "dl",
+            { class: "kv" },
+            h("dt", {}, "Platform"),
+            h("dd", {}, { macos: "macOS", linux: "Linux", windows: "Windows" }[p.platform] ?? p.platform ?? "Unknown"),
+            h("dt", {}, "Screen Recording"),
+            h("dd", {}, state3(p.screen_recording)),
+            h("dt", {}, "Accessibility"),
+            h("dd", {}, state3(p.accessibility)),
+            p.app ? [h("dt", {}, "Granted to"), h("dd", { class: "path", title: p.app.path }, p.app.name ?? p.app.path)] : null,
+          )
+        : h("p", { class: "muted small" }, "The control service did not report its permissions."),
+      p?.hint ? h("p", { class: "field-note" }, icon("info", 14), p.hint) : null,
+      h(
+        "div",
+        { class: "row-actions" },
+        h("button", { class: "button small", type: "button", onclick: () => check(false) }, icon("refresh", 14), "Check again"),
+        missing ? h("button", { class: "button small primary", type: "button", onclick: () => check(true) }, "Request permissions") : null,
+      ),
+    );
   }
 
   profileRow(name, profile) {
@@ -2193,6 +2247,23 @@ export class SettingsPage {
         this.field(["ui", "tui"], { type: "toggle", label: "Full-screen terminal UI", help: "Use the full-screen interface in a terminal. Off keeps the line-based REPL.", default: true }),
       ]),
       this.group(
+        "Daemon",
+        [
+          this.field(["daemon", "idle_minutes"], {
+            type: "int",
+            label: "Stop when idle",
+            help: "Minutes without clients, running agents or jobs before the daemon exits. 0 keeps it running.",
+            placeholder: "120",
+          }),
+          this.field(["daemon", "browse_root"], {
+            label: "Folder picker root",
+            help: "New tabs can only be opened below this folder.",
+            placeholder: "The home directory",
+          }),
+        ],
+        { description: "Applies the next time the daemon starts." },
+      ),
+      this.group(
         "Web",
         [
           this.field(["web", "enabled"], { type: "toggle", label: "Serve with terminal sessions", help: "Start this web UI next to every interactive terminal session.", default: false }),
@@ -2231,8 +2302,9 @@ export class SettingsPage {
           h("p", { class: "muted" }, TAGLINE),
         ),
       ),
+      this.daemonGroup(),
       this.group("Software update", [updatePanel().el], {
-        description: "Updating never interrupts running agents. The server keeps the version it started with until it is restarted.",
+        description: "Updating never interrupts running agents. The daemon keeps the version it started with until it is restarted.",
       }),
       this.fileNote(),
       this.group("Update settings", [
@@ -2240,6 +2312,78 @@ export class SettingsPage {
         this.field(["update", "auto"], { type: "toggle", label: "Install automatically", help: "Install new releases in the background. Running sessions keep their version until restarted.", default: false }),
       ]),
     ];
+  }
+
+  // The daemon serving this page: from the snapshot, plus GET /api/daemon.
+  daemonGroup() {
+    const d = state.daemon;
+    if (!d) return null;
+    const info = resource("daemon");
+    if (!info.loading && (!info.at || Date.now() - info.at > 5000)) refresh("daemon").then(() => this.section === "about" && this.render());
+    const i = info.data;
+    const uptime = d.started ? formatDuration(Date.now() - Date.parse(d.started)) : "–";
+    const stop = async () => {
+      const busy = i && (i.agents_running || i.jobs_running);
+      const ok = await confirmDialog({
+        title: "Stop the daemon?",
+        message: busy
+          ? `${plural(i.agents_running, "agent")} and ${plural(i.jobs_running, "job")} are running and will be stopped. Workspaces and transcripts are kept; malac starts the daemon again when needed.`
+          : "Workspaces and transcripts are kept; malac starts the daemon again when needed. This page reconnects once it runs again.",
+        confirm: "Stop daemon",
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api("/api/daemon/stop", { method: "POST", body: { force: Boolean(busy) } });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
+    return this.group(
+      "Daemon",
+      [
+        h(
+          "dl",
+          { class: "kv" },
+          h("dt", {}, "Version"),
+          h("dd", { class: "tabular" }, d.version, d.version_mismatch ? h("span", { class: "muted" }, " (differs from this client)") : null),
+          h("dt", {}, "Process"),
+          h("dd", { class: "tabular" }, `pid ${d.pid}`),
+          h("dt", {}, "Running for"),
+          h("dd", { class: "tabular", title: fullTime(d.started) }, uptime),
+          h("dt", {}, "Clients"),
+          h("dd", { class: "tabular" }, `${plural(i?.clients ?? d.clients, "client")} connected`),
+          h("dt", {}, "Listening"),
+          h("dd", {}, i?.url ?? location.origin, d.remote ? h("span", { class: "muted" }, " and on the network") : null),
+          i
+            ? [
+                h("dt", {}, "Now"),
+                h(
+                  "dd",
+                  { class: "tabular" },
+                  [
+                    plural(i.workspaces, "workspace"),
+                    `${plural(i.tabs_loaded, "tab")} loaded`,
+                    `${plural(i.agents_running, "agent")} running`,
+                    `${plural(i.jobs_running, "job")} running`,
+                    i.pending_approvals ? `${plural(i.pending_approvals, "approval")} waiting` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · "),
+                ),
+              ]
+            : null,
+        ),
+        d.attached ? h("p", { class: "field-note" }, icon("info", 14), "This page belongs to a terminal session, not the daemon; workspaces and tabs are not available here.") : null,
+        h(
+          "div",
+          { class: "row-actions" },
+          h("button", { class: "button small", type: "button", onclick: () => refresh("daemon").then(() => this.render()) }, icon("refresh", 14), "Refresh"),
+          d.attached ? null : h("button", { class: "button small danger", type: "button", onclick: stop }, "Stop daemon"),
+        ),
+      ],
+      { description: "One daemon per user holds every workspace, tab and agent. Terminals, browsers and editors are its clients." },
+    );
   }
 
   // Advanced: raw TOML

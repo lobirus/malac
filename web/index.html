@@ -21,7 +21,7 @@
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <div id="app" class="app">
-    <aside id="sidebar" class="sidebar" aria-label="Sessions and agents">
+    <aside id="sidebar" class="sidebar" aria-label="Workspace">
       <div class="sidebar-head">
         <a id="brand" class="brand" href="#" aria-label="malac home">
           <span id="brand-logo" class="brand-logo"></span>
@@ -30,24 +30,27 @@
         <span id="connection" class="connection" role="status"></span>
         <button id="collapse-sidebar" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar ([)"></button>
       </div>
+      <div id="workspace-slot" class="workspace-slot"></div>
       <div class="sidebar-actions">
-        <button id="new-session" class="button primary wide" type="button" title="New session (N)"></button>
+        <button id="new-agent" class="button primary wide" type="button" title="New agent in this tab (N)"></button>
+        <button id="new-tab" class="button wide" type="button" title="Open a folder in a new tab (T)"></button>
       </div>
       <nav class="sidebar-nav" aria-label="Views">
         <a class="nav-link" href="#" data-route="home"></a>
         <a class="nav-link" href="#agents" data-route="agents"></a>
+        <a class="nav-link" href="#jobs" data-route="jobs"></a>
         <a class="nav-link" href="#settings" data-route="settings"></a>
       </nav>
       <div class="sidebar-scroll">
-        <section id="live-section" class="sidebar-section" aria-labelledby="live-title" hidden>
-          <h2 id="live-title" class="sidebar-title">Live agents</h2>
+        <section id="tab-section" class="sidebar-section" aria-labelledby="tab-section-title" hidden>
+          <h2 id="tab-section-title" class="sidebar-title">In this tab</h2>
           <ul id="agent-tree" class="tree"></ul>
         </section>
         <section class="sidebar-section" aria-labelledby="sessions-title">
           <div class="sidebar-title-row">
-            <h2 id="sessions-title" class="sidebar-title">Sessions</h2>
+            <h2 id="sessions-title" class="sidebar-title">History</h2>
             <div id="session-scope" class="segmented tiny" role="group" aria-label="Which sessions">
-              <button type="button" data-scope="project">This project</button>
+              <button type="button" data-scope="project">This folder</button>
               <button type="button" data-scope="all">All</button>
             </div>
           </div>
@@ -59,25 +62,28 @@
         </section>
       </div>
       <footer class="sidebar-foot">
-        <span id="project" class="project"></span>
+        <span id="daemon-status" class="daemon-status"></span>
         <span id="version" class="version"></span>
       </footer>
     </aside>
     <div id="backdrop" class="backdrop"></div>
     <main id="main" class="main">
-      <header class="topbar">
+      <header class="tabbar">
         <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Show sidebar" title="Show sidebar ([)"></button>
-        <nav id="breadcrumb" class="breadcrumb" aria-label="Location"></nav>
-        <div id="topbar-status" class="topbar-status"></div>
-        <div id="topbar-controls" class="topbar-controls"></div>
+        <div id="tabs" class="tabs-host"></div>
         <div class="topbar-end">
           <button id="update-button" class="update-chip" type="button" hidden aria-haspopup="dialog"></button>
-          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch theme" title="Switch theme (T)"></button>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch theme" title="Switch theme (D)"></button>
           <button id="help-button" class="icon-button" type="button" aria-label="Keyboard shortcuts and about" title="Keyboard shortcuts (?)"></button>
           <a id="settings-button" class="icon-button" href="#settings" aria-label="Settings" title="Settings (,)"></a>
         </div>
       </header>
-      <div id="offline" class="offline-banner" role="status" hidden>Lost the connection to malac. Reconnecting…</div>
+      <header class="topbar">
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Location"></nav>
+        <div id="topbar-status" class="topbar-status"></div>
+        <div id="topbar-controls" class="topbar-controls"></div>
+      </header>
+      <div id="banners" class="banners" aria-live="polite"></div>
       <section id="permissions" class="permissions" aria-label="Pending approvals" aria-live="polite"></section>
       <div id="content" class="content" tabindex="-1"></div>
       <div id="composer-dock" class="composer-dock">
@@ -89,6 +95,7 @@
             <textarea id="input" rows="1"></textarea>
             <div class="composer-bar">
               <button id="attach" class="icon-button" type="button" aria-label="Attach images" title="Attach images"></button>
+              <button id="attach-path" class="icon-button" type="button" aria-label="Attach files from the tab's folder" title="Attach files from the tab's folder" aria-haspopup="dialog"></button>
               <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
               <span id="composer-model" class="composer-model"></span>
               <span class="composer-hint"><kbd>Enter</kbd> to send, <kbd>Shift</kbd> <kbd>Enter</kbd> for a new line</span>

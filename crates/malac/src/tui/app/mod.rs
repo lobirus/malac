@@ -1,39 +1,50 @@
-//! The application: tabs over agents, the prompt editor, menus and dialogs,
-//! and what every key, click and action does.
+//! The application: a workspace's tabs as the daemon holds them, the agents
+//! working in each, the prompt editor, menus and dialogs, and what every
+//! key, click, action and daemon message does. Everything shown is built
+//! from the daemon's snapshot and the changes it broadcasts; everything
+//! the user asks for goes through [`Backend`].
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use malac_core::config;
+use malac_core::agent::AgentInfo;
+use malac_core::config::{self, Config};
 use malac_core::event::{AgentId, Envelope, Event, Level, TurnStatus};
-use malac_core::permission::{Decision, Mode};
-use malac_core::provider::ProviderModels;
+use malac_core::permission::{Decision, Mode, PermissionRequest};
 use malac_core::session::{self, SessionSummary};
-use malac_core::update::{self, Status};
-use malac_core::{AgentHandle, AgentSnapshot, AgentSpec, AgentStatus, Block};
+use malac_core::tools::Tool;
+use malac_core::update::Status;
+use malac_core::{AgentSnapshot, AgentStatus};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use tokio::sync::mpsc;
+use serde::Deserialize;
 
-use super::Pending;
 use super::agentmap::{AgentMap, Node, State};
 use super::attach::{self, Attachment};
 use super::bars::{self, Mark};
-use super::dialog::{self, Approval, Help, PickKind, Picker, Rename, Row, UpdateDialog};
+use super::dialog::{
+    self, Approval, Ask, Confirm, Help, PickKind, Picker, Rename, Row, UpdateDialog,
+};
 use super::editor::{self, Editor};
 use super::files;
 use super::folder::FolderBrowser;
-use super::jobs::{self, Job, JobStatus, JobsView};
+use super::jobs::JobsView;
 use super::menu::{Item, Menu, Place};
 use super::select::{self, Point, Selection};
 use super::term;
 use super::text;
 use super::theme::theme;
 use super::transcript::{AgentView, Agents, Entry, SPINNER, duration};
+use crate::client::{Client, Events};
+use crate::protocol::{
+    ControlStatus, DaemonStatus, JobView, ServerMessage, Snapshot, TabId, TabView,
+    WorkspaceSummary, WorkspaceView,
+};
 use crate::render::tokens;
-use crate::repl::{COMMANDS, Session, Slash};
+use crate::repl::{COMMANDS, Slash};
 
 mod actions;
 mod backend;
@@ -41,6 +52,7 @@ mod input;
 mod mouse;
 
 pub use actions::Action;
+pub use backend::{Backend, Connection, Reply, Rest};
 
 /// Commands only the full-screen interface has, completed with the rest.
 pub const TUI_COMMANDS: &[(&str, &str, &str)] = &[
@@ -112,11 +124,21 @@ pub enum Focus {
     Transcript,
 }
 
-/// One tab: a session, or a subagent pinned to its own tab.
+/// One tab: a project folder in the workspace and the agents working in
+/// it, plus what this terminal shows of it.
 pub struct Tab {
-    pub handle: AgentHandle,
-    pub title: Option<String>,
-    /// Subagents opened inside this tab, innermost last.
+    /// `None` until the daemon has created the tab.
+    pub id: Option<TabId>,
+    pub name: String,
+    pub cwd: PathBuf,
+    /// Top-level agents, in the daemon's order.
+    pub agents: Vec<AgentId>,
+    /// The agent this terminal shows: the daemon's active one at first.
+    pub agent: Option<AgentId>,
+    pub mode: Mode,
+    /// The model for the tab's next new agent.
+    pub model: Option<String>,
+    /// Subagents opened inside the shown agent, innermost last.
     pub view: Vec<AgentId>,
     /// Top row while scrolled up; `None` follows new output.
     pub scroll: Option<usize>,
@@ -127,6 +149,10 @@ pub struct Tab {
     pub draft_attachments: Vec<Attachment>,
     /// Prompts typed while the agent was busy, sent one by one as it frees up.
     pub queued: VecDeque<Prompt>,
+    /// A prompt is on its way and its turn has not started yet.
+    pub sending: bool,
+    /// This terminal asked the daemon to create the tab.
+    pub creating: bool,
 }
 
 /// A prompt on its way: what was typed and what was attached.
@@ -152,10 +178,16 @@ impl From<&str> for Prompt {
 }
 
 impl Tab {
-    fn new(handle: AgentHandle) -> Self {
+    /// A tab this terminal shows before the daemon has one, for an empty workspace.
+    fn placeholder(cwd: PathBuf) -> Self {
         Self {
-            handle,
-            title: None,
+            id: None,
+            name: text::truncate(&short_path(&cwd), 18).into_owned(),
+            cwd,
+            agents: Vec::new(),
+            agent: None,
+            mode: Mode::Ask,
+            model: None,
             view: Vec::new(),
             scroll: None,
             seen: 0,
@@ -163,20 +195,38 @@ impl Tab {
             draft: String::new(),
             draft_attachments: Vec::new(),
             queued: VecDeque::new(),
+            sending: false,
+            creating: false,
         }
     }
 
-    pub fn root(&self) -> &str {
-        &self.handle.id
+    fn from_view(view: &TabView) -> Self {
+        let mut tab = Self::placeholder(view.cwd.clone());
+        tab.id = Some(view.id.clone());
+        tab.update_from(view);
+        tab
     }
 
-    pub fn shown(&self) -> &str {
-        self.view.last().map_or(self.root(), String::as_str)
+    /// Takes the daemon's view of the tab, keeping what this terminal shows
+    /// unless its agent left the tab.
+    fn update_from(&mut self, view: &TabView) {
+        self.name = view.name.clone();
+        self.cwd = view.cwd.clone();
+        self.agents = view.agents.clone();
+        self.mode = view.mode;
+        if self.agent.as_ref().is_none_or(|a| !self.agents.contains(a)) {
+            self.agent = view.active_agent.clone();
+            self.reset_view();
+        }
     }
 
-    /// Pinned subagents are watched, not prompted.
-    pub fn read_only(&self) -> bool {
-        self.handle.info().parent.is_some()
+    /// The agent shown when no subagent is opened.
+    pub fn root(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
+    pub fn shown(&self) -> Option<&str> {
+        self.view.last().map(String::as_str).or(self.root())
     }
 
     fn reset_view(&mut self) {
@@ -191,25 +241,30 @@ pub enum Overlay {
     Models(Picker),
     Sessions(Picker),
     Agents(Picker),
+    Workspaces(Picker),
     AgentMap(AgentMap),
     Folder(FolderBrowser),
     Jobs(JobsView),
     Help(Help),
     Rename(Rename),
+    Confirm(Confirm),
     Update(UpdateDialog),
 }
 
 /// Results of work done in the background.
 pub enum Update {
-    Models(Vec<ProviderModels>),
-    Checked(Result<Status, String>),
-    Installed(Result<Status, String>),
+    /// The daemon's reply to a command, and what it was for.
+    Reply(Reply, Result<ServerMessage, String>),
+    /// A REST answer.
+    Rest(Rest, Result<serde_json::Value, String>),
     Files {
         root: PathBuf,
         list: Vec<String>,
     },
     /// The clipboard's image, saved to a file.
     Pasted(Result<PathBuf, String>),
+    /// Reconnecting gave up, with why.
+    Unreachable(String),
 }
 
 /// Where things were drawn in the last frame, for keys that depend on layout.
@@ -270,8 +325,51 @@ pub enum AgentsView {
     Map,
 }
 
+/// A provider and the models it offers, as `GET /api/models` reports.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Discovered {
+    pub provider: String,
+    #[serde(default)]
+    pub configured: Vec<String>,
+    #[serde(default)]
+    pub available: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl Discovered {
+    /// Configured models first, then the rest the provider reports.
+    pub fn all(&self) -> Vec<String> {
+        let mut models = self.configured.clone();
+        for model in &self.available {
+            if !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        models
+    }
+}
+
+/// The connection to the daemon, as the interface sees it.
+pub struct Link {
+    pub connected: bool,
+    /// Trying to connect again, in the background.
+    pub reconnecting: bool,
+    /// Why the daemon said it stopped.
+    pub stopped: Option<String>,
+    /// This terminal asked the daemon to stop, to start a fresh one.
+    pub restarting: bool,
+}
+
 pub struct App {
-    pub session: Session,
+    pub backend: Backend,
+    /// The user's settings, for display only: thinking and context windows.
+    pub config: Config,
+    pub daemon: DaemonStatus,
+    pub link: Link,
+    pub workspace_id: Option<String>,
+    pub workspace_name: String,
+    pub workspaces: Vec<WorkspaceSummary>,
     pub agents: Agents,
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -285,11 +383,17 @@ pub struct App {
     /// The user's choice; `None` shows the sidebar on wide terminals.
     pub sidebar: Option<bool>,
     pub mouse_capture: bool,
-    pub models: Vec<ProviderModels>,
+    /// Every configured `provider/model`.
+    pub models: Vec<String>,
+    pub default_model: Option<String>,
+    /// What the providers report, once asked.
+    pub discovered: Vec<Discovered>,
     pub discovering: bool,
     pub update: Status,
+    pub control: ControlStatus,
     pub hits: HitMap,
     pub geometry: Geometry,
+    /// Every agent of the workspace as last reported, kept current from events.
     pub snapshots: HashMap<AgentId, AgentSnapshot>,
     pub branch: Option<String>,
     pub recent: Vec<SessionSummary>,
@@ -307,9 +411,14 @@ pub struct App {
     pub file_choice: usize,
     /// Where the `@` was when the picker was dismissed with Esc.
     file_dismissed: Option<usize>,
-    pub jobs: Vec<Job>,
+    pub jobs: Vec<JobView>,
     jobs_polled: Instant,
     pub agents_view: AgentsView,
+    /// The tab this terminal created and shows once the daemon announces it.
+    focus_tab: Option<TabId>,
+    /// Where `malac` started, for a workspace's first tab.
+    pub home_cwd: PathBuf,
+    tools: Vec<Arc<dyn Tool>>,
     pub started: Instant,
     pub dirty: bool,
     pub clear_screen: bool,
@@ -318,22 +427,42 @@ pub struct App {
     clock: String,
     branch_read: Instant,
     history_path: PathBuf,
-    tx: mpsc::UnboundedSender<Update>,
 }
 
 /// Approval keys are ignored this long after a prompt appears, so typing
 /// that was meant for the editor cannot answer it.
 const ANSWER_GUARD: Duration = Duration::from_millis(300);
 const DOUBLE_PRESS: Duration = Duration::from_millis(1200);
+/// How often an open jobs view refreshes the log it shows.
+const LOG_REFRESH: Duration = Duration::from_secs(1);
 
 impl App {
-    pub fn new(session: Session, tx: mpsc::UnboundedSender<Update>) -> Self {
+    /// The interface for the workspace `launched` opened, on a connection
+    /// whose first message was `snapshot`.
+    pub fn new(
+        backend: Backend,
+        config: Config,
+        snapshot: Snapshot,
+        workspace: &WorkspaceView,
+        tab: Option<&str>,
+        cwd: PathBuf,
+    ) -> Self {
         let history_path = config::home_dir().join("history.txt");
-        let runtime = session.runtime.clone();
         let mut agents = Agents::default();
-        agents.show_thinking = runtime.config.ui.show_thinking;
-        let first = session.handle.clone();
+        agents.show_thinking = config.ui.show_thinking;
         let mut app = Self {
+            backend,
+            config,
+            daemon: snapshot.daemon.clone(),
+            link: Link {
+                connected: true,
+                reconnecting: false,
+                stopped: None,
+                restarting: false,
+            },
+            workspace_id: None,
+            workspace_name: String::new(),
+            workspaces: Vec::new(),
             agents,
             tabs: Vec::new(),
             active: 0,
@@ -347,12 +476,15 @@ impl App {
             sidebar: None,
             mouse_capture: true,
             models: Vec::new(),
+            default_model: None,
+            discovered: Vec::new(),
             discovering: false,
-            update: update::status(),
+            update: snapshot.update.clone(),
+            control: ControlStatus::default(),
             hits: HitMap::default(),
             geometry: Geometry::default(),
             snapshots: HashMap::new(),
-            branch: git_branch(&runtime.cwd),
+            branch: None,
             recent: Vec::new(),
             flash: None,
             selection: None,
@@ -366,6 +498,9 @@ impl App {
             jobs: Vec::new(),
             jobs_polled: Instant::now(),
             agents_view: AgentsView::List,
+            focus_tab: None,
+            home_cwd: cwd,
+            tools: malac_core::tools::builtin(),
             started: Instant::now(),
             dirty: true,
             clear_screen: false,
@@ -374,27 +509,16 @@ impl App {
             clock: String::new(),
             branch_read: Instant::now(),
             history_path,
-            tx,
-            session,
         };
-        app.open_tab(first);
-        app.recent = session::list(false, 40)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| s.meta.cwd == runtime.cwd && s.meta.id != app.tabs[0].root())
-            .filter(|s| !s.title.is_empty())
-            .take(5)
-            .collect();
-        for server in runtime.servers() {
-            if let Some(err) = server.error {
-                let first = err.lines().next().unwrap_or_default().to_owned();
-                app.notice(
-                    Level::Warning,
-                    format!("MCP server `{}` unavailable: {first}", server.name),
-                );
-            }
+        app.apply_snapshot(Snapshot {
+            workspace: Some(workspace.clone()),
+            ..snapshot
+        });
+        if let Some(index) = tab.and_then(|id| app.tab_index(id)) {
+            app.active = index;
         }
-        app.refresh_snapshots();
+        app.branch = git_branch(&app.tab_cwd());
+        app.recent = recent_sessions(&app.tab_cwd(), &app.tabs);
         app
     }
 
@@ -406,18 +530,26 @@ impl App {
         &mut self.tabs[self.active]
     }
 
-    pub fn shown(&self) -> Option<&AgentView> {
-        self.agents.get(self.tab().shown())
+    fn tab_index(&self, id: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id.as_deref() == Some(id))
     }
 
-    pub fn refresh_snapshots(&mut self) {
-        self.snapshots = self
-            .session
-            .runtime
-            .agents()
-            .into_iter()
-            .map(|s| (s.info.id.clone(), s))
-            .collect();
+    /// The tab a top-level agent or one of its subagents belongs to.
+    fn tab_of_agent(&self, id: &str) -> Option<usize> {
+        let root = self.agents.root_of(id);
+        self.tabs.iter().position(|t| {
+            t.agent.as_deref() == Some(root) || t.agents.iter().any(|a| a == root || a == id)
+        })
+    }
+
+    pub fn shown(&self) -> Option<&AgentView> {
+        self.agents.get(self.tab().shown()?)
+    }
+
+    /// The shown agent and its subagents, with their depth.
+    pub fn tree(&self, tab: &Tab) -> Vec<(usize, &AgentView)> {
+        tab.root()
+            .map_or_else(Vec::new, |root| self.agents.tree(root))
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -431,14 +563,22 @@ impl App {
             .is_some_and(|s| s.status == AgentStatus::Running)
     }
 
-    /// The active tab's agents are working, or have work queued.
+    fn tab_busy(&self, tab: &Tab) -> bool {
+        tab.sending || self.tree(tab).iter().any(|(_, v)| self.is_running(&v.id))
+    }
+
+    /// The shown agent of the active tab works, or a prompt is on its way.
     pub fn busy(&self) -> bool {
-        let tab = self.tab();
-        tab.handle.is_busy()
-            || self
+        self.tab_busy(self.tab())
+    }
+
+    /// Whether any agent of a tab works, the one shown or another.
+    fn tab_working(&self, tab: &Tab) -> bool {
+        tab.sending
+            || tab
                 .agents
-                .tree(tab.root())
                 .iter()
+                .flat_map(|root| self.agents.tree(root))
                 .any(|(_, v)| self.is_running(&v.id))
     }
 
@@ -470,61 +610,40 @@ impl App {
         });
     }
 
-    /// Adds a line to the transcript on screen.
+    /// Adds a line to the transcript on screen, or flashes it when no
+    /// agent is shown yet.
     pub fn notice(&mut self, level: Level, message: impl Into<String>) {
-        self.push_entry(Entry::Notice(level, message.into()));
+        let message = message.into();
+        if !self.push_entry(Entry::Notice(level, message.clone())) {
+            self.flash(message);
+        }
     }
 
     fn info(&mut self, lines: Vec<Line<'static>>) {
-        self.push_entry(Entry::Info(lines));
-        self.tab_mut().scroll = None;
-    }
-
-    fn push_entry(&mut self, entry: Entry) {
-        let id = self.tab().shown().to_owned();
-        if let Some(view) = self.agents.get_mut(&id) {
-            view.transcript.push(entry);
+        if self.push_entry(Entry::Info(lines)) {
+            self.tab_mut().scroll = None;
         }
     }
 
-    /// Makes sure the agent has a view, filled from its saved session.
-    fn ensure_view(&mut self, handle: &AgentHandle) {
-        if self.agents.get(&handle.id).is_some() {
-            return;
+    fn push_entry(&mut self, entry: Entry) -> bool {
+        let Some(id) = self.tab().shown().map(str::to_owned) else {
+            return false;
+        };
+        match self.agents.get_mut(&id) {
+            Some(view) => {
+                view.transcript.push(entry);
+                true
+            }
+            None => false,
         }
-        let snapshot = handle.snapshot();
-        let mut view = AgentView::new(
-            &handle.id,
-            &snapshot.info.label,
-            snapshot.info.parent.clone(),
-            &snapshot.model,
-            &snapshot.info.cwd.display().to_string(),
-        );
-        if let Ok(saved) = session::load(&handle.id) {
-            let tools = self.session.runtime.tools();
-            view.transcript.load(&saved.history, |name, input| {
-                tools
-                    .iter()
-                    .find(|t| t.name() == name)
-                    .map(|t| t.summary(input))
-                    .unwrap_or_else(|| malac_core::tools::summarize_arguments(input))
-            });
-            view.total = saved.usage;
-        }
-        self.agents.insert(view);
-    }
-
-    fn open_tab(&mut self, handle: AgentHandle) -> usize {
-        self.ensure_view(&handle);
-        self.tabs.push(Tab::new(handle));
-        self.tabs.len() - 1
     }
 
     fn switch_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
-        if index != self.active {
+        let changed = index != self.active;
+        if changed {
             self.stash_draft();
             self.active = index;
             self.restore_draft();
@@ -532,7 +651,11 @@ impl App {
         self.focus = Focus::Input;
         self.selection = None;
         self.branch = git_branch(&self.tab_cwd());
-        self.session.switch_to(self.tabs[index].handle.clone());
+        // The daemon remembers the active tab, which `malac` returns to.
+        if let Some(id) = self.tab().id.clone().filter(|_| changed) {
+            self.backend
+                .command(crate::protocol::Command::TabActivate { tab: id });
+        }
     }
 
     /// Keeps what is being written with the active tab.
@@ -553,34 +676,21 @@ impl App {
 
     pub fn tab_label(&self, index: usize) -> String {
         let tab = &self.tabs[index];
-        if let Some(title) = &tab.title {
-            return title.clone();
+        if tab.name.is_empty() {
+            "new".to_owned()
+        } else {
+            tab.name.clone()
         }
-        let view = self.agents.get(tab.root());
-        if tab.read_only() {
-            return view.map_or_else(|| "agent".to_owned(), |v| v.label.clone());
-        }
-        view.and_then(|v| {
-            v.transcript.items().iter().find_map(|i| match &i.entry {
-                Entry::User(text) => {
-                    let (prompt, mentions) = attach::split_user_text(text);
-                    let first = text::first_line(&prompt).to_owned();
-                    match mentions.first() {
-                        Some(mention) if first.is_empty() => Some(mention.name.clone()),
-                        _ => Some(first),
-                    }
-                }
-                _ => None,
-            })
-        })
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "new".to_owned())
     }
 
     pub fn tab_mark(&self, index: usize) -> Mark {
         let tab = &self.tabs[index];
-        let tree = self.agents.tree(tab.root());
-        let ids: Vec<&str> = tree.iter().map(|(_, v)| v.id.as_str()).collect();
+        let ids: Vec<&str> = tab
+            .agents
+            .iter()
+            .flat_map(|root| self.agents.tree(root))
+            .map(|(_, v)| v.id.as_str())
+            .collect();
         if self
             .approvals
             .iter()
@@ -588,10 +698,14 @@ impl App {
         {
             return Mark::Waiting;
         }
-        if tab.handle.is_busy() || ids.iter().any(|id| self.is_running(id)) {
+        if self.tab_working(tab) {
             return Mark::Running(self.spinner());
         }
-        match self.agents.get(tab.root()).and_then(|v| v.last_status) {
+        match tab
+            .root()
+            .and_then(|r| self.agents.get(r))
+            .and_then(|v| v.last_status)
+        {
             Some(TurnStatus::Completed) => Mark::Done,
             Some(TurnStatus::Failed) => Mark::Failed,
             _ => Mark::Idle,
@@ -608,7 +722,7 @@ impl App {
 
     /// The `@` being typed before the cursor and the query after it.
     pub fn file_query(&self) -> Option<(usize, &str)> {
-        if self.focus != Focus::Input || self.tab().read_only() {
+        if self.focus != Focus::Input {
             return None;
         }
         let text = &self.editor.text()[..self.editor.cursor_offset()];
@@ -630,7 +744,7 @@ impl App {
         }
     }
 
-    /// Attaches a file; refusals are flashed.
+    /// Attaches a file or folder; refusals are flashed.
     pub fn attach(&mut self, path: &Path) -> bool {
         match Attachment::open(path, &self.tab_cwd()) {
             Ok(attachment) => {
@@ -646,61 +760,456 @@ impl App {
         }
     }
 
-    pub fn on_bus(&mut self, envelope: &Envelope) {
+    /// The working directory of the active tab.
+    pub fn tab_cwd(&self) -> PathBuf {
+        self.tab().cwd.clone()
+    }
+
+    fn is_ours(&self, workspace: &str) -> bool {
+        self.workspace_id.as_deref() == Some(workspace)
+    }
+
+    /// Applies a message the daemon broadcast or sent unasked.
+    pub fn on_message(&mut self, message: ServerMessage) {
+        self.dirty = true;
+        match message {
+            ServerMessage::Event {
+                workspace,
+                envelope,
+                ..
+            } => self.on_event(workspace.as_deref(), &envelope),
+            ServerMessage::Snapshot(snapshot) => self.apply_snapshot(*snapshot),
+            ServerMessage::WorkspaceCreated { workspace }
+            | ServerMessage::WorkspaceUpdated { workspace } => {
+                if self.is_ours(&workspace.id) {
+                    self.workspace_name = workspace.name.clone();
+                }
+                match self.workspaces.iter_mut().find(|w| w.id == workspace.id) {
+                    Some(known) => *known = workspace,
+                    None => self.workspaces.push(workspace),
+                }
+            }
+            ServerMessage::WorkspaceDeleted { workspace } => {
+                self.workspaces.retain(|w| w.id != workspace);
+                if self.is_ours(&workspace) {
+                    self.workspace_id = None;
+                    self.notice(Level::Warning, "this workspace was deleted");
+                    self.backend.request(
+                        crate::protocol::Command::Snapshot { workspace: None },
+                        Reply::Snapshot,
+                    );
+                }
+            }
+            ServerMessage::TabCreated {
+                workspace,
+                index,
+                tab,
+            } if self.is_ours(&workspace) => self.tab_created(index, &tab),
+            ServerMessage::TabUpdated { workspace, tab } if self.is_ours(&workspace) => {
+                self.absorb(&tab);
+                if let Some(index) = self.tab_index(&tab.id) {
+                    self.tabs[index].update_from(&tab);
+                }
+            }
+            ServerMessage::TabClosed { workspace, tab } if self.is_ours(&workspace) => {
+                self.tab_closed(&tab);
+            }
+            ServerMessage::TabsReordered { workspace, tabs } if self.is_ours(&workspace) => {
+                self.reorder(&tabs);
+            }
+            ServerMessage::JobStarted { job } | ServerMessage::JobFinished { job } => {
+                match self.jobs.iter_mut().find(|j| j.job.id == job.job.id) {
+                    Some(known) => *known = job,
+                    None => self.jobs.push(job),
+                }
+            }
+            ServerMessage::Control { control, .. } => self.control = control,
+            ServerMessage::Notice {
+                level,
+                message,
+                tab,
+            } => {
+                let here = tab.as_deref().is_none_or(|t| self.tab_index(t).is_some());
+                if here {
+                    self.notice(level, message);
+                }
+            }
+            ServerMessage::Mode { mode, tab } => {
+                for t in &mut self.tabs {
+                    if tab.is_none() || t.id == tab {
+                        t.mode = mode;
+                    }
+                }
+            }
+            ServerMessage::Reloaded => self.flash_ok("settings applied"),
+            ServerMessage::Lagged { skipped } => {
+                self.flash(format!("missed {skipped} updates; catching up"));
+                self.resync();
+            }
+            ServerMessage::Shutdown { reason } => self.link.stopped = Some(reason),
+            ServerMessage::Error { message, .. } => self.flash(message),
+            _ => {}
+        }
+    }
+
+    /// Asks for a fresh snapshot of this workspace.
+    pub fn resync(&mut self) {
+        let workspace = self.workspace_id.clone();
+        self.backend.request(
+            crate::protocol::Command::Snapshot { workspace },
+            Reply::Snapshot,
+        );
+    }
+
+    fn on_event(&mut self, workspace: Option<&str>, envelope: &Envelope) {
+        if let Event::Update { status } = &envelope.event {
+            self.update = status.clone();
+            return;
+        }
+        if workspace.is_some_and(|w| !self.is_ours(w)) {
+            return;
+        }
+        let id = &envelope.agent;
+        self.track(envelope);
         match &envelope.event {
-            Event::Update { status } => {
-                self.update = status.clone();
-                return;
+            Event::AgentStarted {
+                label,
+                parent,
+                model,
+                cwd,
+            } if self.agents.get(id).is_none() => {
+                let view = AgentView::new(id, label, parent.clone(), model, cwd);
+                // A resumed session has a history; a new agent finds none.
+                let view = match self.backend.history(id) {
+                    true => view.loading(),
+                    false => view,
+                };
+                self.agents.insert(view);
+            }
+            Event::PermissionRequested {
+                request_id,
+                tool,
+                summary,
+                input,
+                ..
+            } if !self.approvals.iter().any(|a| a.request.id == *request_id) => {
+                let agent_label = self
+                    .snapshots
+                    .get(id)
+                    .map(|s| s.info.label.clone())
+                    .unwrap_or_default();
+                self.approvals.push_back(Approval::new(PermissionRequest {
+                    id: request_id.clone(),
+                    agent: id.clone(),
+                    agent_label,
+                    tool: tool.clone(),
+                    summary: summary.clone(),
+                    input: input.clone(),
+                }));
+                self.approvals_hidden = false;
             }
             Event::PermissionResolved { request_id, .. } => {
                 self.approvals.retain(|a| a.request.id != *request_id);
             }
+            // The turn began, or ended before this terminal saw it begin.
+            Event::UserMessage { .. } | Event::TurnFinished { .. } => {
+                if let Some(index) = self.tab_of_agent(id) {
+                    self.tabs[index].sending = false;
+                }
+            }
             _ => {}
         }
         self.agents.apply(envelope);
+        if matches!(envelope.event, Event::TurnFinished { .. }) {
+            self.send_queued();
+        }
+    }
+
+    /// Keeps an agent's status, activity and usage current from its events.
+    fn track(&mut self, envelope: &Envelope) {
+        let id = &envelope.agent;
+        if let Event::AgentStarted {
+            label,
+            parent,
+            model,
+            cwd,
+        } = &envelope.event
+        {
+            let depth = parent
+                .as_ref()
+                .and_then(|p| self.snapshots.get(p))
+                .map_or(0, |p| p.info.depth + 1);
+            let snapshot = self
+                .snapshots
+                .entry(id.clone())
+                .or_insert_with(|| AgentSnapshot {
+                    info: AgentInfo {
+                        id: id.clone(),
+                        label: label.clone(),
+                        parent: parent.clone(),
+                        depth,
+                        read_only: false,
+                        cwd: cwd.into(),
+                        created: chrono::Utc::now(),
+                    },
+                    model: model.clone(),
+                    status: AgentStatus::Idle,
+                    activity: String::new(),
+                    usage: Default::default(),
+                    report: None,
+                });
+            snapshot.model = model.clone();
+            return;
+        }
+        let Some(snapshot) = self.snapshots.get_mut(id) else {
+            return;
+        };
         match &envelope.event {
-            Event::TurnFinished { .. } => self.send_queued(),
-            Event::ToolFinished { call_id, tool, .. } if tool == "bash" => {
-                self.track_job(&envelope.agent, call_id);
+            Event::UserMessage { .. } => {
+                snapshot.status = AgentStatus::Running;
+                snapshot.activity = "thinking".into();
+                snapshot.report = None;
+            }
+            Event::ToolCallStreaming { tool } => snapshot.activity = format!("writing {tool} call"),
+            Event::ToolStarted { tool, summary, .. } => {
+                snapshot.activity = text::truncate(&format!("{tool} {summary}"), 120).into_owned();
+            }
+            Event::PermissionRequested { tool, .. } => {
+                snapshot.activity = format!("waiting for approval: {tool}");
+            }
+            Event::ToolFinished { .. } => snapshot.activity = "thinking".into(),
+            Event::Usage { total, .. } => snapshot.usage = *total,
+            Event::ModelChanged { model } => snapshot.model = model.clone(),
+            Event::TurnFinished { status, .. } | Event::AgentFinished { status, .. } => {
+                snapshot.status = match status {
+                    TurnStatus::Completed => AgentStatus::Completed,
+                    TurnStatus::Failed => AgentStatus::Failed,
+                    TurnStatus::Cancelled => AgentStatus::Cancelled,
+                };
+                snapshot.activity.clear();
+                if let Event::AgentFinished { report, .. } = &envelope.event {
+                    snapshot.report = Some(report.clone());
+                }
             }
             _ => {}
         }
     }
 
-    /// Sends each tab its next queued prompt once its agent is free.
-    fn send_queued(&mut self) {
-        for tab in &mut self.tabs {
-            if !tab.handle.is_busy() {
-                if let Some(prompt) = tab.queued.pop_front() {
-                    tab.handle.send(Self::prompt_blocks(&prompt));
+    /// Takes the agents a tab reports: their snapshots, and a view for each
+    /// one this terminal has not seen, filled from its saved conversation.
+    fn absorb(&mut self, tab: &TabView) {
+        for agent in &tab.snapshots {
+            let snapshot = &agent.snapshot;
+            let id = snapshot.info.id.clone();
+            if self.agents.get(&id).is_none() {
+                let view = AgentView::from_snapshot(snapshot);
+                let view = match self.backend.history(&id) {
+                    true => view.loading(),
+                    false => view,
+                };
+                self.agents.insert(view);
+                if snapshot.info.parent.is_some() {
+                    let finished = match snapshot.status {
+                        AgentStatus::Completed => Some(TurnStatus::Completed),
+                        AgentStatus::Failed => Some(TurnStatus::Failed),
+                        AgentStatus::Cancelled => Some(TurnStatus::Cancelled),
+                        AgentStatus::Running | AgentStatus::Idle => None,
+                    };
+                    self.agents.ensure_card(&id, finished);
                 }
+            }
+            self.snapshots.insert(id, snapshot.clone());
+        }
+    }
+
+    /// Replaces what the interface knows with a snapshot.
+    pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.daemon = snapshot.daemon;
+        self.workspaces = snapshot.workspaces;
+        self.update = snapshot.update;
+        self.control = snapshot.control;
+        self.models = snapshot.models;
+        self.default_model = snapshot.default_model;
+        self.jobs = snapshot.jobs;
+        match &snapshot.workspace {
+            Some(workspace) => self.apply_workspace(workspace),
+            None => {
+                // Every workspace is gone: start a fresh one here.
+                self.backend.request(
+                    crate::protocol::Command::WorkspaceCreate { name: None },
+                    Reply::WorkspaceOpened { fresh: true },
+                );
+            }
+        }
+        let ours: Vec<TabId> = self.tabs.iter().filter_map(|t| t.id.clone()).collect();
+        let pending: Vec<Approval> = snapshot
+            .pending
+            .into_iter()
+            .filter(|p| p.tab.as_ref().is_none_or(|t| ours.contains(t)))
+            .map(|p| {
+                let known = self
+                    .approvals
+                    .iter()
+                    .position(|a| a.request.id == p.request.id);
+                match known.and_then(|i| self.approvals.remove(i)) {
+                    Some(approval) => approval,
+                    None => Approval::new(p.request),
+                }
+            })
+            .collect();
+        self.approvals = pending.into();
+        if self.approvals.is_empty() {
+            self.approvals_hidden = false;
+        }
+    }
+
+    /// Shows a workspace: its tabs, keeping what this terminal had of the
+    /// ones it already showed.
+    fn apply_workspace(&mut self, workspace: &WorkspaceView) {
+        let switching = !self.is_ours(&workspace.id);
+        let active = match switching {
+            true => workspace.active_tab.clone(),
+            false => self.tab().id.clone().or(workspace.active_tab.clone()),
+        };
+        self.workspace_id = Some(workspace.id.clone());
+        self.workspace_name = workspace.name.clone();
+        if switching {
+            // Agents of the workspace left behind send nothing here any more.
+            self.snapshots.clear();
+        }
+        let mut old = std::mem::take(&mut self.tabs);
+        let mut tabs = Vec::new();
+        for view in &workspace.tabs {
+            self.absorb(view);
+            let tab = match old.iter().position(|t| t.id.as_ref() == Some(&view.id)) {
+                Some(i) => {
+                    let mut tab = old.remove(i);
+                    tab.update_from(view);
+                    tab
+                }
+                None => Tab::from_view(view),
+            };
+            tabs.push(tab);
+        }
+        if tabs.is_empty() {
+            let cwd = old
+                .first()
+                .map_or_else(|| self.home_cwd.clone(), |t| t.cwd.clone());
+            tabs.push(Tab::placeholder(cwd));
+        }
+        self.tabs = tabs;
+        self.active = active
+            .and_then(|id| self.tab_index(&id))
+            .unwrap_or(0)
+            .min(self.tabs.len() - 1);
+        if switching {
+            self.selection = None;
+            self.recent = recent_sessions(&self.tab_cwd(), &self.tabs);
+        }
+    }
+
+    fn tab_created(&mut self, index: usize, view: &TabView) {
+        self.absorb(view);
+        if self.tab_index(&view.id).is_some() {
+            return;
+        }
+        // An empty workspace's placeholder becomes the first real tab.
+        let placeholder = self.tabs.iter().position(|t| t.id.is_none() && !t.creating);
+        match placeholder {
+            Some(i) if self.tabs.len() == 1 => {
+                self.tabs[i].id = Some(view.id.clone());
+                self.tabs[i].update_from(view);
+            }
+            _ => {
+                let index = index.min(self.tabs.len());
+                self.tabs.insert(index, Tab::from_view(view));
+                if index <= self.active && self.tabs.len() > 1 {
+                    self.active += 1;
+                }
+            }
+        }
+        if self.focus_tab.as_deref() == Some(&view.id) {
+            self.focus_tab = None;
+            if let Some(i) = self.tab_index(&view.id) {
+                self.switch_tab(i);
             }
         }
     }
 
-    pub fn on_approval(&mut self, pending: Pending) {
-        self.approvals.push_back(Approval {
-            request: pending.request,
-            reply: Some(pending.reply),
-            arrived: Instant::now(),
-            details: false,
-            focus: 0,
+    fn tab_closed(&mut self, id: &str) {
+        let Some(index) = self.tab_index(id) else {
+            return;
+        };
+        let was_active = index == self.active;
+        let closed = self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::placeholder(closed.cwd));
+        }
+        if was_active {
+            self.active = index.min(self.tabs.len() - 1);
+            // What was being typed stays; the next tab's draft fills an empty editor.
+            if self.editor.is_empty() && self.attachments.is_empty() {
+                self.restore_draft();
+            }
+            self.selection = None;
+        } else if self.active > index {
+            self.active -= 1;
+        }
+    }
+
+    fn reorder(&mut self, order: &[TabId]) {
+        let active = self.tab().id.clone();
+        self.tabs.sort_by_key(|t| {
+            t.id.as_ref()
+                .and_then(|id| order.iter().position(|o| o == id))
+                .unwrap_or(usize::MAX)
         });
-        self.approvals_hidden = false;
-        self.dirty = true;
+        if let Some(index) = active.and_then(|id| self.tab_index(&id)) {
+            self.active = index;
+        }
+    }
+
+    /// Sends each tab its next queued prompt once the tab exists and its
+    /// agent is free.
+    fn send_queued(&mut self) {
+        for index in 0..self.tabs.len() {
+            let tab = &self.tabs[index];
+            if tab.queued.is_empty() || self.tab_busy(tab) {
+                continue;
+            }
+            if tab.id.is_none() {
+                self.create_tab_for(index);
+                continue;
+            }
+            if let Some(prompt) = self.tabs[index].queued.pop_front() {
+                self.dispatch(index, prompt);
+            }
+        }
+    }
+
+    /// Asks the daemon for the placeholder tab at `index`.
+    fn create_tab_for(&mut self, index: usize) {
+        let tab = &mut self.tabs[index];
+        if tab.creating {
+            return;
+        }
+        tab.creating = true;
+        let spec = crate::protocol::TabSpec {
+            cwd: tab.cwd.clone(),
+            workspace: self.workspace_id.clone(),
+            ..Default::default()
+        };
+        self.backend.request(
+            crate::protocol::Command::TabCreate(spec),
+            Reply::TabCreated { placeholder: true },
+        );
     }
 
     pub fn on_update(&mut self, update: Update) {
+        self.dirty = true;
         match update {
-            Update::Models(models) => {
-                self.models = models;
-                self.discovering = false;
-                let rows = self.model_rows();
-                if let Some(Overlay::Models(picker)) = &mut self.overlay {
-                    picker.set_rows(rows);
-                    picker.note.clear();
-                }
-            }
+            Update::Reply(reply, result) => self.on_reply(reply, result),
+            Update::Rest(rest, result) => self.on_rest(rest, result),
             Update::Files { root, list } => {
                 if root == self.files.root {
                     self.files.list = Some(list);
@@ -713,42 +1222,18 @@ impl App {
                 }
             }
             Update::Pasted(Err(err)) => self.flash(err),
-            Update::Checked(result) | Update::Installed(result) => {
-                let message = match &result {
-                    Ok(status) => {
-                        self.update = status.clone();
-                        Ok(
-                            match (&status.installed, status.available, &status.latest) {
-                                (Some(version), _, _) => {
-                                    format!("installed {version}; restart malac to use it")
-                                }
-                                (None, true, Some(latest)) => format!("{latest} is available"),
-                                _ => "malac is up to date".to_owned(),
-                            },
-                        )
-                    }
-                    Err(err) => Err(err.clone()),
-                };
-                match &mut self.overlay {
-                    Some(Overlay::Update(dialog)) => {
-                        dialog.installing = false;
-                        dialog.result = Some(message);
-                    }
-                    _ => match message {
-                        Ok(message) => self.flash(message),
-                        Err(err) => self.notice(Level::Error, format!("update failed: {err}")),
-                    },
-                }
+            Update::Unreachable(err) => {
+                self.link.reconnecting = false;
+                self.flash(format!(
+                    "the daemon is unreachable: {err} · Ctrl-R tries again"
+                ));
             }
         }
-        self.dirty = true;
     }
 
     /// Housekeeping between events; returns whether the screen changes.
     pub fn tick(&mut self) -> bool {
-        let before = self.approvals.len();
-        self.approvals.retain(|a| !a.is_closed());
-        let mut changed = before != self.approvals.len();
+        let mut changed = false;
         if self.approvals.is_empty() {
             self.approvals_hidden = false;
         }
@@ -766,9 +1251,9 @@ impl App {
             changed |= branch != self.branch;
             self.branch = branch;
         }
-        if self.jobs_polled.elapsed() > Duration::from_secs(1) {
+        if self.jobs_polled.elapsed() > LOG_REFRESH {
             self.jobs_polled = Instant::now();
-            changed |= self.poll_jobs();
+            self.refresh_job_log();
         }
         changed |= self.drag_scroll();
         let clock = chrono::Local::now().format("%H:%M").to_string();
@@ -777,14 +1262,12 @@ impl App {
             changed = true;
         }
         self.send_queued();
-        // Animate while anything works, and once more when it stops.
-        let was_working = self.working();
-        self.refresh_snapshots();
-        changed || was_working || self.working()
+        // Animate while anything works.
+        changed || self.working()
     }
 
     fn working(&self) -> bool {
-        self.running_count() > 0 || self.tabs.iter().any(|t| t.handle.is_busy())
+        self.running_count() > 0 || self.tabs.iter().any(|t| t.sending)
     }
 
     pub fn clock(&self) -> &str {
@@ -796,7 +1279,12 @@ impl App {
     pub fn on_paste(&mut self, text: &str) {
         let line = text.lines().next().unwrap_or_default();
         match &mut self.overlay {
-            Some(Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p)) => {
+            Some(
+                Overlay::Models(p)
+                | Overlay::Sessions(p)
+                | Overlay::Agents(p)
+                | Overlay::Workspaces(p),
+            ) => {
                 p.filter.push_str(line);
             }
             Some(Overlay::Folder(f)) => f.filter.push_str(line),
@@ -804,8 +1292,7 @@ impl App {
             Some(_) => {}
             None => {
                 self.focus = Focus::Input;
-                let dropped = attach::dropped_paths(text).filter(|_| !self.tab().read_only());
-                match dropped {
+                match attach::dropped_paths(text) {
                     Some(paths) => {
                         let attached = paths.iter().filter(|p| self.attach(p)).count();
                         if attached > 0 {
@@ -834,10 +1321,25 @@ impl App {
                 false => vec![Span::styled(flash.text.clone(), t.fg(t.warning))],
             };
         }
+        if !self.link.connected {
+            let why = match &self.link.stopped {
+                Some(reason) => format!("the daemon stopped ({reason})"),
+                None => "the daemon is not reachable".to_owned(),
+            };
+            let next = if self.link.reconnecting {
+                " · reconnecting…"
+            } else {
+                " · Ctrl-R reconnects"
+            };
+            return vec![
+                Span::styled(why, t.fg(t.warning)),
+                Span::styled(next, t.dim()),
+            ];
+        }
         let tab = self.tab();
         if self.busy() {
-            let view = self.agents.get(tab.root());
-            let snapshot = self.snapshots.get(tab.root());
+            let view = tab.root().and_then(|r| self.agents.get(r));
+            let snapshot = tab.root().and_then(|r| self.snapshots.get(r));
             let mut doing = snapshot.map(|s| s.activity.clone()).unwrap_or_default();
             if let Some(tool) = view.and_then(|v| v.writing.as_ref()) {
                 doing = format!("writing {tool} call");
@@ -873,6 +1375,56 @@ impl App {
             _ => None,
         }
     }
+
+    /// A calm note when the daemon runs another version than this terminal.
+    pub fn daemon_segment(&self) -> Option<String> {
+        self.daemon.version_mismatch.then(|| {
+            format!(
+                "daemon {} running; restart it when idle",
+                self.daemon.version
+            )
+        })
+    }
+
+    /// What the computer-control service is missing, if anything.
+    pub fn control_issue(&self) -> Option<&'static str> {
+        if !self.control.enabled {
+            return None;
+        }
+        if self.control.error.is_some() {
+            return Some("control unavailable");
+        }
+        let missing = |key: &str| {
+            self.control
+                .permissions
+                .as_ref()
+                .is_some_and(|p| p[key] == serde_json::Value::Bool(false))
+        };
+        (missing("screen_recording") || missing("accessibility"))
+            .then_some("control needs permissions")
+    }
+
+    /// Agents and jobs running anywhere in the daemon, as far as this
+    /// terminal knows: its workspace from events, the others from summaries.
+    pub fn daemon_busy(&self) -> bool {
+        let elsewhere = self
+            .workspaces
+            .iter()
+            .filter(|w| !self.is_ours(&w.id))
+            .any(|w| w.running > 0);
+        elsewhere || self.running_count() > 0 || self.jobs.iter().any(|j| j.job.is_running())
+    }
+}
+
+/// Saved sessions started in `cwd` that no tab holds, for the welcome screen.
+fn recent_sessions(cwd: &Path, tabs: &[Tab]) -> Vec<SessionSummary> {
+    let held = |id: &str| tabs.iter().any(|t| t.agents.iter().any(|a| a == id));
+    session::list(false, 40)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.meta.cwd == cwd && !held(&s.meta.id) && !s.title.is_empty())
+        .take(5)
+        .collect()
 }
 
 pub fn completions(input: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {

@@ -1,6 +1,7 @@
 //! Everything the user can ask for, and the menus and lists that offer it.
 
 use super::*;
+use crate::protocol::{Command, TabSpec};
 
 /// Everything the user can ask for, from a key, a click, a menu or a command.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,19 +28,34 @@ pub enum Action {
     Quit,
     NewTab,
     CloseTab(usize),
+    /// Close a tab even though its agents work, stopping them.
+    ForceCloseTab(TabId),
     NextTab,
     PrevTab,
     GoTab(usize),
+    /// Moves the active tab left or right.
+    MoveTab(isize),
     RenameTab,
-    SetTabTitle(String),
+    /// Another top-level agent in the active tab.
+    NewAgent,
+    /// The next or previous top-level agent of the tab.
+    StepAgent(isize),
+    ShowTabAgent(AgentId),
+    CloseAgent,
+    NewWorkspace,
+    Workspaces,
+    OpenWorkspace(String),
+    RenameWorkspace,
+    DeleteWorkspace,
+    ForceDeleteWorkspace(String),
+    /// A name typed into a one-line prompt.
+    Named(Ask, String),
     Compact,
-    Clear,
     SetMode(Mode),
     ShowMode,
     SetModel(String),
     Resume(String),
     OpenAgent(AgentId),
-    PinAgent(AgentId),
     StopAgent(AgentId),
     Back,
     ToggleSidebar,
@@ -48,11 +64,14 @@ pub enum Action {
     ShowCost,
     ShowMcp,
     ShowMemory,
-    Web(bool),
+    ShowWeb,
     CopyWebUrl,
     UpdateDialog,
     CheckUpdate,
     InstallUpdate,
+    RestartDaemon,
+    Reconnect,
+    RequestPermissions,
     ShowApprovals,
     Answer(Decision),
     CopyEntry(usize),
@@ -65,33 +84,33 @@ pub enum Action {
 impl App {
     /// The items of a menu bar title.
     pub fn menu_items(&self, index: usize) -> Vec<Item> {
-        let mode = self.session.runtime.policy.mode();
-        let read_only = self.tab().read_only();
+        let mode = self.tab().mode;
+        let tab = self.tab();
+        let has_agent = tab.root().is_some();
         match index {
             0 => vec![
-                Item::new("New tab", 'n', Action::NewTab).hint("^T"),
-                Item::new("Rename tab…", 'r', Action::RenameTab),
-                Item::new("Open session…", 'o', Action::Sessions).hint("F7"),
+                Item::new("New tab here", 'n', Action::NewTab).hint("^T"),
                 Item::new("Open folder…", 'f', Action::FolderDialog).hint("/cd"),
-                Item::new("Compact conversation", 'c', Action::Compact).enabled(!read_only),
-                Item::new("Start over", 's', Action::Clear).enabled(!read_only),
+                Item::new("Open session…", 'o', Action::Sessions).hint("F7"),
+                Item::new("Rename tab…", 'r', Action::RenameTab).enabled(tab.id.is_some()),
                 Item::new("Close tab", 't', Action::CloseTab(self.active))
                     .hint("^W")
                     .enabled(self.tabs.len() > 1),
                 Item::separator(),
+                Item::new("New agent in this tab", 'a', Action::NewAgent).hint("^N"),
+                Item::new("Compact conversation", 'c', Action::Compact).enabled(has_agent),
+                Item::separator(),
+                Item::new("New workspace…", 'w', Action::NewWorkspace),
+                Item::new("Switch workspace…", 's', Action::Workspaces),
+                Item::new("Rename workspace…", 'e', Action::RenameWorkspace),
+                Item::new("Delete workspace…", 'd', Action::DeleteWorkspace),
+                Item::separator(),
                 Item::new("Quit", 'q', Action::Quit).hint("F10"),
             ],
             1 => {
-                let current = self.shown().map(|v| v.model.clone()).unwrap_or_default();
+                let current = self.current_model();
                 let mut items = vec![Item::new("All models…", 'a', Action::PickModel).hint("F4")];
-                let mut configured: Vec<String> = self
-                    .session
-                    .runtime
-                    .config
-                    .providers
-                    .iter()
-                    .flat_map(|(name, p)| p.models.iter().map(move |m| format!("{name}/{m}")))
-                    .collect();
+                let mut configured = self.models.clone();
                 if !configured.contains(&current) && !current.is_empty() {
                     configured.insert(0, current.clone());
                 }
@@ -116,68 +135,153 @@ impl App {
                     .checked(mode == Mode::Autopilot),
                 Item::separator(),
                 Item::new("Cycle", 'c', Action::CycleMode).hint("F5"),
+                Item::note("for this tab".to_owned()),
             ],
-            3 => {
-                let (list, map) = match self.agents_view {
-                    AgentsView::List => ("F3", ""),
-                    AgentsView::Map => ("", "F3"),
-                };
+            3 => self.agent_menu(),
+            4 => {
                 let mut items = vec![
-                    Item::new("Agent list…", 'l', Action::AgentList).hint(list),
-                    Item::new("Agent map…", 'm', Action::AgentMap).hint(map),
-                    Item::new("Back to parent", 'b', Action::Back)
-                        .hint("Esc")
-                        .enabled(!self.tab().view.is_empty()),
-                    Item::new("Stop", 's', Action::Stop)
-                        .hint("F8")
-                        .enabled(self.busy()),
+                    Item::new("Sidebar", 's', Action::ToggleSidebar)
+                        .hint("^G")
+                        .checked(self.geometry.sidebar),
+                    Item::new("Mouse", 'm', Action::ToggleMouse)
+                        .hint("^S")
+                        .checked(self.mouse_capture),
+                    Item::new("Thinking", 't', Action::ToggleThinking)
+                        .checked(self.agents.show_thinking),
+                    Item::separator(),
+                    Item::new("Jobs…", 'j', Action::Jobs).hint("/jobs"),
+                    Item::new("Usage and cost", 'u', Action::ShowCost),
+                    Item::new("MCP servers", 'c', Action::ShowMcp),
+                    Item::new("Memories", 'e', Action::ShowMemory),
                 ];
-                let tree = self.agents.tree(self.tab().root());
-                if tree.len() > 1 {
+                if self.control.enabled {
                     items.push(Item::separator());
-                    for (depth, view) in tree.into_iter().skip(1).take(12) {
-                        let label = format!("{}{}", "  ".repeat(depth - 1), view.label);
-                        items.push(Item::plain(label, Action::OpenAgent(view.id.clone())));
-                    }
+                    items.push(Item::note(self.control_summary()));
+                    items.push(Item::new(
+                        "Request macOS permissions",
+                        'p',
+                        Action::RequestPermissions,
+                    ));
                 }
                 items
             }
-            4 => vec![
-                Item::new("Sidebar", 's', Action::ToggleSidebar)
-                    .hint("^G")
-                    .checked(self.geometry.sidebar),
-                Item::new("Mouse", 'm', Action::ToggleMouse)
-                    .hint("^S")
-                    .checked(self.mouse_capture),
-                Item::new("Thinking", 't', Action::ToggleThinking)
-                    .checked(self.agents.show_thinking),
-                Item::separator(),
-                Item::new("Jobs…", 'j', Action::Jobs).hint("/jobs"),
-                Item::new("Usage and cost", 'u', Action::ShowCost),
-                Item::new("MCP servers", 'c', Action::ShowMcp),
-                Item::new("Memories", 'e', Action::ShowMemory),
-            ],
             5 => {
-                let serving = !self.session.web_urls.is_empty();
+                let urls = self.backend.web_urls();
                 let mut items = vec![
-                    Item::new("Serve on this machine", 's', Action::Web(false)).enabled(!serving),
-                    Item::new("Serve on the network", 'n', Action::Web(true)).enabled(!serving),
-                    Item::new("Copy URL", 'c', Action::CopyWebUrl).enabled(serving),
+                    Item::new("Show the address", 's', Action::ShowWeb),
+                    Item::new("Copy URL", 'c', Action::CopyWebUrl).enabled(!urls.is_empty()),
                 ];
-                if let Some(url) = self.session.web_urls.first() {
+                if let Some(url) = urls.first() {
                     items.push(Item::separator());
                     items.push(Item::note(text::truncate(url, 48).into_owned()));
                 }
                 items
             }
-            _ => vec![
-                Item::new("Keys and commands", 'k', Action::Help).hint("F1"),
-                Item::new("Check for updates", 'c', Action::CheckUpdate),
-                Item::new("Install update", 'i', Action::UpdateDialog)
-                    .enabled(dialog::can_install(&self.update)),
-                Item::separator(),
-                Item::note(format!("malac {}", env!("CARGO_PKG_VERSION"))),
-            ],
+            _ => {
+                let mut items = vec![
+                    Item::new("Keys and commands", 'k', Action::Help).hint("F1"),
+                    Item::new("Check for updates", 'c', Action::CheckUpdate),
+                    Item::new("Install update", 'i', Action::UpdateDialog)
+                        .enabled(dialog::can_install(&self.update)),
+                    Item::new("Restart the daemon", 'r', Action::RestartDaemon)
+                        .hint("when idle")
+                        .enabled(self.link.connected && !self.daemon_busy()),
+                ];
+                if !self.link.connected {
+                    items.push(Item::new("Reconnect", 'o', Action::Reconnect).hint("^R"));
+                }
+                items.push(Item::separator());
+                items.push(Item::note(format!(
+                    "malac {} · daemon {}",
+                    env!("CARGO_PKG_VERSION"),
+                    self.daemon.version
+                )));
+                items
+            }
+        }
+    }
+
+    fn agent_menu(&self) -> Vec<Item> {
+        let (list, map) = match self.agents_view {
+            AgentsView::List => ("F3", ""),
+            AgentsView::Map => ("", "F3"),
+        };
+        let tab = self.tab();
+        let mut items = vec![
+            Item::new("Agent list…", 'l', Action::AgentList).hint(list),
+            Item::new("Agent map…", 'm', Action::AgentMap).hint(map),
+            Item::new("New agent in this tab", 'n', Action::NewAgent).hint("^N"),
+            Item::new("Next agent", 'x', Action::StepAgent(1))
+                .hint("Alt-↓")
+                .enabled(tab.agents.len() > 1),
+            Item::new("Close this agent", 'c', Action::CloseAgent)
+                .enabled(tab.agents.len() > 1 && !self.busy()),
+            Item::new("Back to parent", 'b', Action::Back)
+                .hint("Esc")
+                .enabled(!tab.view.is_empty()),
+            Item::new("Stop", 's', Action::Stop)
+                .hint("F8")
+                .enabled(self.busy()),
+        ];
+        if tab.agents.len() > 1 {
+            items.push(Item::separator());
+            for agent in &tab.agents {
+                let label = self.agent_label(agent);
+                let checked = tab.agent.as_deref() == Some(agent.as_str());
+                items
+                    .push(Item::plain(label, Action::ShowTabAgent(agent.clone())).checked(checked));
+            }
+        }
+        let subagents: Vec<(usize, &AgentView)> = self.tree(tab).into_iter().skip(1).collect();
+        if !subagents.is_empty() {
+            items.push(Item::separator());
+            for (depth, view) in subagents.into_iter().take(12) {
+                let label = format!("{}{}", "  ".repeat(depth - 1), view.label);
+                items.push(Item::plain(label, Action::OpenAgent(view.id.clone())));
+            }
+        }
+        items
+    }
+
+    /// An agent's name for menus and the switcher: its label, or its first prompt.
+    pub fn agent_label(&self, id: &str) -> String {
+        let view = self.agents.get(id);
+        let prompt = view.and_then(|v| {
+            v.transcript.items().iter().find_map(|i| match &i.entry {
+                Entry::User(text) => {
+                    Some(text::first_line(&attach::split_user_text(text).0).to_owned())
+                }
+                _ => None,
+            })
+        });
+        let label = view.map(|v| v.label.clone()).unwrap_or_default();
+        match prompt.filter(|p| !p.is_empty()) {
+            Some(prompt) if label.is_empty() || label == "main" => {
+                text::truncate(&prompt, 24).into_owned()
+            }
+            _ if label.is_empty() => "agent".to_owned(),
+            _ => label,
+        }
+    }
+
+    fn control_summary(&self) -> String {
+        let c = &self.control;
+        if let Some(err) = &c.error {
+            return format!("control: {}", text::truncate(text::first_line(err), 40));
+        }
+        let state = |key: &str| match c.permissions.as_ref().map(|p| &p[key]) {
+            Some(serde_json::Value::Bool(true)) => "granted",
+            Some(serde_json::Value::Bool(false)) => "missing",
+            _ => "n/a",
+        };
+        match (c.connected, &c.permissions) {
+            (false, _) => "control: not connected".to_owned(),
+            (true, None) => format!("control: {} tools", c.tools),
+            (true, Some(_)) => format!(
+                "screen {} · accessibility {}",
+                state("screen_recording"),
+                state("accessibility")
+            ),
         }
     }
 
@@ -190,8 +294,19 @@ impl App {
             })
             .collect();
         items.push(Item::separator());
-        items.push(Item::new("New tab", 'n', Action::NewTab).hint("^T"));
+        items.push(Item::new("New tab here", 'n', Action::NewTab).hint("^T"));
+        items.push(Item::new("Open folder…", 'f', Action::FolderDialog));
         items.push(Item::new("Rename tab…", 'r', Action::RenameTab));
+        items.push(
+            Item::new("Move left", 'l', Action::MoveTab(-1))
+                .hint("^⇧PgUp")
+                .enabled(self.active > 0),
+        );
+        items.push(
+            Item::new("Move right", 'g', Action::MoveTab(1))
+                .hint("^⇧PgDn")
+                .enabled(self.active + 1 < self.tabs.len()),
+        );
         items.push(
             Item::new("Close tab", 'w', Action::CloseTab(self.active))
                 .hint("^W")
@@ -200,31 +315,42 @@ impl App {
         items
     }
 
+    /// The shown agent's model, or what the tab's next agent will use.
+    pub fn current_model(&self) -> String {
+        let tab = self.tab();
+        match tab.root().and_then(|r| self.agents.get(r)) {
+            Some(view) => view.model.clone(),
+            None => tab
+                .model
+                .clone()
+                .or_else(|| self.default_model.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     pub fn model_rows(&self) -> Vec<Row> {
-        let config = &self.session.runtime.config;
-        let current = self.shown().map(|v| v.model.clone()).unwrap_or_default();
+        let current = self.current_model();
         let mut rows = Vec::new();
-        let mut add = |group: &str, provider: &str, model: &str, detail: &str| {
-            let value = format!("{provider}/{model}");
+        let mut add = |group: &str, value: String, detail: &str| {
             if rows.iter().any(|r: &Row| r.value == value) {
                 return;
             }
+            let label = value.split_once('/').map_or(value.as_str(), |(_, m)| m);
             rows.push(Row {
                 group: group.to_owned(),
-                label: model.to_owned(),
+                label: label.to_owned(),
                 detail: detail.to_owned(),
                 current: value == current,
                 value,
             });
         };
-        if self.models.is_empty() {
-            for (name, provider) in &config.providers {
-                for model in &provider.models {
-                    add(name, name, model, "configured");
-                }
+        if self.discovered.is_empty() {
+            for spec in &self.models {
+                let provider = spec.split_once('/').map_or("", |(p, _)| p);
+                add(provider, spec.clone(), "configured");
             }
         } else {
-            for provider in &self.models {
+            for provider in &self.discovered {
                 let group = match &provider.error {
                     Some(err) => format!(
                         "{} · {}",
@@ -239,7 +365,7 @@ impl App {
                     } else {
                         ""
                     };
-                    add(&group, &provider.provider, &model, detail);
+                    add(&group, format!("{}/{model}", provider.provider), detail);
                 }
             }
         }
@@ -260,16 +386,10 @@ impl App {
     }
 
     fn session_rows(&self) -> Vec<Row> {
-        let home = dirs_home();
         session::list(false, 200)
             .unwrap_or_default()
             .into_iter()
             .map(|s| {
-                let cwd = s.meta.cwd.display().to_string();
-                let cwd = match &home {
-                    Some(home) => cwd.replacen(home.as_str(), "~", 1),
-                    None => cwd,
-                };
                 let when = s
                     .updated
                     .with_timezone(&chrono::Local)
@@ -282,38 +402,74 @@ impl App {
                 Row {
                     group: String::new(),
                     label: title,
-                    detail: format!("{when}  {cwd}"),
-                    current: self.tabs.iter().any(|t| t.root() == s.meta.id),
+                    detail: format!("{when}  {}", short_path(&s.meta.cwd)),
+                    current: self
+                        .tabs
+                        .iter()
+                        .any(|t| t.agents.iter().any(|a| *a == s.meta.id)),
                     value: s.meta.id,
                 }
             })
             .collect()
     }
 
+    pub fn workspace_rows(&self) -> Vec<Row> {
+        let mut workspaces = self.workspaces.clone();
+        workspaces.sort_by(|a, b| b.updated.cmp(&a.updated));
+        workspaces
+            .into_iter()
+            .map(|w| {
+                let tabs = if w.tabs == 1 { "tab" } else { "tabs" };
+                let running = match w.running {
+                    0 => String::new(),
+                    n => format!(" · {n} running"),
+                };
+                let when = w
+                    .updated
+                    .with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M");
+                Row {
+                    group: String::new(),
+                    current: self.is_ours(&w.id),
+                    label: w.name,
+                    detail: format!("{} {tabs}{running} · {when}", w.tabs),
+                    value: w.id,
+                }
+            })
+            .collect()
+    }
+
     pub fn agent_rows(&self) -> Vec<Row> {
-        let shown = self.tab().shown().to_owned();
+        let shown = self.tab().shown().map(str::to_owned);
         let mut rows = Vec::new();
         for (index, tab) in self.tabs.iter().enumerate() {
             let group = format!("{} {}", index + 1, self.tab_label(index));
-            for (depth, view) in self.agents.tree(tab.root()) {
-                let snapshot = self.snapshots.get(&view.id);
-                let status = match snapshot.map(|s| s.status) {
-                    Some(AgentStatus::Running) => {
-                        let activity = snapshot.map(|s| s.activity.as_str()).unwrap_or_default();
-                        format!("{} {activity}", self.spinner())
-                    }
-                    Some(AgentStatus::Failed) => "failed".to_owned(),
-                    Some(AgentStatus::Cancelled) => "cancelled".to_owned(),
-                    Some(AgentStatus::Completed) => "done".to_owned(),
-                    _ => "idle".to_owned(),
-                };
-                rows.push(Row {
-                    group: group.clone(),
-                    label: format!("{}{}", "  ".repeat(depth), view.label),
-                    detail: format!("{status} · {}", view.model),
-                    current: view.id == shown,
-                    value: view.id.clone(),
-                });
+            for root in &tab.agents {
+                for (depth, view) in self.agents.tree(root) {
+                    let snapshot = self.snapshots.get(&view.id);
+                    let status = match snapshot.map(|s| s.status) {
+                        Some(AgentStatus::Running) => {
+                            let activity =
+                                snapshot.map(|s| s.activity.as_str()).unwrap_or_default();
+                            format!("{} {activity}", self.spinner())
+                        }
+                        Some(AgentStatus::Failed) => "failed".to_owned(),
+                        Some(AgentStatus::Cancelled) => "cancelled".to_owned(),
+                        Some(AgentStatus::Completed) => "done".to_owned(),
+                        _ => "idle".to_owned(),
+                    };
+                    let label = match depth {
+                        0 => self.agent_label(&view.id),
+                        _ => view.label.clone(),
+                    };
+                    rows.push(Row {
+                        group: group.clone(),
+                        label: format!("{}{label}", "  ".repeat(depth)),
+                        detail: format!("{status} · {}", view.model),
+                        current: Some(&view.id) == shown.as_ref(),
+                        value: view.id.clone(),
+                    });
+                }
             }
         }
         rows
@@ -326,14 +482,9 @@ impl App {
             "type to filter · enter switch · esc close",
             self.model_rows(),
         );
-        if !self.discovering {
+        if !self.discovering && self.discovered.is_empty() {
             self.discovering = true;
-            let config = self.session.runtime.config.clone();
-            let tx = self.tx.clone();
-            tokio::spawn(async move {
-                let models = malac_core::provider::discover_models(&config).await;
-                let _ = tx.send(Update::Models(models));
-            });
+            self.backend.discover_models();
         }
         if self.discovering {
             picker.note = "asking providers…".to_owned();
@@ -341,52 +492,24 @@ impl App {
         self.overlay = Some(Overlay::Models(picker));
     }
 
-    /// Opens a saved session, reusing an empty tab or the tab showing it.
-    fn open_session(&mut self, id: &str) {
-        if let Some(index) = self.tabs.iter().position(|t| t.root() == id) {
-            self.switch_tab(index);
-            return;
-        }
-        let handle = match self.session.runtime.resume_agent(id) {
-            Ok(handle) => handle,
-            Err(err) => {
-                self.notice(Level::Error, format!("{err:#}"));
-                return;
-            }
-        };
-        self.ensure_view(&handle);
-        let fresh = {
-            let tab = self.tab();
-            !tab.read_only()
-                && !tab.handle.is_busy()
-                && tab.title.is_none()
-                && self
-                    .agents
-                    .get(tab.root())
-                    .is_none_or(|v| v.transcript.is_empty())
-        };
-        if fresh {
-            let tab = self.tab_mut();
-            tab.handle = handle;
-            tab.reset_view();
-            self.switch_tab(self.active);
-        } else {
-            let index = self.open_tab(handle);
-            self.switch_tab(index);
-        }
-    }
-
-    /// Shows an agent: inside the tab that owns it, else in a new tab.
+    /// Shows an agent of this workspace, in the tab that holds it, opening
+    /// subagents inside their top-level agent. Unknown agents are opened
+    /// by the daemon.
     fn open_agent(&mut self, id: &str) {
-        let root = self.agents.root_of(id).to_owned();
-        let index = match self.tabs.iter().position(|t| t.root() == root) {
-            Some(index) => index,
-            None => match self.session.runtime.agent(&root) {
-                Some(handle) => self.open_tab(handle),
-                None => return,
-            },
+        let Some(index) = self.tab_of_agent(id) else {
+            self.backend.request(
+                Command::AgentOpen {
+                    agent: id.to_owned(),
+                    tab: None,
+                },
+                Reply::ShowAgent,
+            );
+            return;
         };
-        self.switch_tab(index);
+        let root = self.agents.root_of(id).to_owned();
+        if let Some(tab) = self.tabs[index].id.clone() {
+            self.show_agent(&tab, &root);
+        }
         let mut path = Vec::new();
         let mut at = id.to_owned();
         while at != root {
@@ -421,7 +544,7 @@ impl App {
         let picker = Picker::new(
             PickKind::Agent,
             "Agents",
-            "enter open · tab open in a new tab · ^X stop · F3 map · esc close",
+            "enter open · ^X stop · F3 map · esc close",
             self.agent_rows(),
         );
         self.overlay = Some(Overlay::Agents(picker));
@@ -429,18 +552,15 @@ impl App {
 
     fn open_agent_map(&mut self) {
         self.agents_view = AgentsView::Map;
-        let shown = self.tab().shown().to_owned();
-        self.overlay = Some(Overlay::AgentMap(AgentMap::new(
-            self.agent_nodes(),
-            Some(shown),
-        )));
+        let shown = self.tab().shown().map(str::to_owned);
+        self.overlay = Some(Overlay::AgentMap(AgentMap::new(self.agent_nodes(), shown)));
     }
 
     fn usage_lines(&self) -> Vec<Line<'static>> {
         let t = theme();
         let mut lines = Vec::new();
-        for (depth, view) in self.agents.tree(self.tab().root()) {
-            let u = view.total;
+        for (depth, view) in self.tree(self.tab()) {
+            let u = self.snapshots.get(&view.id).map_or(view.total, |s| s.usage);
             lines.push(Line::from(vec![
                 Span::raw(format!("  {}{:<16}", "  ".repeat(depth), view.label)),
                 Span::styled(
@@ -458,52 +578,42 @@ impl App {
         lines
     }
 
-    fn mcp_lines(&self) -> Vec<Line<'static>> {
+    fn web_lines(&self) -> Vec<Line<'static>> {
         let t = theme();
-        let servers = self.session.runtime.servers();
-        if servers.is_empty() {
-            return vec![Line::styled("  no MCP servers configured", t.dim())];
-        }
-        servers
+        self.backend
+            .web_urls()
             .into_iter()
-            .map(|server| match server.error {
-                Some(err) => Line::from(vec![
-                    Span::styled("  ✗ ", t.fg(t.error)),
-                    Span::raw(server.name),
-                    Span::styled(format!("  {}", text::first_line(&err)), t.dim()),
-                ]),
-                None => Line::from(vec![
-                    Span::styled("  ● ", t.fg(t.accent)),
-                    Span::raw(server.name),
-                    Span::styled(format!("  {} tools", server.tools), t.dim()),
-                ]),
-            })
-            .collect()
-    }
-
-    fn memory_lines(&self) -> Vec<Line<'static>> {
-        let t = theme();
-        let entries = self.session.runtime.memory.list();
-        if entries.is_empty() {
-            return vec![Line::styled("  no memories saved", t.dim())];
-        }
-        entries
-            .into_iter()
-            .map(|entry| {
+            .map(|url| {
                 Line::from(vec![
-                    Span::raw(format!("  {}", entry.name)),
-                    Span::styled(
-                        format!("  {:?} · {}", entry.scope, entry.description),
-                        t.dim(),
-                    ),
+                    Span::styled("  web UI  ", t.dim()),
+                    Span::styled(url, t.fg(t.accent)),
                 ])
             })
             .collect()
     }
 
+    /// The tab's id, or a flash saying it is not ready.
+    fn tab_id(&mut self) -> Option<TabId> {
+        let id = self.tab().id.clone();
+        if id.is_none() {
+            self.flash("this tab is still being created");
+        }
+        id
+    }
+
+    fn set_mode(&mut self, mode: Mode) {
+        self.tab_mut().mode = mode;
+        if let Some(tab) = self.tab().id.clone() {
+            self.backend.command(Command::Mode {
+                mode,
+                tab: Some(tab),
+            });
+        }
+        self.flash(format!("mode: {} for this tab", mode.as_str()));
+    }
+
     pub async fn perform(&mut self, action: Action) {
         self.dirty = true;
-        let runtime = self.session.runtime.clone();
         match action {
             Action::Help => self.overlay = Some(Overlay::Help(Help { scroll: 0 })),
             Action::Copy => {
@@ -525,35 +635,32 @@ impl App {
                 self.overlay = Some(Overlay::Folder(browser));
             }
             Action::OpenFolder(dir) => self.open_folder(&dir),
-            Action::Jobs => self.overlay = Some(Overlay::Jobs(JobsView::default())),
-            Action::StopJob(id) => self.stop_job(&id),
-            Action::PasteImage => {
-                if self.tab().read_only() {
-                    self.flash("this tab watches a subagent; attach to a session tab");
-                } else {
-                    self.paste_image();
-                }
+            Action::Jobs => {
+                self.overlay = Some(Overlay::Jobs(JobsView::default()));
+                self.backend.request(Command::JobList, Reply::Jobs);
+                self.refresh_job_log();
             }
+            Action::StopJob(id) => {
+                self.backend.command(Command::JobKill { job: id });
+                self.flash("stopping the job");
+            }
+            Action::PasteImage => self.paste_image(),
             Action::CopySelection => self.copy_selection(),
             Action::PickModel => self.open_models(),
             Action::CycleMode => {
-                let next = match runtime.policy.mode() {
+                let next = match self.tab().mode {
                     Mode::Ask => Mode::Edits,
                     Mode::Edits => Mode::Autopilot,
                     Mode::Autopilot => Mode::Ask,
                 };
-                runtime.policy.set_mode(next);
-                self.flash(format!("mode: {}", next.as_str()));
+                self.set_mode(next);
             }
-            Action::SetMode(mode) => {
-                runtime.policy.set_mode(mode);
-                self.flash(format!("mode: {}", mode.as_str()));
-            }
+            Action::SetMode(mode) => self.set_mode(mode),
             Action::ShowMode => {
-                let mode = runtime.policy.mode().as_str();
+                let mode = self.tab().mode.as_str();
                 self.notice(
                     Level::Info,
-                    format!("mode: {mode} (F5 or Shift-Tab cycles)"),
+                    format!("mode: {mode} in this tab (F5 or Shift-Tab cycles)"),
                 );
             }
             Action::TabMenu => {
@@ -564,14 +671,14 @@ impl App {
                 let picker = Picker::new(
                     PickKind::Session,
                     "Open session",
-                    "type to filter · enter open in a tab · esc close",
+                    "type to filter · enter open in its folder's tab · esc close",
                     self.session_rows(),
                 );
                 self.overlay = Some(Overlay::Sessions(picker));
             }
             Action::Stop => {
-                if self.busy() {
-                    runtime.cancel_tree(self.tab().root());
+                if let Some(agent) = self.tab().root().map(str::to_owned).filter(|_| self.busy()) {
+                    self.backend.command(Command::Cancel { agent });
                     let dropped = std::mem::take(&mut self.tab_mut().queued).len();
                     self.flash(match dropped {
                         0 => "stopping".to_owned(),
@@ -585,92 +692,163 @@ impl App {
                 }
                 _ => self.open_menu(0, false),
             },
-            Action::Quit => {
-                let armed = self
-                    .quit_armed
-                    .is_some_and(|at| at.elapsed() < DOUBLE_PRESS);
-                if self.running_count() > 0 && !armed {
-                    self.quit_armed = Some(Instant::now());
-                    self.flash("agents are still working · quit again to stop them and exit");
-                } else {
-                    self.quit = true;
-                }
+            // Agents keep working in the daemon.
+            Action::Quit => self.quit = true,
+            Action::NewTab => {
+                let spec = TabSpec {
+                    cwd: self.tab_cwd(),
+                    workspace: self.workspace_id.clone(),
+                    ..Default::default()
+                };
+                self.backend.request(
+                    Command::TabCreate(spec),
+                    Reply::TabCreated { placeholder: false },
+                );
             }
-            Action::NewTab => match runtime.spawn_agent(AgentSpec::default()) {
-                Ok(handle) => {
-                    let index = self.open_tab(handle);
-                    self.switch_tab(index);
-                }
-                Err(err) => self.notice(Level::Error, format!("{err:#}")),
-            },
-            Action::CloseTab(index) => {
-                if self.tabs.len() == 1 {
-                    self.flash("this is the last tab · F10 quits");
-                } else if index < self.tabs.len() {
-                    if index != self.active {
-                        self.stash_draft();
-                    }
-                    self.tabs.remove(index);
-                    self.active = if self.active > index {
-                        self.active - 1
-                    } else {
-                        self.active.min(self.tabs.len() - 1)
-                    };
-                    self.restore_draft();
-                    self.switch_tab(self.active);
-                }
+            Action::CloseTab(index) => self.close_tab(index),
+            Action::ForceCloseTab(tab) => {
+                self.backend.command(Command::TabClose { tab, force: true });
             }
             Action::NextTab => self.switch_tab((self.active + 1) % self.tabs.len()),
             Action::PrevTab => {
                 self.switch_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
             }
             Action::GoTab(index) => self.switch_tab(index),
+            Action::MoveTab(step) => {
+                let index = self.active as isize + step;
+                if let (Some(tab), true) = (
+                    self.tab().id.clone(),
+                    (0..self.tabs.len() as isize).contains(&index),
+                ) {
+                    self.backend.command(Command::TabMove {
+                        tab,
+                        index: index as usize,
+                    });
+                }
+            }
             Action::RenameTab => {
                 let text = self.tab_label(self.active);
-                self.overlay = Some(Overlay::Rename(Rename { text }));
+                self.overlay = Some(Overlay::Rename(Rename {
+                    ask: Ask::TabName,
+                    text,
+                }));
             }
-            Action::SetTabTitle(title) => {
-                self.tab_mut().title = (!title.is_empty()).then_some(title);
+            Action::NewAgent => {
+                if let Some(tab) = self.tab_id() {
+                    let model = self.tab_mut().model.take();
+                    self.backend.request(
+                        Command::AgentStart {
+                            tab,
+                            model,
+                            label: None,
+                        },
+                        Reply::ShowAgent,
+                    );
+                }
             }
+            Action::StepAgent(step) => {
+                let tab = self.tab();
+                let count = tab.agents.len() as isize;
+                if count > 1 {
+                    let at = tab
+                        .root()
+                        .and_then(|r| tab.agents.iter().position(|a| a == r))
+                        .unwrap_or(0) as isize;
+                    let next = tab.agents[(at + step).rem_euclid(count) as usize].clone();
+                    if let Some(id) = tab.id.clone() {
+                        self.show_agent(&id, &next);
+                    }
+                }
+            }
+            Action::ShowTabAgent(agent) => {
+                if let Some(tab) = self.tab().id.clone() {
+                    self.show_agent(&tab, &agent);
+                }
+            }
+            Action::CloseAgent => {
+                let tab = self.tab();
+                if let (Some(id), Some(agent)) = (tab.id.clone(), tab.agent.clone()) {
+                    self.backend.command(Command::AgentClose { tab: id, agent });
+                }
+            }
+            Action::NewWorkspace => {
+                self.overlay = Some(Overlay::Rename(Rename {
+                    ask: Ask::NewWorkspace,
+                    text: String::new(),
+                }));
+            }
+            Action::Workspaces => {
+                let picker = Picker::new(
+                    PickKind::Workspace,
+                    "Workspaces",
+                    "type to filter · enter switch · esc close",
+                    self.workspace_rows(),
+                );
+                self.overlay = Some(Overlay::Workspaces(picker));
+                self.backend
+                    .request(Command::WorkspaceList, Reply::Workspaces);
+            }
+            Action::OpenWorkspace(id) => {
+                if !self.is_ours(&id) {
+                    self.backend.request(
+                        Command::WorkspaceOpen { workspace: id },
+                        Reply::WorkspaceOpened { fresh: false },
+                    );
+                }
+            }
+            Action::RenameWorkspace => {
+                self.overlay = Some(Overlay::Rename(Rename {
+                    ask: Ask::WorkspaceName,
+                    text: self.workspace_name.clone(),
+                }));
+            }
+            Action::DeleteWorkspace => {
+                if let Some(id) = self.workspace_id.clone() {
+                    let working = self.tabs.iter().any(|t| self.tab_working(t));
+                    let message = match working {
+                        true => format!(
+                            "Delete {}? Its agents are working and will be stopped.",
+                            self.workspace_name
+                        ),
+                        false => format!(
+                            "Delete {}? Its tabs close; the conversations stay saved.",
+                            self.workspace_name
+                        ),
+                    };
+                    self.overlay = Some(Overlay::Confirm(Confirm {
+                        title: "Delete workspace".into(),
+                        message,
+                        label: " Delete  y ",
+                        yes: Action::ForceDeleteWorkspace(id),
+                    }));
+                }
+            }
+            Action::ForceDeleteWorkspace(id) => {
+                self.backend.command(Command::WorkspaceDelete {
+                    workspace: id,
+                    force: true,
+                });
+            }
+            Action::Named(ask, name) => self.named(ask, name),
             Action::Compact => {
-                if !self.tab().read_only() {
-                    self.tab().handle.compact();
+                if let Some(agent) = self.tab().root().map(str::to_owned) {
+                    self.backend.command(Command::Compact { agent });
                     self.flash("compacting the conversation");
                 }
             }
-            Action::Clear => {
-                if self.tab().read_only() {
-                    return;
+            Action::SetModel(spec) => match self.tab().root().map(str::to_owned) {
+                Some(agent) => self.backend.command(Command::Model { agent, model: spec }),
+                None => {
+                    self.flash(format!("the tab's next agent uses {spec}"));
+                    self.tab_mut().model = Some(spec);
                 }
-                match runtime.spawn_agent(AgentSpec::default()) {
-                    Ok(handle) => {
-                        self.ensure_view(&handle);
-                        let tab = self.tab_mut();
-                        tab.handle = handle;
-                        tab.title = None;
-                        tab.queued.clear();
-                        tab.reset_view();
-                        self.switch_tab(self.active);
-                    }
-                    Err(err) => self.notice(Level::Error, format!("{err:#}")),
-                }
-            }
-            Action::SetModel(spec) => self.tab().handle.set_model(&spec),
-            Action::Resume(id) => self.open_session(&id),
+            },
+            Action::Resume(id) => self.open_agent(&id),
             Action::OpenAgent(id) => {
                 self.selection = None;
                 self.open_agent(&id);
             }
-            Action::PinAgent(id) => {
-                if let Some(handle) = runtime.agent(&id) {
-                    let index = match self.tabs.iter().position(|t| t.root() == id) {
-                        Some(index) => index,
-                        None => self.open_tab(handle),
-                    };
-                    self.switch_tab(index);
-                }
-            }
-            Action::StopAgent(id) => runtime.cancel_tree(&id),
+            Action::StopAgent(id) => self.backend.command(Command::Cancel { agent: id }),
             Action::Back => {
                 self.selection = None;
                 let tab = self.tab_mut();
@@ -702,38 +880,18 @@ impl App {
                 let lines = self.usage_lines();
                 self.info(lines);
             }
-            Action::ShowMcp => {
-                let lines = self.mcp_lines();
+            Action::ShowMcp => self.backend.tools(),
+            Action::ShowMemory => self.backend.memory(),
+            Action::ShowWeb => {
+                let lines = self.web_lines();
                 self.info(lines);
             }
-            Action::ShowMemory => {
-                let lines = self.memory_lines();
-                self.info(lines);
-            }
-            Action::Web(remote) => match self.session.serve_web(remote, None).await {
-                Ok(()) => {
-                    let t = theme();
-                    let lines = self
-                        .session
-                        .web_urls
-                        .iter()
-                        .map(|url| {
-                            Line::from(vec![
-                                Span::styled("  web UI  ", t.dim()),
-                                Span::styled(url.clone(), t.fg(t.accent)),
-                            ])
-                        })
-                        .collect();
-                    self.info(lines);
-                }
-                Err(err) => self.notice(Level::Error, format!("web UI: {err:#}")),
-            },
-            Action::CopyWebUrl => match self.session.web_urls.first().cloned() {
+            Action::CopyWebUrl => match self.backend.web_urls().into_iter().next() {
                 Some(url) => {
                     term::copy(&url);
-                    self.flash(format!("copied {url}"));
+                    self.flash_ok(format!("copied {url}"));
                 }
-                None => self.flash("the web UI is not serving · the Web menu starts it"),
+                None => self.flash("not connected to the daemon"),
             },
             Action::UpdateDialog => {
                 self.overlay = Some(Overlay::Update(UpdateDialog {
@@ -742,11 +900,7 @@ impl App {
                 }));
             }
             Action::CheckUpdate => {
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let result = update::check(true).await.map_err(|e| format!("{e:#}"));
-                    let _ = tx.send(Update::Checked(result));
-                });
+                self.backend.check_update();
                 if let Some(Overlay::Update(dialog)) = &mut self.overlay {
                     dialog.result = None;
                 } else {
@@ -758,16 +912,33 @@ impl App {
                     dialog.installing = true;
                     dialog.result = None;
                 }
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let result = runtime.install_update().await.map_err(|e| format!("{e:#}"));
-                    let _ = tx.send(Update::Installed(result));
-                });
+                self.backend.install_update();
+            }
+            Action::RestartDaemon => {
+                if self.daemon_busy() {
+                    self.flash("agents or jobs are running; restart the daemon when idle");
+                } else {
+                    self.backend.stop_daemon();
+                }
+            }
+            Action::Reconnect => self.reconnect(true),
+            Action::RequestPermissions => {
+                self.backend.request(
+                    Command::ControlPermissions { request: true },
+                    Reply::Control,
+                );
+                self.flash("asking macOS; System Settings opens at what is missing");
             }
             Action::ShowApprovals => self.approvals_hidden = false,
             Action::Answer(decision) => {
-                if let Some(mut approval) = self.approvals.pop_front() {
-                    approval.answer(decision);
+                if let Some(approval) = self.approvals.pop_front() {
+                    self.backend.request(
+                        Command::Approve {
+                            request_id: approval.request.id,
+                            decision,
+                        },
+                        Reply::Approve,
+                    );
                 }
             }
             Action::CopyEntry(index) => {
@@ -788,14 +959,90 @@ impl App {
                 self.copy(&code);
             }
             Action::ToggleEntry(index) => {
-                let id = self.tab().shown().to_owned();
-                if let Some(view) = self.agents.get_mut(&id) {
-                    view.transcript.toggle(index);
+                if let Some(id) = self.tab().shown().map(str::to_owned) {
+                    if let Some(view) = self.agents.get_mut(&id) {
+                        view.transcript.toggle(index);
+                    }
                 }
                 self.tab_mut().selected = Some(index);
             }
             Action::JumpBottom => self.tab_mut().scroll = None,
             Action::CloseDialog => self.overlay = None,
         }
+    }
+
+    /// Closes a tab, asking first when its agents work.
+    fn close_tab(&mut self, index: usize) {
+        if self.tabs.len() == 1 {
+            self.flash("this is the last tab · F10 quits");
+            return;
+        }
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let Some(id) = tab.id.clone() else {
+            return;
+        };
+        if self.tab_working(tab) {
+            self.overlay = Some(Overlay::Confirm(Confirm {
+                title: "Close tab".into(),
+                message: format!(
+                    "Agents are working in {}. Close the tab and stop them?",
+                    tab.name
+                ),
+                label: " Close and stop  y ",
+                yes: Action::ForceCloseTab(id),
+            }));
+        } else {
+            self.backend.command(Command::TabClose {
+                tab: id,
+                force: false,
+            });
+        }
+    }
+
+    fn named(&mut self, ask: Ask, name: String) {
+        if name.is_empty() && ask != Ask::NewWorkspace {
+            return;
+        }
+        match ask {
+            Ask::TabName => {
+                if let Some(tab) = self.tab_id() {
+                    self.backend.command(Command::TabRename { tab, name });
+                }
+            }
+            Ask::WorkspaceName => {
+                if let Some(workspace) = self.workspace_id.clone() {
+                    self.backend
+                        .command(Command::WorkspaceRename { workspace, name });
+                }
+            }
+            Ask::NewWorkspace => {
+                let name = (!name.is_empty()).then_some(name);
+                self.backend.request(
+                    Command::WorkspaceCreate { name },
+                    Reply::WorkspaceOpened { fresh: true },
+                );
+            }
+        }
+    }
+
+    /// Works in `dir`: a tab for it in this workspace, the existing one if
+    /// there is one.
+    pub fn open_folder(&mut self, dir: &Path) {
+        if !dir.is_dir() {
+            self.flash(format!("{} is not a folder", short_path(dir)));
+            return;
+        }
+        let spec = TabSpec {
+            cwd: dir.to_owned(),
+            workspace: self.workspace_id.clone(),
+            reuse: true,
+            ..Default::default()
+        };
+        self.backend.request(
+            Command::TabCreate(spec),
+            Reply::TabCreated { placeholder: false },
+        );
     }
 }

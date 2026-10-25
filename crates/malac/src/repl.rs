@@ -94,10 +94,20 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     if !interactive && prompt.trim().is_empty() {
         bail!("no prompt given");
     }
-    // The line interface is a daemon client; the full-screen one, scripts
-    // (-p, --json) and pipes still run here, in this process, and so does
-    // the line interface when the daemon cannot be reached.
-    if interactive && !use_tui {
+    // Both interactive interfaces are daemon clients, so agents outlive the
+    // terminal. Scripts (-p, --json) and pipes run here, in this process, and
+    // so does the line interface when the daemon cannot be reached.
+    if use_tui {
+        let connection = Client::connect_or_start(&ServeArgs::default())
+            .await
+            .context(
+                "the full-screen interface needs the malac daemon, which could not start; \
+                 `malac --plain` and `malac -p <prompt>` work without it",
+            )?;
+        tui::run(connection, &args, config, &cwd, prompt).await?;
+        return Ok(0);
+    }
+    if interactive {
         match Client::connect_or_start(&ServeArgs::default()).await {
             Ok(connection) => {
                 return remote::run(connection, &args, &cwd, prompt, show_thinking).await;
@@ -109,42 +119,25 @@ pub async fn run(args: RunArgs) -> Result<i32> {
             ),
         }
     }
-    if use_tui && (args.new_workspace || args.workspace.is_some() || args.name.is_some()) {
-        eprintln!(
-            "{}",
-            "! -n, -w and --name need the daemon, which only --plain uses so far".yellow()
-        );
-    }
 
     let runtime = Runtime::new(config, cwd.clone())?;
     if interactive {
         runtime.start_update_check();
     }
-    let servers = runtime.connect_mcp().await;
-    // The TUI lists unavailable servers itself.
-    if !use_tui {
-        for server in servers {
-            if let Some(err) = server.error {
-                let first = err.lines().next().unwrap_or_default();
-                eprintln!(
-                    "{}",
-                    format!("! MCP server `{}` unavailable: {first}", server.name).yellow()
-                );
-            }
+    for server in runtime.connect_mcp().await {
+        if let Some(err) = server.error {
+            let first = err.lines().next().unwrap_or_default();
+            eprintln!(
+                "{}",
+                format!("! MCP server `{}` unavailable: {first}", server.name).yellow()
+            );
         }
     }
 
     let lock: TerminalLock = Arc::new(Mutex::new(()));
     let main = Arc::new(RwLock::new(String::new()));
-    let (approver, approvals) = if use_tui {
-        let (approver, approvals) = tui::approver();
-        (Some(approver), Some(approvals))
-    } else {
-        let terminal = stdin_tty.then(|| {
-            Arc::new(TerminalApprover::new(lock.clone(), main.clone())) as Arc<dyn Approver>
-        });
-        (terminal, None)
-    };
+    let approver = stdin_tty
+        .then(|| Arc::new(TerminalApprover::new(lock.clone(), main.clone())) as Arc<dyn Approver>);
     runtime.set_approver(approver.clone().unwrap_or_else(|| Arc::new(DenyAll)));
     if approver.is_none() && mode != Mode::Autopilot {
         eprintln!(
@@ -154,12 +147,10 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         );
     }
 
-    // Subscribed before the agent starts, so the TUI sees it start.
-    let events = use_tui.then(|| runtime.bus.subscribe());
     let (done_tx, turn_done) = mpsc::unbounded_channel();
     if args.json {
         render::spawn_json(runtime.bus.subscribe(), main.clone(), done_tx);
-    } else if !use_tui {
+    } else {
         Renderer {
             lock: lock.clone(),
             main: main.clone(),
@@ -183,12 +174,6 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         session
             .serve_web(args.web_remote || web.remote, args.web_port)
             .await?;
-    }
-
-    if let (Some(events), Some(approvals)) = (events, approvals) {
-        let result = tui::run(session, events, approvals, prompt).await;
-        runtime.shutdown().await;
-        return result.map(|_| 0);
     }
 
     let mut repl = Repl {

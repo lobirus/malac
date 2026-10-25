@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use malac_core::attach as core_attach;
 use malac_core::event::{AgentId, Envelope, Event, Level, Todo, TodoStatus, TurnStatus};
 use malac_core::message::{Message, Role, Usage};
 use malac_core::{AgentSnapshot, Block};
@@ -244,10 +245,6 @@ impl Transcript {
         self.items.is_empty()
     }
 
-    pub fn has_turns(&self) -> bool {
-        self.items.iter().any(|i| matches!(i.entry, Entry::User(_)))
-    }
-
     pub fn push(&mut self, entry: Entry) {
         self.items.push(Item::new(entry));
     }
@@ -273,6 +270,12 @@ impl Transcript {
             Some(Entry::Tool(tool)) => Some(tool),
             _ => None,
         }
+    }
+
+    fn has_card(&self, id: &str) -> bool {
+        self.items
+            .iter()
+            .any(|i| matches!(&i.entry, Entry::Agent(c) if c.id == id))
     }
 
     fn agent_card_mut(&mut self, id: &str) -> Option<&mut AgentCard> {
@@ -431,10 +434,14 @@ impl Transcript {
             .sum()
     }
 
-    /// Fills a transcript from a saved session's messages.
+    /// Fills a transcript from a saved session's messages. A prompt reads
+    /// as its `user_message` event did: the typed text, then the files it
+    /// attached.
     pub fn load(&mut self, history: &[Message], summarize: impl Fn(&str, &Value) -> String) {
         let mut calls: HashMap<String, usize> = HashMap::new();
         for message in history {
+            let mut typed = Vec::new();
+            let mut attached = Vec::new();
             for block in &message.content {
                 match (message.role, block) {
                     (Role::User, Block::Text { text }) if text.starts_with(COMPACTED_PREFIX) => {
@@ -442,18 +449,9 @@ impl Transcript {
                     }
                     (Role::User, Block::Text { text })
                         if text.starts_with("<recalled-memories>") => {}
-                    // A prompt's attachments follow it as more text blocks.
-                    (Role::User, Block::Text { text }) => match self.items.last_mut() {
-                        Some(Item {
-                            entry: Entry::User(prompt),
-                            rendered,
-                            ..
-                        }) if text.starts_with("<file ") || text.starts_with("<image ") => {
-                            prompt.push('\n');
-                            prompt.push_str(text);
-                            *rendered = None;
-                        }
-                        _ => self.push(Entry::User(text.clone())),
+                    (Role::User, Block::Text { text }) => match core_attach::attached_path(text) {
+                        Some(path) => attached.push(path),
+                        None => typed.push(text.as_str()),
                     },
                     (Role::Assistant, Block::Text { text }) if !text.trim().is_empty() => {
                         self.push(Entry::assistant(text.clone()));
@@ -507,6 +505,10 @@ impl Transcript {
                     _ => {}
                 }
             }
+            if !typed.is_empty() || !attached.is_empty() {
+                let text = attach::user_text(&typed.join("\n"), &attached);
+                self.push(Entry::User(text));
+            }
         }
         self.mark_answers();
     }
@@ -528,6 +530,8 @@ pub struct AgentView {
     pub todos: Vec<Todo>,
     /// The tool call the model is writing right now.
     pub writing: Option<String>,
+    /// Events that arrived while the saved conversation was being read.
+    pending: Option<Vec<Envelope>>,
     started: Instant,
 }
 
@@ -547,8 +551,28 @@ impl AgentView {
             context: 0,
             todos: Vec::new(),
             writing: None,
+            pending: None,
             started: Instant::now(),
         }
+    }
+
+    pub fn from_snapshot(snapshot: &AgentSnapshot) -> Self {
+        let info = &snapshot.info;
+        let mut view = Self::new(
+            &info.id,
+            &info.label,
+            info.parent.clone(),
+            &snapshot.model,
+            &info.cwd.display().to_string(),
+        );
+        view.total = snapshot.usage;
+        view
+    }
+
+    /// Holds back events until [`Agents::loaded`] brings the history.
+    pub fn loading(mut self) -> Self {
+        self.pending = Some(Vec::new());
+        self
     }
 
     fn apply(&mut self, event: &Event, show_thinking: bool) {
@@ -795,6 +819,71 @@ impl Agents {
         id
     }
 
+    /// Shows a subagent as a card in its parent's transcript, once.
+    pub fn ensure_card(&mut self, id: &str, finished: Option<TurnStatus>) {
+        let Some(view) = self.views.get(id) else {
+            return;
+        };
+        let card = AgentCard {
+            id: id.to_owned(),
+            label: view.label.clone(),
+            model: view.model.clone(),
+            started: Instant::now(),
+            finished: finished.map(|status| (status, Duration::ZERO)),
+            report: String::new(),
+        };
+        let Some(parent) = view.parent.clone() else {
+            return;
+        };
+        if let Some(parent) = self.views.get_mut(&parent) {
+            if !parent.transcript.has_card(id) {
+                parent.transcript.push(Entry::Agent(card));
+            }
+        }
+    }
+
+    /// Fills a loading view from its saved conversation, then applies the
+    /// events that came in meanwhile.
+    pub fn loaded(
+        &mut self,
+        id: &str,
+        history: &[Message],
+        usage: Option<Usage>,
+        summarize: impl Fn(&str, &Value) -> String,
+    ) {
+        let Some(view) = self.views.get_mut(id) else {
+            return;
+        };
+        let Some(buffered) = view.pending.take() else {
+            return;
+        };
+        // Cards of subagents that started meanwhile go after the history.
+        let interim = std::mem::take(&mut view.transcript.items);
+        view.transcript.load(history, summarize);
+        // A prompt that began while the history was read is in both.
+        let started = buffered.iter().find_map(|e| match &e.event {
+            Event::UserMessage { text } => Some(text),
+            _ => None,
+        });
+        let last_prompt = view
+            .transcript
+            .items
+            .iter()
+            .rposition(|i| matches!(&i.entry, Entry::User(_)));
+        if let (Some(text), Some(index)) = (started, last_prompt) {
+            if matches!(&view.transcript.items[index].entry, Entry::User(t) if t == text) {
+                view.transcript.items.truncate(index);
+            }
+        }
+        view.transcript.items.extend(interim);
+        if let Some(usage) = usage {
+            view.total = usage;
+        }
+        for envelope in &buffered {
+            self.apply(envelope);
+        }
+    }
+
     pub fn apply(&mut self, envelope: &Envelope) {
         let id = &envelope.agent;
         if let Event::AgentStarted {
@@ -804,29 +893,19 @@ impl Agents {
             cwd,
         } = &envelope.event
         {
-            let known = self.views.contains_key(id);
             let view = self.insert(AgentView::new(id, label, parent.clone(), model, cwd));
             view.model = model.clone();
-            if let (false, Some(parent)) = (known, parent) {
-                let card = AgentCard {
-                    id: id.clone(),
-                    label: label.clone(),
-                    model: model.clone(),
-                    started: Instant::now(),
-                    finished: None,
-                    report: String::new(),
-                };
-                if let Some(parent) = self.views.get_mut(parent) {
-                    parent.transcript.push(Entry::Agent(card));
-                }
-            }
+            self.ensure_card(id, None);
             return;
         }
         let show_thinking = self.show_thinking;
         let Some(view) = self.views.get_mut(id) else {
             return;
         };
-        view.apply(&envelope.event, show_thinking);
+        match &mut view.pending {
+            Some(buffered) => buffered.push(envelope.clone()),
+            None => view.apply(&envelope.event, show_thinking),
+        }
         let parent = view.parent.clone();
         let elapsed = view.started.elapsed();
         let model = view.model.clone();
@@ -1570,12 +1649,12 @@ mod tests {
             }]),
             Message::user_text(format!("{COMPACTED_PREFIX} Summary of everything")),
             Message::user(vec![
-                Block::text("look"),
-                Block::text("<image path=\"a.png\" bytes=\"9\"/>"),
+                Block::text("<attachment path=\"a.png\" kind=\"image\" size=\"9 B\"></attachment>"),
                 Block::Image {
                     media_type: "image/png".into(),
                     data: String::new(),
                 },
+                Block::text("look"),
             ]),
         ];
         let mut transcript = Transcript::new("/work");
@@ -1593,7 +1672,37 @@ mod tests {
         );
         assert!(matches!(transcript.items()[3].entry, Entry::Compacted));
         assert_eq!(entries[4], "look", "attachments join their prompt");
+        assert!(
+            matches!(&transcript.items()[4].entry, Entry::User(t) if t == "look\n\n[attached: a.png]")
+        );
         assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn loading_views_hold_events_until_the_history_arrives() {
+        let mut agents = Agents::default();
+        agents.insert(AgentView::new("m", "main", None, "lora/smart", "/work").loading());
+        let prompt = |text: &str| envelope("m", Event::UserMessage { text: text.into() });
+        agents.apply(&prompt("second"));
+        agents.apply(&envelope(
+            "m",
+            Event::TextDelta {
+                text: "On it.".into(),
+            },
+        ));
+        assert!(agents.get("m").unwrap().transcript.is_empty(), "held back");
+        let history = vec![
+            Message::user_text("first"),
+            Message::assistant(vec![Block::text("Done.")]),
+            Message::user_text("second"),
+        ];
+        agents.loaded("m", &history, None, |_, _| String::new());
+        assert!(agents.get("m").unwrap().pending.is_none());
+        assert_eq!(
+            kinds(&agents, "m"),
+            vec!["user", "assistant", "user", "assistant"],
+            "the prompt the history already had is not shown twice"
+        );
     }
 
     #[test]

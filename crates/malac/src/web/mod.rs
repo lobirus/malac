@@ -46,6 +46,8 @@ const WIDGETS_JS: &str = include_str!("../../../../web/widgets.js");
 const TRANSCRIPT_JS: &str = include_str!("../../../../web/transcript.js");
 const VIEWS_JS: &str = include_str!("../../../../web/views.js");
 const SETTINGS_JS: &str = include_str!("../../../../web/settings.js");
+const WORKSPACE_JS: &str = include_str!("../../../../web/workspace.js");
+const JOBS_JS: &str = include_str!("../../../../web/jobs.js");
 const STYLE_CSS: &str = include_str!("../../../../web/style.css");
 const FAVICON_SVG: &str = include_str!("../../../../web/favicon.svg");
 const GEIST_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/Geist-Variable.woff2");
@@ -219,6 +221,11 @@ impl Server {
                 get(|| async { script("transcript.js", TRANSCRIPT_JS) }),
             )
             .route("/views.js", get(|| async { script("views.js", VIEWS_JS) }))
+            .route(
+                "/workspace.js",
+                get(|| async { script("workspace.js", WORKSPACE_JS) }),
+            )
+            .route("/jobs.js", get(|| async { script("jobs.js", JOBS_JS) }))
             .route(
                 "/settings.js",
                 get(|| async { script("settings.js", SETTINGS_JS) }),

@@ -17,6 +17,7 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if let KeyCode::F(n) = key.code {
             return bars::KEYS
                 .get(usize::from(n).wrapping_sub(1))
@@ -36,6 +37,12 @@ impl App {
             }
             KeyCode::Char('c') if ctrl => return self.ctrl_c(),
             KeyCode::Char('d') if ctrl && self.editor.is_empty() => return Some(Action::Quit),
+            KeyCode::Char('n') if ctrl && self.editor.is_empty() => return Some(Action::NewAgent),
+            KeyCode::Char('r') if ctrl => return Some(Action::Reconnect),
+            KeyCode::Up if alt => return Some(Action::StepAgent(-1)),
+            KeyCode::Down if alt => return Some(Action::StepAgent(1)),
+            KeyCode::PageUp if ctrl && shift => return Some(Action::MoveTab(-1)),
+            KeyCode::PageDown if ctrl && shift => return Some(Action::MoveTab(1)),
             KeyCode::PageUp if ctrl => return Some(Action::PrevTab),
             KeyCode::PageDown if ctrl => return Some(Action::NextTab),
             KeyCode::Left if alt => return Some(Action::PrevTab),
@@ -127,15 +134,19 @@ impl App {
             (Some(Overlay::AgentMap(_)), KeyCode::F(3)) => return Some(Action::AgentList),
             _ => {}
         }
-        let jobs = &self.jobs;
+        let jobs = self.workspace_jobs();
         let outcome = match self.overlay.as_mut()? {
             Overlay::Menu(menu) => menu.key(key),
-            Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p) => p.key(key),
+            Overlay::Models(p)
+            | Overlay::Sessions(p)
+            | Overlay::Agents(p)
+            | Overlay::Workspaces(p) => p.key(key),
             Overlay::AgentMap(map) => map.key(key),
             Overlay::Folder(browser) => browser.key(key),
-            Overlay::Jobs(view) => view.key(key, jobs),
+            Overlay::Jobs(view) => view.key(key, &jobs),
             Overlay::Help(help) => help.key(key),
             Overlay::Rename(rename) => rename.key(key),
+            Overlay::Confirm(confirm) => confirm.key(key),
             Overlay::Update(dialog) => dialog.key(key, &self.update),
         };
         self.outcome(outcome)
@@ -359,10 +370,6 @@ impl App {
                 };
             }
         }
-        if self.tab().read_only() {
-            self.flash("this tab watches a subagent; prompts go to session tabs");
-            return None;
-        }
         self.editor.submit();
         if !text.is_empty() {
             editor::append_history(&self.history_path, &text);
@@ -393,15 +400,20 @@ impl App {
         })
     }
 
-    /// Prompts the active tab's agent, or queues the prompt while it works.
+    /// Prompts the active tab's agent, or queues the prompt while it works
+    /// or while the tab is still being created.
     pub fn send(&mut self, prompt: Prompt) {
-        let tab = self.tab_mut();
-        if tab.handle.is_busy() || !tab.queued.is_empty() {
-            tab.queued.push_back(prompt);
+        let index = self.active;
+        let wait = self.busy() || !self.tab().queued.is_empty() || self.tab().id.is_none();
+        self.tab_mut().reset_view();
+        if wait {
+            self.tab_mut().queued.push_back(prompt);
+            if self.tab().id.is_none() {
+                self.create_tab_for(index);
+            }
         } else {
-            tab.handle.send(Self::prompt_blocks(&prompt));
+            self.dispatch(index, prompt);
         }
-        tab.reset_view();
         self.focus = Focus::Input;
     }
 
@@ -421,15 +433,13 @@ impl App {
             },
             Slash::Agents => Action::Agents,
             Slash::Compact => Action::Compact,
-            Slash::Clear => Action::Clear,
+            Slash::Clear => Action::NewAgent,
             Slash::Resume("") | Slash::Sessions => Action::Sessions,
             Slash::Resume(id) => Action::Resume(id.to_owned()),
             Slash::Cost => Action::ShowCost,
             Slash::Mcp => Action::ShowMcp,
             Slash::Memory => Action::ShowMemory,
-            Slash::Web(arg) => {
-                Action::Web(arg == "remote" || self.session.runtime.config.web.remote)
-            }
+            Slash::Web(_) => Action::ShowWeb,
         })
     }
 
@@ -568,9 +578,6 @@ impl App {
                     (None, Some(index)) => Some(Action::ToggleEntry(index)),
                     _ => None,
                 };
-            }
-            KeyCode::Char('o') | KeyCode::Char('t') if agent.is_some() => {
-                return agent.map(Action::PinAgent);
             }
             KeyCode::Char('y') | KeyCode::Char('c') => return selected.map(Action::CopyEntry),
             KeyCode::Char('b') => return selected.map(|i| Action::CopyCode(i, None)),

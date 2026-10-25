@@ -1,6 +1,6 @@
 # Daemon protocol
 
-The malac daemon (`malac daemon`, see [architecture](architecture.md#daemon)) holds every workspace, tab and agent. Front ends are clients: the web UI, the line interface (`malac --plain`), the editor extension and, next, the terminal UI. They all speak this protocol: JSON messages over one WebSocket, plus a few REST endpoints. The Rust types are in [`crates/malac/src/protocol.rs`](../crates/malac/src/protocol.rs) and a typed client is in [`crates/malac/src/client.rs`](../crates/malac/src/client.rs).
+The malac daemon (`malac daemon`, see [architecture](architecture.md#daemon)) holds every workspace, tab and agent. Front ends are clients: the web UI, the line interface (`malac --plain`), the editor extension and the terminal UI. They all speak this protocol: JSON messages over one WebSocket, plus a few REST endpoints. The Rust types are in [`crates/malac/src/protocol.rs`](../crates/malac/src/protocol.rs) and a typed client is in [`crates/malac/src/client.rs`](../crates/malac/src/client.rs).
 
 ## Finding and reaching the daemon
 
@@ -151,7 +151,7 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
 }
 ```
 
-`workspace` is the connection's workspace: the last used one at first, `null` before any exists. `daemon.attached` is true when the server is a terminal session's own web UI (`malac --web` with the full-screen UI) rather than the daemon; workspace and tab commands are refused there. `update.installed` set means newer binaries are on disk and a restart picks them up.
+`workspace` is the connection's workspace: the last used one at first, `null` before any exists. `daemon.attached` is true when the server is a terminal session's own web UI (`--web` in a session that runs in its own process) rather than the daemon; workspace and tab commands are refused there. `update.installed` set means newer binaries are on disk and a restart picks them up.
 
 #### `event`
 

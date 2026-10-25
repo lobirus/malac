@@ -1,5 +1,8 @@
-//! The full-screen terminal interface: tabs over sessions, a menu bar, a
-//! status line and function keys, with mouse support throughout.
+//! The full-screen terminal interface, a client of the malac daemon: a
+//! workspace's tabs, the agents in each, a menu bar, a status line and
+//! function keys, with mouse support throughout. Agents run in the daemon,
+//! so they keep working when the interface quits, and other terminals or
+//! the web UI see the same tabs.
 
 mod agentmap;
 mod app;
@@ -20,95 +23,95 @@ mod theme;
 mod transcript;
 mod ui;
 
-use std::sync::Arc;
+#[cfg(test)]
+mod tests;
+
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use async_trait::async_trait;
+use anyhow::{Context, Result};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEventKind, MouseEventKind};
 use crossterm::style::Stylize;
 use futures::{FutureExt, StreamExt};
-use malac_core::Envelope;
-use malac_core::event::Level;
-use malac_core::permission::{Approver, Decision, PermissionRequest};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use malac_core::config::Config;
+use tokio::sync::mpsc;
 
-use crate::repl::Session;
-use app::App;
+use crate::RunArgs;
+use crate::client::{Client, Events};
+use crate::protocol::Snapshot;
+use app::{App, Backend};
 pub use term::log_writer;
-
-/// A permission request on its way to the interface.
-pub struct Pending {
-    pub request: PermissionRequest,
-    pub reply: oneshot::Sender<Decision>,
-}
-
-pub type Approvals = mpsc::UnboundedReceiver<Pending>;
-
-/// Routes permission requests into the interface. When the web UI answers
-/// first, the request is dropped here and its dialog disappears.
-struct TuiApprover(mpsc::UnboundedSender<Pending>);
-
-#[async_trait]
-impl Approver for TuiApprover {
-    async fn approve(&self, request: &PermissionRequest) -> Decision {
-        let (reply, answer) = oneshot::channel();
-        let pending = Pending {
-            request: request.clone(),
-            reply,
-        };
-        if self.0.send(pending).is_err() {
-            return Decision::Deny;
-        }
-        answer.await.unwrap_or(Decision::Deny)
-    }
-}
-
-pub fn approver() -> (Arc<dyn Approver>, Approvals) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    (Arc::new(TuiApprover(tx)), rx)
-}
 
 /// Frames are drawn at most this often; streaming text in between is coalesced.
 const FRAME: Duration = Duration::from_millis(16);
 
-/// Runs the interface until the user quits. The terminal is restored on
-/// every way out, panics included.
+/// Opens what the command line asks for (`launch`) and runs the interface
+/// until the user quits. The terminal is restored on every way out, panics
+/// included.
+/// `config` is the user's, for what only the interface uses: whether
+/// thinking shows and the models' context windows.
 pub async fn run(
-    session: Session,
-    events: broadcast::Receiver<Arc<Envelope>>,
-    approvals: Approvals,
+    (client, events, snapshot): (Client, Events, Snapshot),
+    args: &RunArgs,
+    config: Config,
+    cwd: &Path,
     prompt: String,
 ) -> Result<()> {
+    let launched = client.launch(args.launch(cwd, &prompt)).await?;
+
+    let (updates_tx, updates) = mpsc::unbounded_channel();
+    let (connections_tx, connections) = mpsc::unbounded_channel();
+    let backend = Backend::new(client, updates_tx, connections_tx);
+    let app = App::new(
+        backend,
+        config,
+        snapshot,
+        &launched.workspace,
+        launched.tab.as_deref(),
+        cwd.to_owned(),
+    );
+
     let mut terminal = term::enter()?;
-    let result = event_loop(&mut terminal, session, events, approvals, prompt).await;
+    let result = event_loop(&mut terminal, app, events, updates, connections).await;
     term::leave();
-    if let Ok(Some(id)) = &result {
-        println!(
-            "{}",
-            format!("resume this session with: malac -r {id}").dark_grey()
-        );
-    }
-    result.map(|_| ())
+    let app = result?;
+    println!("{}", goodbye(&app).await.dark_grey());
+    Ok(())
 }
 
-/// Returns the session to mention on exit, if it has any turns.
+/// One line on what keeps running and how to come back.
+async fn goodbye(app: &App) -> String {
+    let info = match app.backend.file() {
+        Some(file) => tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::client::get::<crate::protocol::DaemonInfo>(file, "/api/daemon"),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok),
+        None => None,
+    };
+    let running = info.map_or_else(|| app.running_count(), |i| i.agents_running);
+    let agents = match running {
+        0 => "no agents are running".to_owned(),
+        1 => "1 agent keeps running in the daemon".to_owned(),
+        n => format!("{n} agents keep running in the daemon"),
+    };
+    format!("{agents} · `malac` reattaches to {}", app.workspace_name)
+}
+
 async fn event_loop(
     terminal: &mut term::Tui,
-    session: Session,
-    mut events: broadcast::Receiver<Arc<Envelope>>,
-    mut approvals: Approvals,
-    prompt: String,
-) -> Result<Option<String>> {
-    let (tx, mut updates) = mpsc::unbounded_channel();
-    let mut app = App::new(session, tx);
-    if !prompt.trim().is_empty() {
-        app.send(prompt.into());
-    }
+    mut app: App,
+    mut events: Events,
+    mut updates: mpsc::UnboundedReceiver<app::Update>,
+    mut connections: mpsc::UnboundedReceiver<app::Connection>,
+) -> Result<App> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - FRAME;
+    let mut listening = true;
     loop {
         if app.clear_screen {
             terminal.clear()?;
@@ -127,7 +130,7 @@ async fn event_loop(
         tokio::select! {
             event = input.next() => {
                 let Some(event) = event else { break };
-                let mut batch = vec![event?];
+                let mut batch = vec![event.context("reading the terminal")?];
                 while let Some(Some(Ok(next))) = input.next().now_or_never() {
                     batch.push(next);
                 }
@@ -136,22 +139,34 @@ async fn event_loop(
                     handle(&mut app, event, more).await;
                 }
             }
-            received = events.recv() => match received {
-                Ok(envelope) => {
-                    app.on_bus(&envelope);
-                    while let Ok(envelope) = events.try_recv() {
-                        app.on_bus(&envelope);
+            message = events.recv(), if listening => match message {
+                Some(message) => {
+                    app.on_message(message);
+                    while let Ok(message) = events.try_recv() {
+                        app.on_message(message);
                     }
+                }
+                None => {
+                    listening = false;
+                    app.disconnected();
                     app.dirty = true;
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    app.notice(Level::Warning, format!("{n} events were skipped"));
-                    app.dirty = true;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
             },
-            Some(pending) = approvals.recv() => app.on_approval(pending),
-            Some(update) = updates.recv() => app.on_update(update),
+            Some(connection) = connections.recv() => {
+                let (client, fresh, snapshot) = connection;
+                events = fresh;
+                listening = true;
+                app.reconnected(client, snapshot);
+                app.dirty = true;
+            }
+            Some(update) = updates.recv() => {
+                // Events that came before a reply apply first: a history
+                // read after them must not be followed by them again.
+                while let Ok(message) = events.try_recv() {
+                    app.on_message(message);
+                }
+                app.on_update(update);
+            }
             _ = tick.tick() => {
                 if app.tick() {
                     app.dirty = true;
@@ -160,12 +175,7 @@ async fn event_loop(
             _ = next_frame, if app.dirty => {}
         }
     }
-    let tab = app.tab();
-    let had_turns = app
-        .agents
-        .get(tab.root())
-        .is_some_and(|v| v.transcript.has_turns());
-    Ok(had_turns.then(|| tab.root().to_owned()))
+    Ok(app)
 }
 
 fn is_typing(event: &TermEvent) -> bool {

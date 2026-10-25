@@ -59,11 +59,17 @@ impl App {
             _ => (6, 0),
         };
         let approval = self.approval_visible();
+        let jobs = self.workspace_jobs();
         match &mut self.overlay {
-            Some(Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p)) => p.scroll_by(dy),
+            Some(
+                Overlay::Models(p)
+                | Overlay::Sessions(p)
+                | Overlay::Agents(p)
+                | Overlay::Workspaces(p),
+            ) => p.scroll_by(dy),
             Some(Overlay::AgentMap(map)) => map.scroll_by(dx, dy),
             Some(Overlay::Folder(browser)) => browser.scroll_by(dy),
-            Some(Overlay::Jobs(view)) => view.scroll_by(dy.signum(), &self.jobs),
+            Some(Overlay::Jobs(view)) => view.scroll_by(dy.signum(), &jobs),
             Some(Overlay::Help(help)) => {
                 help.scroll = (help.scroll as isize + dy).max(0) as usize;
             }
@@ -141,7 +147,10 @@ impl App {
             let outcome = match (overlay, &target) {
                 (Overlay::Menu(menu), Some(Target::MenuItem(index))) => menu.activate(*index),
                 (
-                    Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p),
+                    Overlay::Models(p)
+                    | Overlay::Sessions(p)
+                    | Overlay::Agents(p)
+                    | Overlay::Workspaces(p),
                     Some(Target::Pick(index)),
                 ) => p.click(*index),
                 (Overlay::AgentMap(map), Some(Target::Pick(index))) => map.click(*index, count),
@@ -247,6 +256,9 @@ impl App {
                     self.scroll_by(1);
                 }
                 let head = self.transcript_point(x, y);
+                let Some(agent) = self.tab().shown().map(str::to_owned) else {
+                    return;
+                };
                 if head == start && !moved {
                     return;
                 }
@@ -256,7 +268,7 @@ impl App {
                     moved: true,
                 });
                 self.selection = Some(Selection {
-                    agent: self.tab().shown().to_owned(),
+                    agent,
                     width: area.width as usize,
                     anchor: start,
                     head,
@@ -413,11 +425,6 @@ impl App {
             }
             Entry::Agent(card) => {
                 items.push(Item::new("Open", 'o', Action::OpenAgent(card.id.clone())));
-                items.push(Item::new(
-                    "Open in a new tab",
-                    't',
-                    Action::PinAgent(card.id.clone()),
-                ));
                 items.push(Item::new("Stop", 's', Action::StopAgent(card.id.clone())));
             }
             _ => {}

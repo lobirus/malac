@@ -70,6 +70,7 @@ pub enum PickKind {
     Model,
     Session,
     Agent,
+    Workspace,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +221,7 @@ impl Picker {
             PickKind::Model => Action::SetModel,
             PickKind::Session => Action::Resume,
             PickKind::Agent => Action::OpenAgent,
+            PickKind::Workspace => Action::OpenWorkspace,
         })
     }
 
@@ -240,7 +242,6 @@ impl Picker {
             KeyCode::Esc => return Outcome::Close,
             KeyCode::Char('c') if ctrl => return Outcome::Close,
             KeyCode::Enter => return self.choose(),
-            KeyCode::Tab if self.kind == PickKind::Agent => return self.outcome(Action::PinAgent),
             KeyCode::Char('x') if ctrl && self.kind == PickKind::Agent => {
                 return self.outcome(Action::StopAgent);
             }
@@ -340,7 +341,7 @@ const KEYS: &[(&str, &str)] = &[
     ("F2  Ctrl-Y", "copy the last answer"),
     (
         "F3",
-        "agents as a list or a map (F3 again switches); open, pin, stop",
+        "agents as a list or a map (F3 again switches); open, stop",
     ),
     ("F4  Ctrl-P", "pick a model"),
     ("F5  Shift-Tab", "cycle the mode: ask, edits, autopilot"),
@@ -352,13 +353,23 @@ const KEYS: &[(&str, &str)] = &[
         "clear a selection, close the @ picker, leave a subagent",
     ),
     ("F9  Ctrl-O  Alt-M", "menu bar"),
-    ("F10  Ctrl-D", "quit (Ctrl-C twice on an empty prompt)"),
+    (
+        "F10  Ctrl-D",
+        "quit; agents keep working in the daemon (Ctrl-C twice also quits)",
+    ),
     (
         "Ctrl-T  Ctrl-W",
-        "new tab, close tab (the session keeps running)",
+        "new tab for this folder, close tab (its sessions stay saved)",
     ),
     ("Alt-1…9", "go to tab"),
     ("Alt-←/→  Ctrl-PgUp/PgDn", "previous or next tab"),
+    ("Ctrl-Shift-PgUp/PgDn", "move the tab left or right"),
+    ("Alt-↑/↓", "previous or next agent in the tab"),
+    (
+        "Ctrl-N",
+        "start another agent in the tab (on an empty prompt)",
+    ),
+    ("Ctrl-R", "reconnect to the daemon, starting it if needed"),
     ("Enter", "send; runs the highlighted /command"),
     (
         "@",
@@ -379,7 +390,7 @@ const KEYS: &[(&str, &str)] = &[
     ),
     (
         "Tab",
-        "move to the transcript: ↑↓ select, Enter expand or open, y copy, o open in a tab",
+        "move to the transcript: ↑↓ select, Enter expand or open, y copy",
     ),
     ("[  ]", "in the transcript: previous or next answer"),
     ("PgUp/PgDn", "scroll; Home/End on an empty prompt jump"),
@@ -401,7 +412,7 @@ const MOUSE: &[(&str, &str)] = &[
         "select text in the transcript or the prompt; release copies it",
     ),
     ("double / triple click", "select and copy a word / a line"),
-    ("right click", "copy, copy code, expand, open in a tab"),
+    ("right click", "copy, copy code, expand, open, stop"),
     ("middle click", "close a tab"),
     ("wheel", "scroll the transcript, a list or the agent map"),
     (
@@ -444,6 +455,17 @@ impl Help {
             lines.push(row(format!("/{name} {args}").trim_end(), help));
         }
         lines.push(Line::default());
+        lines.push(section("Workspaces"));
+        for line in [
+            "Tabs are projects: each works in its own folder, and holds one or more agents.",
+            "A workspace is a set of tabs. Agents run in the malac daemon, so closing the",
+            "terminal leaves them working; `malac` reopens the last workspace where you left",
+            "off, `malac -n` starts a new one, `malac -w <name>` opens one, `malac <prompt>`",
+            "adds a tab. Several terminals and the web UI can work on one workspace at once.",
+        ] {
+            lines.push(Line::styled(format!("  {line}"), t.dim()));
+        }
+        lines.push(Line::default());
         lines.push(Line::styled(
             "In tmux or byobu, `set -g mouse on` passes clicks through.",
             t.dim(),
@@ -482,8 +504,17 @@ impl Help {
     }
 }
 
-/// A one-line prompt for the tab's name.
+/// What a one-line prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    TabName,
+    WorkspaceName,
+    NewWorkspace,
+}
+
+/// A one-line prompt for a name.
 pub struct Rename {
+    pub ask: Ask,
     pub text: String,
 }
 
@@ -491,7 +522,7 @@ impl Rename {
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
         match key.code {
             KeyCode::Esc => Outcome::Close,
-            KeyCode::Enter => Outcome::Run(Action::SetTabTitle(self.text.trim().to_owned())),
+            KeyCode::Enter => Outcome::Run(Action::Named(self.ask, self.text.trim().to_owned())),
             KeyCode::Backspace => {
                 self.text.pop();
                 Outcome::Stay
@@ -510,7 +541,12 @@ impl Rename {
 
     pub fn draw(&self, frame: &mut Frame, hits: &mut HitMap) {
         let t = theme();
-        let inner = frame_box(frame, 48, 3, "Rename tab", "enter save · esc cancel", hits);
+        let (title, hint) = match self.ask {
+            Ask::TabName => ("Rename tab", "enter save · esc cancel"),
+            Ask::WorkspaceName => ("Rename workspace", "enter save · esc cancel"),
+            Ask::NewWorkspace => ("New workspace", "enter create · esc cancel"),
+        };
+        let inner = frame_box(frame, 48, 3, title, hint, hits);
         put(
             frame,
             inner,
@@ -640,10 +676,39 @@ fn draw_buttons(
     }
 }
 
-/// A permission request waiting for an answer.
+/// Asks before something that cannot be undone or interrupts work.
+pub struct Confirm {
+    pub title: String,
+    pub message: String,
+    /// The button that goes ahead, such as " Close it  y ".
+    pub label: &'static str,
+    pub yes: Action,
+}
+
+impl Confirm {
+    pub fn key(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Outcome::Run(self.yes.clone()),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => Outcome::Close,
+            _ => Outcome::Stay,
+        }
+    }
+
+    pub fn draw(&self, frame: &mut Frame, hits: &mut HitMap) {
+        let width = (text::width(&self.message) as u16 + 6).clamp(40, 80);
+        let inner = frame_box(frame, width, 6, &self.title, "", hits);
+        put(frame, inner, 0, Line::raw(self.message.clone()));
+        let buttons = [
+            (self.label, self.yes.clone()),
+            (" Cancel  n ", Action::CloseDialog),
+        ];
+        draw_buttons(frame, inner, inner.height - 1, &buttons, 0, hits);
+    }
+}
+
+/// A permission request waiting for an answer, from this client or another.
 pub struct Approval {
     pub request: PermissionRequest,
-    pub reply: Option<tokio::sync::oneshot::Sender<Decision>>,
     pub arrived: Instant,
     pub details: bool,
     pub focus: usize,
@@ -656,13 +721,12 @@ pub const ANSWERS: [(&str, Decision); 3] = [
 ];
 
 impl Approval {
-    pub fn is_closed(&self) -> bool {
-        self.reply.as_ref().is_none_or(|r| r.is_closed())
-    }
-
-    pub fn answer(&mut self, decision: Decision) {
-        if let Some(reply) = self.reply.take() {
-            let _ = reply.send(decision);
+    pub fn new(request: PermissionRequest) -> Self {
+        Self {
+            request,
+            arrived: Instant::now(),
+            details: false,
+            focus: 0,
         }
     }
 

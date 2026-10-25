@@ -3,6 +3,7 @@
 
 import {
   addUsage,
+  baseName,
   clockTime,
   copyButton,
   dialog,
@@ -417,13 +418,21 @@ export class TranscriptView {
   userBlocks(blocks) {
     const text = [];
     const images = [];
+    const attachments = [];
+    let inAttachment = false;
     for (const block of blocks) {
       if (block.type === "tool_result") this.cards.get(block.tool_use_id)?.result(block);
+      else if (block.type === "image" && inAttachment) attachments.at(-1).images.push(block);
       else if (block.type === "image") images.push(block);
       else if (block.type === "text" && block.text.startsWith("<recalled-memories>")) this.append(recalledNode(block.text));
-      else if (block.type === "text") text.push(block.text);
+      else if (block.type === "text" && ATTACHMENT_START.test(block.text)) {
+        attachments.push(parseAttachment(block.text));
+        inAttachment = true;
+        continue;
+      } else if (block.type === "text") text.push(block.text);
+      inAttachment = false;
     }
-    if (text.length || images.length) this.userMessage(text.join("\n"), images);
+    if (text.length || images.length || attachments.length) this.userMessage(text.join("\n"), images, null, attachments);
   }
 
   assistantBlocks(blocks, at) {
@@ -434,9 +443,11 @@ export class TranscriptView {
     }
   }
 
-  userMessage(text, images, at) {
+  userMessage(text, images, at, attachments = []) {
     this.clearDraft();
-    this.append(userNode(text, images, at));
+    const parsed = splitAttachedLine(text);
+    const chips = attachments.length ? attachments : parsed.names.map((path) => ({ path, body: null, images: [] }));
+    this.append(userNode(parsed.text, images, at, chips));
   }
 
   toolUse(block, at) {
@@ -663,13 +674,43 @@ function messageTools(getText, at) {
   );
 }
 
-function userNode(text, images, at) {
+function userNode(text, images, at, attachments = []) {
   return h(
     "div",
     { class: "msg user" },
     h("div", { class: "msg-head" }, h("span", { class: "msg-author" }, "You"), messageTools(() => text, at)),
     images.length ? h("div", { class: "thumbs" }, images.map((image) => imageNode(image))) : null,
     text ? h("div", { class: "user-text" }, text) : null,
+    attachments.length ? h("div", { class: "attached" }, attachments.map(attachmentChip)) : null,
+  );
+}
+
+// Prompt attachments: history has an `<attachment path="…">` block per
+// file; the live user_message ends with a line `[attached: a.txt, src]`.
+const ATTACHMENT_START = /^<attachment path="([^"]*)"[^>]*>/;
+const ATTACHED_LINE = /\n?\[attached: ([^\]]*)\]\s*$/;
+
+function parseAttachment(text) {
+  const match = ATTACHMENT_START.exec(text);
+  const body = text.slice(match[0].length).replace(/<\/attachment>\s*$/, "").trim();
+  return { path: match[1], body, images: [] };
+}
+
+function splitAttachedLine(text) {
+  const match = ATTACHED_LINE.exec(text ?? "");
+  if (!match) return { text, names: [] };
+  return { text: text.slice(0, match.index), names: match[1].split(",").map((name) => name.trim()).filter(Boolean) };
+}
+
+function attachmentChip(attachment) {
+  const label = h("span", { class: "attached-name" }, icon("file", 14), baseName(attachment.path) || attachment.path);
+  if (!attachment.body && !attachment.images.length) return h("span", { class: "attached-chip", title: attachment.path }, label);
+  return h(
+    "details",
+    { class: "attached-chip" },
+    h("summary", { title: attachment.path }, label),
+    attachment.body ? h("pre", { class: "output" }, attachment.body) : null,
+    attachment.images.length ? h("div", { class: "thumbs" }, attachment.images.map((image) => imageNode(image, "Attached image"))) : null,
   );
 }
 

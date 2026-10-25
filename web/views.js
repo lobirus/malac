@@ -1,4 +1,5 @@
-// The home screen and the agents overview.
+// The tab home (a tab's start page), the welcome screen of a workspace
+// without tabs, and the agents overview.
 
 import {
   baseName,
@@ -23,9 +24,10 @@ import {
   installUpdate,
   byCreated,
   contextWindow,
+  createTab,
+  currentTab,
   displayName,
   ensure,
-  liveAgents,
   navigate,
   openAgent,
   renderKeyed,
@@ -33,11 +35,14 @@ import {
   resumeSession,
   state,
   stopAgent,
+  tabAgents,
   todoProgress,
   waitingAgents,
+  workspaceAgents,
 } from "./store.js";
 import { TranscriptView } from "./transcript.js";
 import { modelLabel, modelPicker, statusDot } from "./widgets.js";
+import { markerPills, recentFolders, switchWorkspace } from "./workspace.js";
 
 export const TAGLINE = "Multi-Agent Loop for Autonomous Coding";
 
@@ -49,42 +54,50 @@ const QUICK_STARTS = [
   { label: "Summarize recent work", text: "Summarize the last 20 commits: what changed, and what looks unfinished." },
 ];
 
-// Home
+// Markers of each tab folder, fetched once per folder.
+const folderMarkers = new Map();
+
+function markersOf(cwd) {
+  if (!cwd) return [];
+  if (!folderMarkers.has(cwd)) {
+    folderMarkers.set(cwd, []);
+    api(`/api/fs?${new URLSearchParams({ path: cwd })}`)
+      .then((listing) => {
+        folderMarkers.set(cwd, listing.markers ?? []);
+        document.dispatchEvent(new CustomEvent("malac:markers"));
+      })
+      .catch(() => {});
+  }
+  return folderMarkers.get(cwd);
+}
+
+// Tab home
 
 let instances = 0;
 
-export function homeView({ composerSlot, onQuickStart }) {
+/**
+ * The start page of the selected tab: its folder, a composer for a new
+ * agent, its agents and the folder's earlier sessions. Without a tab it is
+ * the workspace's welcome screen.
+ */
+export function homeView({ composerSlot, onQuickStart, onNewTab }) {
   const slot = `home${++instances}`;
   const cards = {
-    sessions: h("section", { class: "card", "aria-labelledby": "home-sessions" }),
+    agents: h("section", { class: "card", "aria-labelledby": `${slot}-agents` }),
+    sessions: h("section", { class: "card", "aria-labelledby": `${slot}-sessions` }),
     models: h("section", { class: "card", "aria-labelledby": "home-models" }),
     services: h("section", { class: "card", "aria-labelledby": "home-services" }),
     memory: h("section", { class: "card", "aria-labelledby": "home-memory" }),
   };
-  const project = h("div", { class: "home-project" });
-  const agents = h("div", { class: "home-agents" });
-  const root = h(
+  const hero = h("header", { class: "home-hero" });
+  const welcome = h("div", { class: "welcome" });
+  const starts = h(
     "div",
-    { class: "home" },
-    h(
-      "header",
-      { class: "home-hero" },
-      pigLogo(40, "home-logo"),
-      h("h1", { class: "home-title" }, "malac"),
-      h("p", { class: "home-tagline" }, TAGLINE),
-      project,
-    ),
-    composerSlot,
-    h(
-      "div",
-      { class: "quick-starts", role: "group", "aria-label": "Suggested tasks" },
-      QUICK_STARTS.map((item) =>
-        h("button", { class: "button quiet", type: "button", title: item.text, onclick: () => onQuickStart(item.text) }, item.label),
-      ),
-    ),
-    agents,
-    h("div", { class: "home-grid" }, cards.sessions, cards.models, cards.services, cards.memory),
+    { class: "quick-starts", role: "group", "aria-label": "Suggested tasks" },
+    QUICK_STARTS.map((item) => h("button", { class: "button quiet", type: "button", title: item.text, onclick: () => onQuickStart(item.text) }, item.label)),
   );
+  const grid = h("div", { class: "home-grid" }, cards.agents, cards.sessions, cards.models, cards.services, cards.memory);
+  const root = h("div", { class: "home" }, hero, composerSlot, starts, welcome, grid);
   return {
     root,
     render() {
@@ -92,9 +105,18 @@ export function homeView({ composerSlot, onQuickStart }) {
       ensure("tools");
       ensure("memory");
       ensure("settings");
-      renderProject(slot, project);
-      renderLiveAgents(slot, agents);
-      renderSessionsCard(slot, cards.sessions);
+      const tab = currentTab();
+      composerSlot.hidden = !tab;
+      starts.hidden = !tab;
+      welcome.hidden = Boolean(tab);
+      cards.agents.hidden = !tab;
+      cards.sessions.hidden = !tab;
+      renderHero(slot, hero, tab);
+      if (!tab) renderWelcome(slot, welcome, onNewTab);
+      else {
+        renderTabAgentsCard(slot, cards.agents, tab);
+        renderSessionsCard(slot, cards.sessions, tab);
+      }
       renderModelsCard(slot, cards.models);
       renderServicesCard(slot, cards.services);
       renderMemoryCard(slot, cards.memory);
@@ -102,33 +124,103 @@ export function homeView({ composerSlot, onQuickStart }) {
   };
 }
 
-function renderProject(slot, node) {
-  renderKeyed(`${slot}:project`, JSON.stringify([state.cwd, state.version]), () => {
+function renderHero(slot, node, tab) {
+  const markers = markersOf(tab?.cwd);
+  renderKeyed(`${slot}:hero`, JSON.stringify([tab?.id, tab?.name, tab?.cwd, tab?.mode, markers, state.workspace?.name]), () => {
+    if (!tab) {
+      setChildren(
+        node,
+        pigLogo(40, "home-logo"),
+        h("h1", { class: "home-title" }, "malac"),
+        h("p", { class: "home-tagline" }, TAGLINE),
+      );
+      return;
+    }
     setChildren(
       node,
-      icon("folder", 14),
-      h("span", { class: "home-project-name" }, baseName(state.cwd) || "No project"),
-      h("span", { class: "home-project-path", title: state.cwd }, shortPath(state.cwd, 3)),
+      pigLogo(32, "home-logo"),
+      h("h1", { class: "home-title small" }, tab.name),
+      h(
+        "p",
+        { class: "home-project" },
+        icon("folder", 14),
+        h("span", { class: "home-project-path", title: tab.cwd }, shortPath(tab.cwd, 3)),
+        markerPills(markers),
+      ),
+      h("p", { class: "home-tagline" }, "Describe a task to start a new agent in this tab."),
     );
   });
 }
 
-function renderLiveAgents(slot, node) {
-  const agents = liveAgents();
-  const running = agents.filter((a) => a.status === "running");
-  const waiting = waitingAgents();
-  renderKeyed(`${slot}:agents`, JSON.stringify([running.length, agents.length, waiting.size]), () => {
-    if (!running.length && !waiting.size) {
-      setChildren(node);
-      node.hidden = true;
-      return;
-    }
-    node.hidden = false;
+function renderWelcome(slot, node, onNewTab) {
+  const folders = recentFolders();
+  const others = state.workspaces.filter((w) => w.id !== state.workspace?.id);
+  renderKeyed(`${slot}:welcome`, JSON.stringify([state.workspace?.id, state.workspace?.name, folders, others.map((w) => [w.id, w.name, w.tabs, w.running])]), () => {
+    const openHere = async (path) => {
+      try {
+        const tab = await createTab(path);
+        navigate({ name: "tab", tab, fresh: true });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    };
     setChildren(
       node,
-      statusDot("running"),
-      h("span", {}, `${plural(running.length, "agent")} working`, waiting.size ? `, ${waiting.size} waiting for approval` : ""),
-      h("button", { class: "link", type: "button", onclick: () => navigate({ name: "agents" }) }, "Open agents"),
+      h(
+        "div",
+        { class: "welcome-main" },
+        h("p", { class: "welcome-lead" }, state.workspace ? `Workspace ${state.workspace.name} has no tabs yet.` : "No workspace yet."),
+        h("p", { class: "muted" }, "Each tab is a project folder. Several agents can work in a tab, and every client sees the same tabs."),
+        h("button", { class: "button primary", type: "button", onclick: onNewTab }, icon("folder", 16), "Open a folder"),
+      ),
+      folders.length
+        ? h(
+            "section",
+            { class: "card", "aria-labelledby": `${slot}-recent` },
+            h("header", { class: "card-head" }, h("h2", { id: `${slot}-recent`, class: "card-title" }, "Recent folders")),
+            h(
+              "ul",
+              { class: "plain-list" },
+              folders.map((path) =>
+                h(
+                  "li",
+                  {},
+                  h(
+                    "button",
+                    { class: "list-row", type: "button", title: path, onclick: () => openHere(path) },
+                    icon("folder", 14),
+                    h("span", { class: "strong" }, baseName(path)),
+                    h("span", { class: "muted small ellipsis" }, shortPath(path, 3)),
+                  ),
+                ),
+              ),
+            ),
+          )
+        : null,
+      others.length
+        ? h(
+            "section",
+            { class: "card", "aria-labelledby": `${slot}-others` },
+            h("header", { class: "card-head" }, h("h2", { id: `${slot}-others`, class: "card-title" }, "Other workspaces")),
+            h(
+              "ul",
+              { class: "plain-list" },
+              others.map((w) =>
+                h(
+                  "li",
+                  {},
+                  h(
+                    "button",
+                    { class: "list-row", type: "button", onclick: () => switchWorkspace(w.id) },
+                    icon("layers", 14),
+                    h("span", { class: "strong" }, w.name),
+                    h("span", { class: "muted small" }, `${plural(w.tabs, "tab")}${w.running ? ` · ${w.running} running` : ""}`),
+                  ),
+                ),
+              ),
+            ),
+          )
+        : null,
     );
   });
 }
@@ -141,20 +233,59 @@ function emptyRow(text) {
   return h("p", { class: "empty-note" }, text);
 }
 
-function renderSessionsCard(slot, card) {
-  const here = state.sessions.filter((s) => s.cwd === state.cwd);
-  const elsewhere = here.length === 0;
-  const sessions = (elsewhere ? state.sessions : here).slice(0, 8);
-  renderKeyed(`${slot}:sessions`, JSON.stringify([elsewhere, sessions.map((s) => [s.id, s.title, s.model, s.updated])]), () => {
+function renderTabAgentsCard(slot, card, tab) {
+  const agents = tabAgents(tab);
+  const waiting = waitingAgents();
+  const key = JSON.stringify([tab.id, agents.map((a) => [a.id, displayName(a), a.status, a.live, a.model, waiting.has(a.id)])]);
+  renderKeyed(`${slot}:tabagents`, key, () => {
     setChildren(
       card,
-      cardHead("home-sessions", elsewhere ? "Recent sessions" : "Recent sessions in this project"),
-      elsewhere && sessions.length ? h("p", { class: "card-summary" }, "None in this project yet. These are from other projects.") : null,
+      cardHead(`${slot}-agents`, "Agents in this tab"),
+      agents.length
+        ? h(
+            "table",
+            { class: "table compact clickable" },
+            h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Status"), h("th", { class: "num" }, "Tokens"))),
+            h(
+              "tbody",
+              {},
+              agents.map((agent) => {
+                const status = waiting.has(agent.id) ? "waiting" : agent.live ? agent.status : "idle";
+                return h(
+                  "tr",
+                  {},
+                  h(
+                    "td",
+                    { class: "cell-main" },
+                    h("button", { class: "row-link", type: "button", title: displayName(agent), onclick: () => openAgent(agent.id) }, displayName(agent)),
+                  ),
+                  h(
+                    "td",
+                    { class: "cell-status" },
+                    h("span", { class: "status" }, statusDot(status), waiting.has(agent.id) ? "Approval" : agent.live ? STATUS_TEXT[agent.status] : "Saved"),
+                  ),
+                  h("td", { class: "num" }, totalTokens(agent.usage) ? formatTokens(totalTokens(agent.usage)) : "–"),
+                );
+              }),
+            ),
+          )
+        : emptyRow("No agents yet. The first prompt starts one; more can work here side by side."),
+    );
+  });
+}
+
+function renderSessionsCard(slot, card, tab) {
+  const inTab = new Set(tab.agents);
+  const sessions = state.sessions.filter((s) => s.cwd === tab.cwd && !inTab.has(s.id)).slice(0, 8);
+  renderKeyed(`${slot}:sessions`, JSON.stringify([tab.id, sessions.map((s) => [s.id, s.title, s.model, s.updated])]), () => {
+    setChildren(
+      card,
+      cardHead(`${slot}-sessions`, "Earlier sessions in this folder"),
       sessions.length
         ? h(
             "table",
             { class: "table compact clickable" },
-            h("thead", {}, h("tr", {}, h("th", {}, "Session"), h("th", { class: "hide-narrow" }, elsewhere ? "Project" : "Model"), h("th", { class: "num" }, "Updated"))),
+            h("thead", {}, h("tr", {}, h("th", {}, "Session"), h("th", { class: "hide-narrow" }, "Model"), h("th", { class: "num" }, "Updated"))),
             h(
               "tbody",
               {},
@@ -167,21 +298,17 @@ function renderSessionsCard(slot, card) {
                     { class: "cell-main" },
                     h(
                       "button",
-                      { class: "row-link", type: "button", title: session.title || session.label, onclick: () => resumeSession(session) },
+                      { class: "row-link", type: "button", title: `Open ${session.title || session.label} in this tab`, onclick: () => resumeSession(session, tab.id) },
                       session.title || session.label,
                     ),
                   ),
-                  h(
-                    "td",
-                    { class: "hide-narrow cell-model" },
-                    elsewhere ? h("span", { class: "muted", title: session.cwd }, baseName(session.cwd)) : modelLabel(session.model),
-                  ),
+                  h("td", { class: "hide-narrow cell-model" }, modelLabel(session.model)),
                   h("td", { class: "num muted", title: fullTime(session.updated) }, relativeTime(session.updated)),
                 ),
               ),
             ),
           )
-        : emptyRow("No sessions in this project yet. Describe a task above to start one."),
+        : emptyRow("No earlier sessions in this folder."),
     );
   });
 }
@@ -259,33 +386,35 @@ async function saveDefaultModel(spec) {
   }
 }
 
+/** The control service's state, from the snapshot, as dot, text and details. */
+export function controlSummary(control) {
+  if (!control) return { dot: "idle", text: "Unknown", kind: "muted" };
+  if (!control.enabled) return { dot: "idle", text: "Disabled", kind: "muted" };
+  if (!control.connected) return { dot: "failed", text: "Not connected", kind: "bad", detail: control.error };
+  const p = control.permissions;
+  const missing = p ? [p.screen_recording === false ? "Screen Recording" : null, p.accessibility === false ? "Accessibility" : null].filter(Boolean) : [];
+  if (missing.length) return { dot: "waiting", text: `Needs ${missing.join(" and ")}`, kind: "warn", detail: p.hint };
+  return { dot: "ok", text: `Connected, ${plural(control.tools, "tool")}`, kind: "ok", detail: control.error };
+}
+
 function renderServicesCard(slot, card) {
   const tools = resource("tools");
   const settings = resource("settings");
-  const key = JSON.stringify([tools.data, tools.error, settings.data?.effective?.control, settings.data?.effective?.mcp]);
+  const key = JSON.stringify([tools.data, tools.error, state.control, settings.data?.effective?.mcp]);
   renderKeyed(`${slot}:services`, key, () => {
-    const servers = tools.data?.servers ?? state.servers;
+    const servers = tools.data?.servers ?? [];
     const list = tools.data?.tools ?? [];
     const kinds = { safe: 0, edit: 0, execute: 0 };
     for (const tool of list) kinds[tool.kind] = (kinds[tool.kind] ?? 0) + 1;
-    const controlEnabled = settings.data?.effective?.control?.enabled;
-    const control = servers.find((s) => s.name === "control");
+    const control = controlSummary(state.control);
     const mcp = servers.filter((s) => s.name !== "control");
     const rows = [
       h(
         "tr",
         {},
         h("td", { class: "cell-main" }, h("span", { class: "strong" }, "Control service"), h("span", { class: "muted small" }, " browser and computer")),
-        h(
-          "td",
-          { class: "cell-status" },
-          control
-            ? control.error
-              ? h("span", { class: "status bad", title: control.error }, statusDot("failed"), "Unavailable")
-              : h("span", { class: "status ok" }, statusDot("ok"), "Connected")
-            : h("span", { class: "status muted" }, statusDot("idle"), controlEnabled === false ? "Disabled" : "Not running"),
-        ),
-        h("td", { class: "num" }, control && !control.error ? String(control.tools) : "–"),
+        h("td", { class: "cell-status" }, h("span", { class: `status ${control.kind}`, title: control.detail ?? "" }, statusDot(control.dot), h("span", { class: "ellipsis" }, control.text))),
+        h("td", { class: "num" }, state.control?.connected ? String(state.control.tools) : "–"),
       ),
       ...mcp.map((server) =>
         h(
@@ -425,10 +554,10 @@ export function agentsView({ isWide }) {
   const view = {
     root,
     render() {
-      const agents = liveAgents();
+      const agents = workspaceAgents();
       const waiting = waitingAgents();
-      if (selected && !state.agents.get(selected)?.live) selected = null;
-      if (!selected && agents.length) selected = [...agents].sort(byCreated).reverse().find((a) => !a.parent)?.id ?? agents[0].id;
+      if (selected && !agents.some((a) => a.id === selected)) selected = null;
+      if (!selected && agents.length) selected = [...agents].sort(byCreated).reverse().find((a) => !a.parent && a.live)?.id ?? agents[0].id;
       const running = agents.filter((a) => a.status === "running").length;
       const cost = agents.reduce((sum, a) => sum + (a.usage?.cost ?? 0), 0);
       const tokens = agents.reduce((sum, a) => sum + totalTokens(a.usage), 0);
@@ -442,11 +571,12 @@ export function agentsView({ isWide }) {
           ]
             .filter(Boolean)
             .join(" · ")
-        : "No live agents";
+        : "No agents in this workspace";
       const key = JSON.stringify([
         selected,
         [...waiting],
-        agents.map((a) => [a.id, a.parent, displayName(a), a.status, a.activity, a.model, a.usage, a.contextTokens, todoProgress(a.todos)]),
+        (state.workspace?.tabs ?? []).map((t) => [t.id, t.name, t.agents]),
+        agents.map((a) => [a.id, a.parent, a.tab, a.live, displayName(a), a.status, a.activity, a.model, a.usage, a.contextTokens, todoProgress(a.todos)]),
       ]);
       renderKeyed(`${slot}:table`, key, () => setChildren(table, agentsTable(agents, waiting, selected, select)));
       if (isWide()) showPreview();
@@ -464,27 +594,48 @@ export function agentsView({ isWide }) {
   return view;
 }
 
+// Rows grouped by tab: each tab's top-level agents in order, subagents below their parent.
 function agentsTable(agents, waiting, selected, select) {
   if (!agents.length) {
     return h(
       "div",
       { class: "empty-state" },
-      h("p", { class: "empty-title" }, "No agents are running"),
-      h("p", { class: "muted" }, "Start a session and every agent and subagent shows up here with its status, model and cost."),
-      h("button", { class: "button primary", type: "button", onclick: () => navigate({ name: "home" }) }, "New session"),
+      h("p", { class: "empty-title" }, "No agents in this workspace"),
+      h("p", { class: "muted" }, "Start one from a tab. Every agent and subagent shows up here with its status, model and cost."),
+      h("button", { class: "button primary", type: "button", onclick: () => navigate({ name: "home" }) }, "New agent"),
     );
   }
   const ids = new Set(agents.map((a) => a.id));
-  const roots = agents.filter((a) => !a.parent || !ids.has(a.parent)).sort(byCreated).reverse();
   const rows = [];
+  const seen = new Set();
   const walk = (agent, depth) => {
+    if (seen.has(agent.id)) return;
+    seen.add(agent.id);
     rows.push(agentRow(agent, depth, waiting.has(agent.id), agent.id === selected, select));
     agents
       .filter((other) => other.parent === agent.id)
       .sort(byCreated)
       .forEach((child) => walk(child, depth + 1));
   };
-  roots.forEach((root) => walk(root, 0));
+  for (const tab of state.workspace?.tabs ?? []) {
+    const roots = tab.agents.map((id) => state.agents.get(id)).filter((a) => a && ids.has(a.id));
+    const orphans = agents.filter((a) => a.tab === tab.id && (!a.parent || !ids.has(a.parent)) && !tab.agents.includes(a.id));
+    if (!roots.length && !orphans.length) continue;
+    rows.push(
+      h(
+        "tr",
+        { class: "group-row" },
+        h(
+          "td",
+          { colspan: 8 },
+          h("button", { class: "row-link group-link", type: "button", title: tab.cwd, onclick: () => navigate({ name: "tab", tab: tab.id }) }, tab.name),
+          h("span", { class: "muted small" }, ` ${shortPath(tab.cwd, 2)}`),
+        ),
+      ),
+    );
+    [...roots, ...orphans].forEach((root) => walk(root, 0));
+  }
+  agents.filter((a) => !seen.has(a.id) && (!a.parent || !ids.has(a.parent))).forEach((root) => walk(root, 0));
   return h(
     "table",
     { class: "table agents-table" },
@@ -509,7 +660,7 @@ function agentsTable(agents, waiting, selected, select) {
 }
 
 function agentRow(agent, depth, waiting, isSelected, select) {
-  const status = waiting ? "waiting" : agent.status;
+  const status = waiting ? "waiting" : agent.live ? agent.status : "idle";
   const progress = todoProgress(agent.todos);
   const window = contextWindow(agent.model);
   const context = agent.contextTokens ? `${Math.round((agent.contextTokens / window) * 100)}%` : "–";
@@ -535,12 +686,12 @@ function agentRow(agent, depth, waiting, isSelected, select) {
     h(
       "td",
       { class: "cell-status" },
-      h("span", { class: "status" }, statusDot(status), waiting ? "Approval" : STATUS_TEXT[agent.status] ?? agent.status),
+      h("span", { class: "status" }, statusDot(status), waiting ? "Approval" : agent.live ? STATUS_TEXT[agent.status] ?? agent.status : "Saved"),
       progress ? h("span", { class: "muted small tabular" }, ` ${progress.done}/${progress.total}`) : null,
     ),
     h("td", { class: "col-model cell-model" }, modelLabel(agent.model)),
     h("td", { class: "num col-context", title: agent.contextTokens ? `${formatTokens(agent.contextTokens)} of ${formatTokens(window)}` : "" }, context),
-    h("td", { class: "num" }, formatTokens(totalTokens(agent.usage))),
+    h("td", { class: "num" }, totalTokens(agent.usage) ? formatTokens(totalTokens(agent.usage)) : "–"),
     h("td", { class: "num col-cost" }, agent.usage?.cost ? formatCost(agent.usage.cost) : "–"),
     h(
       "td",
@@ -620,7 +771,7 @@ export function updatePanel() {
       }
       const target = u.installed ?? u.latest;
       const headline = u.installed
-        ? h("p", { class: "update-headline" }, statusDot("ok"), `Version ${u.installed} is installed. Restart malac to use it.`)
+        ? h("p", { class: "update-headline" }, statusDot("ok"), `Version ${u.installed} is installed. Restart the daemon when idle to use it: malac daemon restart.`)
         : u.available
           ? h("p", { class: "update-headline" }, statusDot("ok"), `Version ${u.latest} is available.`)
           : h("p", { class: "update-headline" }, statusDot("idle"), u.latest ? "malac is up to date." : "No release information yet.");

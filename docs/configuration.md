@@ -168,7 +168,7 @@ The daemon reads `[daemon]`, `[web]`, `[update]` and `[control]` from the user c
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
 | `ui.tui` | `true` | Full-screen terminal UI; `false` uses the line-based interface (`--plain`) |
-| `web.enabled` | `false` | Serve a web UI with every full-screen terminal session, for that session's runtime |
+| `web.enabled` | `false` | Serve a web UI with every session that runs in its own process, for that session's runtime; the daemon always serves one |
 | `web.remote` | `false` | The daemon (and `--web`) listen on all interfaces instead of `web.host` |
 | `web.host` | `127.0.0.1` | Bind address when not remote |
 | `web.port` | `7700` | Port of the daemon and its web UI; any free port when it is taken |

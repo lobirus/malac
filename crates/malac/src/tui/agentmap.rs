@@ -138,7 +138,6 @@ impl AgentMap {
             KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
             KeyCode::Char('c') if ctrl => return Outcome::Close,
             KeyCode::Enter | KeyCode::Char(' ') => return self.run(Action::OpenAgent),
-            KeyCode::Tab | KeyCode::Char('t') => return self.run(Action::PinAgent),
             KeyCode::Char('x') => return self.run(Action::StopAgent),
             KeyCode::Up | KeyCode::Char('k') => self.select(at.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => self.select(at + 1),
@@ -194,7 +193,7 @@ impl AgentMap {
     pub fn draw(&mut self, frame: &mut Frame, hits: &mut HitMap) {
         let t = theme();
         let screen = frame.area();
-        let hint = "←↑↓→ move · enter open · t tab · x stop · F3 list · esc close";
+        let hint = "←↑↓→ move · enter open · x stop · F3 list · esc close";
         let area = frame_box(
             frame,
             screen.width.saturating_sub(4),
@@ -520,8 +519,8 @@ mod tests {
             Outcome::Run(Action::OpenAgent("a".into()))
         );
         assert_eq!(
-            map.key(press(KeyCode::Char('t'))),
-            Outcome::Run(Action::PinAgent("a".into()))
+            map.key(press(KeyCode::Char('x'))),
+            Outcome::Run(Action::StopAgent("a".into()))
         );
         assert_eq!(map.click(3, 2), Outcome::Run(Action::OpenAgent("b".into())));
     }
