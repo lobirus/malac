@@ -899,7 +899,11 @@ mod tests {
         let mut app = app();
         let frame = render(&mut app, 100, 30);
         println!("{frame}");
-        assert!(frame.contains("malac 0.1.0 · Multi-Agent Loop for Autonomous Coding"));
+        let banner = format!(
+            "malac {} · Multi-Agent Loop for Autonomous Coding",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(frame.contains(&banner));
         assert!(frame.contains("(  (oo)  )"), "the small pig fits 30 rows");
         assert!(frame.contains("lora/smart"));
         let frame = render(&mut app, 160, 44);
