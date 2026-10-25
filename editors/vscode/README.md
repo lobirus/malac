@@ -1,6 +1,6 @@
 # malac for VS Code
 
-Runs the [malac](https://github.com/malac-io/malac) web UI in an editor panel, so you can watch agents and their subagents work, answer permission requests and send prompts without leaving VS Code.
+Runs the [malac](https://github.com/lobirus/malac) web UI in an editor panel, so you can watch agents and their subagents work, answer permission requests and send prompts without leaving VS Code.
 
 ## Commands
 

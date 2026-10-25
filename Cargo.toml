@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"
-repository = "https://github.com/malac-io/malac"
+repository = "https://github.com/lobirus/malac"
 homepage = "https://malac.io"
 
 [workspace.dependencies]

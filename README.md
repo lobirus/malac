@@ -26,7 +26,7 @@ Fixed `calc.py:2`: `add` returned `a - b`, now returns `a + b`. Verified with
 ## Install
 
 ```bash
-git clone https://github.com/malac-io/malac && cd malac
+git clone https://github.com/lobirus/malac && cd malac
 cargo install --path crates/malac
 cargo install --path crates/malac-control
 ```
