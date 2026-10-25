@@ -2,7 +2,7 @@
   "name": "malac",
   "displayName": "malac",
   "description": "Multi-Agent Loop for Autonomous Coding: watch and steer malac agents from VS Code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "lobirus",
   "license": "MIT",
   "icon": "icon.png",
