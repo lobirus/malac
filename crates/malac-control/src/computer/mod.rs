@@ -2,8 +2,7 @@
 
 mod geometry;
 mod input;
-#[cfg(target_os = "macos")]
-mod permissions;
+pub mod permissions;
 mod screen;
 mod tools;
 
@@ -24,8 +23,8 @@ use crate::tool::parse;
 use geometry::Frame;
 use input::Input;
 use tools::{
-    Button, ClickArgs, DragArgs, KeyArgs, MAX_WAIT_SECS, MoveArgs, OpenAppArgs, ScreenshotArgs,
-    ScrollArgs, TypeArgs, WaitArgs,
+    Button, ClickArgs, DragArgs, KeyArgs, MAX_WAIT_SECS, MoveArgs, OpenAppArgs, PermissionsArgs,
+    ScreenshotArgs, ScrollArgs, TypeArgs, WaitArgs,
 };
 
 const DRAG_STEPS: i32 = 12;
@@ -80,6 +79,7 @@ impl Computer {
             "computer_displays" => self.displays().await,
             "computer_open_app" => open_app(&parse::<OpenAppArgs>(name, args)?.name).await,
             "computer_wait" => wait(parse(name, args)?).await,
+            "computer_permissions" => check_permissions(parse(name, args)?).await,
             _ => bail!("unknown tool `{name}`"),
         }
     }
@@ -289,6 +289,12 @@ async fn wait(args: WaitArgs) -> Result<CallToolResult> {
     let seconds = args.seconds.min(MAX_WAIT_SECS);
     tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
     Ok(CallToolResult::text(format!("Waited {seconds} seconds")))
+}
+
+/// Reports the permission state as JSON, which the malac daemon parses.
+async fn check_permissions(args: PermissionsArgs) -> Result<CallToolResult> {
+    let report = blocking(move || Ok(permissions::report(args.request))).await?;
+    Ok(CallToolResult::text(serde_json::to_string_pretty(&report)?))
 }
 
 #[cfg(target_os = "macos")]

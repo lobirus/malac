@@ -13,7 +13,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use malac_core::config::{self, home_dir};
 use malac_core::memory::Scope;
-use malac_core::{AgentStatus, session};
+use malac_core::{Runtime, session};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -39,7 +39,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/api/update/install", post(update_install))
 }
 
-pub(super) struct ApiError(anyhow::Error);
+pub struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
@@ -55,14 +55,10 @@ impl IntoResponse for ApiError {
 }
 
 /// Which file a raw edit targets.
-fn config_file(state: &AppState, file: &str) -> anyhow::Result<PathBuf> {
+fn config_file(runtime: &Runtime, file: &str) -> anyhow::Result<PathBuf> {
     Ok(match file {
         "user" => config::user_config_path(),
-        "project" => state
-            .runtime()
-            .project_root
-            .join(".malac")
-            .join("config.toml"),
+        "project" => runtime.project_root.join(".malac").join("config.toml"),
         "control" => home_dir().join("control.toml"),
         other => bail!("unknown settings file `{other}` (expected user, project or control)"),
     })
@@ -76,9 +72,9 @@ fn read_json(path: &std::path::Path) -> anyhow::Result<Value> {
 }
 
 async fn get_settings(State(state): Shared) -> ApiResult {
-    let runtime = state.runtime();
-    let project_path = config_file(&state, "project")?;
-    let control_path = config_file(&state, "control")?;
+    let runtime = state.hub.settings_runtime().await?;
+    let project_path = config_file(&runtime, "project")?;
+    let control_path = config_file(&runtime, "control")?;
     let keys: BTreeMap<&String, bool> = runtime
         .config
         .providers
@@ -112,7 +108,7 @@ async fn get_settings(State(state): Shared) -> ApiResult {
         "agent_types": agent_types,
         "skills": skills,
         "instructions": instructions,
-        "reloadable": state.reload.is_some(),
+        "reloadable": !state.hub.is_attached(),
     })))
 }
 
@@ -140,7 +136,8 @@ async fn put_settings(State(state): Shared, Json(body): Json<UserSettings>) -> A
 }
 
 async fn get_raw(State(state): Shared, Path(file): Path<String>) -> ApiResult {
-    let path = config_file(&state, &file)?;
+    let runtime = state.hub.settings_runtime().await?;
+    let path = config_file(&runtime, &file)?;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     Ok(Json(json!({ "path": path, "text": text })))
 }
@@ -155,7 +152,8 @@ async fn put_raw(
     Path(file): Path<String>,
     Json(body): Json<RawSettings>,
 ) -> ApiResult {
-    let path = config_file(&state, &file)?;
+    let runtime = state.hub.settings_runtime().await?;
+    let path = config_file(&runtime, &file)?;
     let table: toml::Table = body.text.parse().context("invalid TOML")?;
     if file != "control" {
         config::validate_user_table(&table)?;
@@ -174,7 +172,7 @@ async fn apply(State(state): Shared) -> ApiResult {
 
 /// Reports whether saved changes took effect; saving itself already succeeded.
 async fn applied(state: &AppState) -> ApiResult {
-    Ok(Json(match state.reload().await {
+    Ok(Json(match state.hub.reload().await {
         Ok(()) => json!({ "saved": true, "applied": true }),
         Err(err) => json!({ "saved": true, "applied": false, "message": format!("{err:#}") }),
     }))
@@ -195,18 +193,18 @@ async fn put_key(
         return Err(anyhow::anyhow!("the key is empty").into());
     }
     config::save_api_key(&name, key)?;
-    state.runtime().forget_provider(&name);
+    state.hub.forget_provider(&name);
     Ok(Json(json!({ "saved": true })))
 }
 
 async fn delete_key(State(state): Shared, Path(name): Path<String>) -> ApiResult {
     config::remove_api_key(&name)?;
-    state.runtime().forget_provider(&name);
+    state.hub.forget_provider(&name);
     Ok(Json(json!({ "saved": true })))
 }
 
 async fn models(State(state): Shared) -> ApiResult {
-    let runtime = state.runtime();
+    let runtime = state.hub.settings_runtime().await?;
     let providers = malac_core::provider::discover_models(&runtime.config).await;
     Ok(Json(json!({
         "default": runtime.config.model,
@@ -217,7 +215,7 @@ async fn models(State(state): Shared) -> ApiResult {
 }
 
 async fn tools(State(state): Shared) -> ApiResult {
-    let runtime = state.runtime();
+    let runtime = state.hub.settings_runtime().await?;
     let tools: Vec<Value> = runtime
         .tools()
         .iter()
@@ -241,7 +239,7 @@ async fn tools(State(state): Shared) -> ApiResult {
 }
 
 async fn memory_list(State(state): Shared) -> ApiResult {
-    let runtime = state.runtime();
+    let runtime = state.hub.settings_runtime().await?;
     Ok(Json(json!({
         "entries": runtime.memory.list(),
         "vector": runtime.memory.has_vector_store(),
@@ -254,12 +252,18 @@ struct SearchBody {
 }
 
 async fn memory_search(State(state): Shared, Json(body): Json<SearchBody>) -> ApiResult {
-    let hits = state.runtime().memory.search(&body.query, 20).await?;
+    let hits = state
+        .hub
+        .settings_runtime()
+        .await?
+        .memory
+        .search(&body.query, 20)
+        .await?;
     Ok(Json(json!({ "hits": hits })))
 }
 
 async fn memory_reindex(State(state): Shared) -> ApiResult {
-    let count = state.runtime().memory.reindex().await?;
+    let count = state.hub.settings_runtime().await?.memory.reindex().await?;
     Ok(Json(json!({ "indexed": count })))
 }
 
@@ -268,7 +272,9 @@ async fn memory_delete(
     Path((scope, name)): Path<(String, String)>,
 ) -> ApiResult {
     state
-        .runtime()
+        .hub
+        .settings_runtime()
+        .await?
         .memory
         .forget(Scope::parse(&scope)?, &name)
         .await?;
@@ -276,15 +282,12 @@ async fn memory_delete(
 }
 
 pub(super) async fn delete_session(State(state): Shared, Path(id): Path<String>) -> ApiResult {
-    let running = state
-        .runtime()
-        .agent(&id)
-        .is_some_and(|a| a.snapshot().status == AgentStatus::Running);
-    if running {
+    if state.hub.agent_busy(&id) {
         return Err(anyhow::anyhow!("the session is running; stop it first").into());
     }
     let path = session::sessions_dir().join(format!("{id}.jsonl"));
     std::fs::remove_file(&path).with_context(|| format!("no session {id}"))?;
+    state.hub.forget_agent(&id);
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -332,7 +335,7 @@ async fn update_check() -> ApiResult {
 /// Replaces the binaries on disk. This server and its agents keep running the
 /// old version; the response says to restart.
 async fn update_install(State(state): Shared) -> ApiResult {
-    let status = state.runtime().install_update().await?;
+    let status = state.hub.install_update().await?;
     Ok(Json(serde_json::to_value(status).context("encode")?))
 }
 

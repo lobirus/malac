@@ -108,6 +108,13 @@ pub fn definitions() -> Vec<Tool> {
             &["seconds"],
         )
         .read_only(),
+        define(
+            "computer_permissions",
+            "Report whether desktop control has the system permissions it needs (macOS: Screen Recording and Accessibility) and which app they belong to. With `request`, show the system prompts and open System Settings at the missing ones.",
+            json!({ "request": { "type": "boolean", "description": "Ask macOS for missing permissions" } }),
+            &[],
+        )
+        .read_only(),
     ]
 }
 
@@ -181,6 +188,12 @@ pub struct KeyArgs {
 #[derive(Deserialize)]
 pub struct OpenAppArgs {
     pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct PermissionsArgs {
+    #[serde(default)]
+    pub request: bool,
 }
 
 #[derive(Deserialize)]

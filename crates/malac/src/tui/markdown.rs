@@ -6,12 +6,14 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::text::{self, sanitize};
+use super::text::{self, RowText, sanitize};
 use super::theme::theme;
 
 /// Rendered markdown, with where its code blocks ended up so they can be copied.
 pub struct Markdown {
     pub lines: Vec<Line<'static>>,
+    /// One per line: what of it is text, and how it joins the line before.
+    pub rows: Vec<RowText>,
     pub code: Vec<CodeBlock>,
 }
 
@@ -49,6 +51,7 @@ struct Table {
 struct Writer {
     width: usize,
     lines: Vec<Line<'static>>,
+    rows: Vec<RowText>,
     spans: Vec<Span<'static>>,
     styles: Vec<Style>,
     prefixes: Vec<Prefix>,
@@ -65,6 +68,7 @@ impl Writer {
         Self {
             width,
             lines: Vec::new(),
+            rows: Vec::new(),
             spans: Vec::new(),
             styles: Vec::new(),
             prefixes: Vec::new(),
@@ -321,7 +325,9 @@ impl Writer {
                 .filter(|p| p.first.content == p.rest.content)
                 .map(|p| p.rest.clone())
                 .collect::<Vec<_>>();
-            self.lines.push(Line::from(spans));
+            let line = Line::from(spans);
+            self.rows.push(RowText::inset(line.width()));
+            self.lines.push(line);
         }
         self.gap = false;
     }
@@ -335,17 +341,36 @@ impl Writer {
 
     /// Emits one finished line, prefixed by the enclosing blocks.
     fn emit(&mut self, spans: Vec<Span<'static>>) {
+        self.emit_row(spans, None, 0);
+    }
+
+    /// Emits a line that may continue the previous one. Leading quote bars
+    /// and hanging indents are decoration; list markers are text. `pad`
+    /// more columns of decoration follow the prefixes.
+    fn emit_row(&mut self, spans: Vec<Span<'static>>, join: Option<&'static str>, pad: usize) {
         let mut line = Vec::with_capacity(spans.len() + self.prefixes.len());
+        let mut inset = 0;
+        let mut decorating = true;
         for prefix in &mut self.prefixes {
-            if prefix.used {
-                line.push(prefix.rest.clone());
+            let quote = prefix.first.content == prefix.rest.content;
+            let span = if prefix.used {
+                prefix.rest.clone()
             } else {
-                line.push(prefix.first.clone());
                 prefix.used = true;
+                prefix.first.clone()
+            };
+            decorating &= quote || span.content == prefix.rest.content;
+            if decorating {
+                inset += text::width(&span.content);
             }
+            line.push(span);
+        }
+        if decorating {
+            inset += pad;
         }
         line.extend(spans);
         self.lines.push(Line::from(line));
+        self.rows.push(RowText { inset, join });
     }
 
     /// Wraps the pending inline text into lines.
@@ -355,8 +380,8 @@ impl Writer {
         }
         let spans = std::mem::take(&mut self.spans);
         let width = self.width.saturating_sub(self.prefix_width()).max(4);
-        for line in text::wrap(&spans, width) {
-            self.emit(line);
+        for (line, join) in text::wrap_rows(&spans, width) {
+            self.emit_row(line, join, 0);
         }
     }
 
@@ -369,20 +394,30 @@ impl Writer {
         if !lang.is_empty() {
             let label = text::truncate(lang, inner).into_owned();
             let pad = width.saturating_sub(text::width(&label) + 1);
-            self.emit(vec![
-                Span::styled(" ", bg),
-                Span::styled(label, bg.fg(t.dim).add_modifier(Modifier::ITALIC)),
-                Span::styled(" ".repeat(pad), bg),
-            ]);
+            self.emit_row(
+                vec![
+                    Span::styled(" ", bg),
+                    Span::styled(label, bg.fg(t.dim).add_modifier(Modifier::ITALIC)),
+                    Span::styled(" ".repeat(pad), bg),
+                ],
+                None,
+                1,
+            );
         }
         for source in code.strip_suffix('\n').unwrap_or(code).split('\n') {
+            let mut join = None;
             for row in text::hard_wrap(source, inner) {
                 let pad = inner.saturating_sub(text::width(&row));
-                self.emit(vec![
-                    Span::styled(" ", bg),
-                    Span::styled(row, bg),
-                    Span::styled(" ".repeat(pad + 1), bg),
-                ]);
+                let next = text::hard_join(&row);
+                self.emit_row(
+                    vec![
+                        Span::styled(" ", bg),
+                        Span::styled(row, bg),
+                        Span::styled(" ".repeat(pad + 1), bg),
+                    ],
+                    join.replace(next),
+                    1,
+                );
             }
         }
         self.blocks.push(CodeBlock {
@@ -459,6 +494,7 @@ impl Writer {
         self.flush();
         Markdown {
             lines: self.lines,
+            rows: self.rows,
             code: self.blocks,
         }
     }
@@ -553,6 +589,24 @@ mod tests {
     fn quotes_and_tasks() {
         let lines = plain("> quoted text\n\n- [x] done\n- [ ] todo", 30);
         assert_eq!(lines, vec!["│ quoted text", "", "• ✓ done", "• ○ todo"]);
+    }
+
+    #[test]
+    fn rows_mark_decoration_and_soft_wraps() {
+        let rendered = render("- one two three four\n\n> quoted\n\n```\nx\n```", 14);
+        let rows: Vec<(usize, Option<&str>)> =
+            rendered.rows.iter().map(|r| (r.inset, r.join)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                (0, None),
+                (2, Some(" ")),
+                (0, None),
+                (2, None),
+                (0, None),
+                (1, None)
+            ]
+        );
     }
 
     #[test]

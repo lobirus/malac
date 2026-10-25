@@ -17,6 +17,7 @@ use std::sync::Arc;
 use malac_mcp::Handler;
 
 pub use browser::list_profiles;
+pub use computer::permissions;
 pub use config::Config;
 pub use control::Control;
 

@@ -9,7 +9,6 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::{Tool, ToolContext, ToolKind, ToolOutput, str_arg, truncate_chars};
-use crate::config;
 
 const DEFAULT_TIMEOUT: u64 = 120;
 const MAX_TIMEOUT: u64 = 1800;
@@ -28,7 +27,8 @@ impl Tool for Bash {
     fn description(&self) -> String {
         "Run a shell command in the working directory and return combined stdout and stderr. \
          Each call starts a fresh shell, so `cd` does not persist; chain with `&&` instead. \
-         Set `background` for servers and watchers: output then goes to a log file you can read later."
+         Set `background` for servers and watchers: the command becomes a job that keeps running, \
+         and `job_list`, `job_output` and `job_kill` follow and stop it."
             .into()
     }
 
@@ -88,11 +88,13 @@ fn shell() -> String {
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-fn command(script: &str, ctx: &ToolContext) -> Command {
+/// A shell running `script` in `cwd`, leading its own process group so the
+/// whole tree can be stopped at once.
+pub(crate) fn shell_command(script: &str, cwd: &std::path::Path) -> Command {
     let mut cmd = Command::new(shell());
     cmd.arg("-c")
         .arg(script)
-        .current_dir(&ctx.cwd)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .env("MALAC", "1")
         .env("PAGER", "cat")
@@ -109,7 +111,7 @@ async fn run_foreground(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> 
         .unwrap_or(DEFAULT_TIMEOUT)
         .clamp(1, MAX_TIMEOUT);
 
-    let mut child = command(&format!("exec 2>&1\n{script}"), ctx)
+    let mut child = shell_command(&format!("exec 2>&1\n{script}"), &ctx.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -180,19 +182,14 @@ enum Outcome {
 
 async fn run_background(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let script = str_arg(input, "command")?;
-    let dir = config::home_dir().join("logs");
-    std::fs::create_dir_all(&dir)?;
-    let log_path = dir.join(format!("bash-{}.log", uuid::Uuid::now_v7()));
-    let log = std::fs::File::create(&log_path)?;
-    let child = command(script, ctx)
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()
-        .context("failed to start shell")?;
+    let job = ctx.runtime.jobs.start(script, &ctx.cwd, Some(&ctx.agent))?;
+    // Front ends read the pid and the log path, which comes last, from this text.
     Ok(ToolOutput::text(format!(
-        "Started in background (pid {}). Output is written to {}",
-        child.id().unwrap_or_default(),
-        log_path.display()
+        "Started job {} in the background (pid {}). Check on it with job_output and stop it \
+         with job_kill. Output is written to {}",
+        job.id,
+        job.pid.unwrap_or_default(),
+        job.log.display()
     )))
 }
 

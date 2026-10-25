@@ -57,7 +57,7 @@ pub enum Decision {
     Deny,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub id: String,
     pub agent: AgentId,

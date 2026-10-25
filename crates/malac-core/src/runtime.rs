@@ -12,7 +12,8 @@ use crate::agent::{self, AgentHandle, AgentSnapshot};
 use crate::catalog::{self, AgentType, Instructions, Skill};
 use crate::config::{self, Config};
 use crate::event::{AgentId, Event, EventBus};
-use crate::mcp::{self, ServerStatus};
+use crate::jobs::Jobs;
+use crate::mcp::{McpPool, ServerStatus};
 use crate::memory::Memory;
 use crate::permission::{Approver, DenyAll, Policy};
 use crate::provider::{self, Provider};
@@ -30,14 +31,47 @@ pub struct Runtime {
     pub instructions: Vec<Instructions>,
     pub agent_types: Vec<AgentType>,
     pub skills: Vec<Skill>,
+    /// Background processes started by agents.
+    pub jobs: Arc<Jobs>,
     /// Limits how many subagents run at once.
     pub(crate) agent_slots: Semaphore,
     providers: Mutex<HashMap<String, Arc<dyn Provider>>>,
     tools: RwLock<Vec<Arc<dyn Tool>>>,
     servers: RwLock<Vec<ServerStatus>>,
-    clients: Mutex<Vec<Arc<malac_mcp::Client>>>,
+    mcp: Arc<McpPool>,
+    /// Whether `shutdown` closes the MCP connections, which a [`Host`] owns otherwise.
+    owns_mcp: bool,
     approver: RwLock<Arc<dyn Approver>>,
     agents: Mutex<BTreeMap<AgentId, AgentHandle>>,
+}
+
+/// What the runtimes of one process share, such as the daemon's tabs: event
+/// sequence numbers, the job table and MCP connections. Each runtime still
+/// has its own configuration, working directory, agents and event bus.
+#[derive(Clone)]
+pub struct Host {
+    /// Runtime buses are siblings of this one. Events that belong to no
+    /// runtime, like update notices, are published here.
+    pub bus: EventBus,
+    pub jobs: Arc<Jobs>,
+    pub mcp: Arc<McpPool>,
+}
+
+impl Host {
+    /// A host whose job table is `~/.malac/jobs`.
+    pub fn new() -> Self {
+        Self {
+            bus: EventBus::default(),
+            jobs: Jobs::in_home(),
+            mcp: Arc::default(),
+        }
+    }
+}
+
+impl Default for Host {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// What to start a new agent with.
@@ -56,6 +90,31 @@ pub struct AgentSpec {
 impl Runtime {
     /// Builds the runtime without connecting MCP servers; see [`Runtime::connect_mcp`].
     pub fn new(config: Config, cwd: PathBuf) -> Result<Arc<Self>> {
+        let host = Host::new();
+        Self::build(config, cwd, host.bus, host.jobs, host.mcp, true)
+    }
+
+    /// Builds a runtime that shares `host` with others. Its MCP connections
+    /// stay open on [`Runtime::shutdown`]; close them with `host.mcp`.
+    pub fn hosted(config: Config, cwd: PathBuf, host: &Host) -> Result<Arc<Self>> {
+        Self::build(
+            config,
+            cwd,
+            host.bus.sibling(),
+            host.jobs.clone(),
+            host.mcp.clone(),
+            false,
+        )
+    }
+
+    fn build(
+        config: Config,
+        cwd: PathBuf,
+        bus: EventBus,
+        jobs: Arc<Jobs>,
+        mcp: Arc<McpPool>,
+        owns_mcp: bool,
+    ) -> Result<Arc<Self>> {
         let home = config::home_dir();
         let project_root = config::project_root(&cwd);
         let policy = Policy::new(config.mode, &config.permissions)?;
@@ -78,10 +137,12 @@ impl Runtime {
             providers: Mutex::new(HashMap::new()),
             tools: RwLock::new(tools::builtin()),
             servers: RwLock::new(Vec::new()),
-            clients: Mutex::new(Vec::new()),
+            mcp,
+            owns_mcp,
             approver: RwLock::new(Arc::new(DenyAll)),
             agents: Mutex::new(BTreeMap::new()),
-            bus: EventBus::default(),
+            bus,
+            jobs,
             memory,
             policy,
             project_root,
@@ -92,22 +153,34 @@ impl Runtime {
 
     /// Connects MCP servers and adds their tools. Returns per-server status.
     pub async fn connect_mcp(&self) -> Vec<ServerStatus> {
-        let connected = mcp::connect_all(&self.config).await;
+        let connected = self.mcp.connect_all(&self.config).await;
         self.tools.write().unwrap().extend(connected.tools);
-        self.clients.lock().unwrap().extend(connected.clients);
         *self.servers.write().unwrap() = connected.servers.clone();
         connected.servers
     }
 
-    /// Cancels every agent and closes MCP servers so they can clean up
-    /// (the control service closes the browsers it launched).
+    /// Cancels every agent and, unless a [`Host`] owns them, closes MCP
+    /// servers so they can clean up (the control service closes the
+    /// browsers it launched). The agents are forgotten, so their tasks end
+    /// once their turns do and the runtime can be dropped.
     pub async fn shutdown(&self) {
         let ids: Vec<AgentId> = self.agents.lock().unwrap().keys().cloned().collect();
-        for id in ids {
-            self.cancel_tree(&id);
+        for id in &ids {
+            self.cancel_tree(id);
         }
-        let clients = std::mem::take(&mut *self.clients.lock().unwrap());
-        futures::future::join_all(clients.iter().map(|c| c.close())).await;
+        self.agents.lock().unwrap().clear();
+        if self.owns_mcp {
+            self.mcp.close().await;
+        }
+    }
+
+    /// Whether any agent is working or has work queued.
+    pub fn is_busy(&self) -> bool {
+        self.agents
+            .lock()
+            .unwrap()
+            .values()
+            .any(AgentHandle::is_busy)
     }
 
     pub fn servers(&self) -> Vec<ServerStatus> {

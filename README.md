@@ -10,6 +10,7 @@
 ![malac fixing a failing test in the terminal UI](docs/images/demo.gif)
 
 - **CLI first.** `malac <prompt>` starts working immediately. `malac` alone opens an interactive session.
+- **Workspaces that outlive the terminal.** A per-user daemon holds your workspaces: sets of tabs, one per project, each with its own agents. Close the terminal and the agents keep working; open the web UI or another terminal and pick up where they are.
 - **Any provider.** OpenAI-compatible and Anthropic-compatible APIs, several providers at once, per-model settings, profiles. Works with gateways such as LiteLLM, OpenRouter or Together, and with local models through Ollama or vLLM.
 - **Autopilot.** `-y` runs without asking for permission. Deny rules still apply.
 - **Subagents.** The agent delegates self-contained work to subagents that run in parallel, and you can watch each one live in the terminal, the web UI or the session log.
@@ -79,7 +80,9 @@ git diff | malac review this change
 malac                        # interactive
 malac -c                     # continue the last session in this directory
 malac --web                  # interactive, with the web UI attached
-malac web --open             # web UI only
+malac web --open             # the daemon's web UI
+malac --plain -n             # a fresh workspace, served by the daemon
+malac daemon status          # what the daemon is doing
 ```
 
 If a prompt starts with a subcommand name, malac still treats it as a prompt when it does not parse as that subcommand: `malac web scraper for the docs` is a prompt. `malac -- <prompt>` always is.
@@ -103,7 +106,38 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 | F9, Ctrl-O | Menu bar | Ctrl-S | Mouse off, for selecting text |
 | F10 | Quit | Right-click | Context menu |
 
-`--plain` (or `ui.tui = false`) uses a line-based interface instead. `-p`, `--json` and piped input always do. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
+`--plain` (or `ui.tui = false`) uses a line-based interface instead, as a client of the daemon (see below). `-p`, `--json` and piped input always print plainly and run in-process. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
+
+## Workspaces and tabs
+
+A workspace is a set of tabs, and a tab is a project: a directory with its own configuration, instructions and agents. A tab can hold several top-level agents side by side, each with its subagents. Workspaces live in the daemon and are saved in `~/.malac/workspaces/`, so they survive restarts and reboots; agents come back idle and resume from their transcripts when you prompt them.
+
+```bash
+malac --plain                         # resume the last workspace, all its tabs
+malac --plain fix the flaky test      # a new tab for this directory in it, running the prompt
+malac --plain --name api add paging   # the same, with the tab named "api"
+malac --plain -n                      # a fresh workspace; the old one stays resumable
+malac --plain -n --name release       # ... named "release"
+malac --plain -w release              # open a workspace by name or id
+malac --plain -c                      # attach the last session of this directory in a tab
+malac workspaces                      # list; rename <ws> <name>; delete <ws>
+```
+
+The web UI and the editor extension share the daemon's workspaces. The full-screen terminal UI still runs its sessions in its own process; it becomes a daemon client next, and `-n`, `-w` and `--name` apply there once it does.
+
+## The daemon
+
+`malac daemon` is one background process per user that holds every workspace, tab, agent and job. Interactive clients start it when it is not running and connect through `~/.malac/daemon.json`; it serves the web UI and an HTTP and WebSocket API ([docs/protocol.md](docs/protocol.md)).
+
+| Command | |
+|---|---|
+| `malac daemon start` | Start it in the background (the default); output goes to `~/.malac/daemon.log` |
+| `malac daemon run` | Run it in the foreground |
+| `malac daemon status [--json]` | Version, URL, clients, workspaces, running agents and jobs |
+| `malac daemon stop [--force]` | Stop it; refused while agents or jobs run unless `--force` |
+| `malac daemon restart [--force]` | Stop and start, e.g. to use an updated malac |
+
+Permission prompts go to every connected client, and the first answer wins; a client that connects later still sees what is waiting. Background jobs (`bash` with `background: true`) are listed with their output, and stopped with `job_kill` or from a client. The daemon exits after `daemon.idle_minutes` (default 120) with no clients and nothing running. Updating malac never disturbs it: it keeps its version until restarted, and clients show a notice when theirs differs.
 
 ## Command line
 
@@ -115,6 +149,9 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 | `-p, --print` | Answer the prompt and exit |
 | `--json` | Stream events as JSON lines |
 | `-c, --continue` / `-r, --resume <id>` | Continue a session |
+| `-n, --new` | Start a fresh workspace (daemon clients) |
+| `-w, --workspace <name\|id>` | Open a workspace (daemon clients) |
+| `--name <name>` | Name the new tab, or with `-n` the new workspace |
 | `--profile <name>` | Apply `[profiles.<name>]` from the config |
 | `--web` / `--no-web` | Serve the web UI for this session too, or not (default: `web.enabled`) |
 | `--web-remote` | Serve it to other machines as well (default: `web.remote`) |
@@ -125,7 +162,9 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 
 | Subcommand | |
 |---|---|
-| `malac web` | Web UI (`--port`, `--remote`, `--open`, `--json-ready`) |
+| `malac web` | Make sure the daemon runs and print its web UI URL (`--open`, `--json-ready`, `--cwd`, `--port`, `--remote`) |
+| `malac daemon [run\|start\|stop\|status\|restart]` | The background daemon |
+| `malac workspaces [list\|rename\|delete]` | Saved workspaces |
 | `malac models` | Every model your providers offer |
 | `malac update [--check]` | Update to the latest release |
 | `malac sessions [list\|show <id>\|delete <id>]` | Saved transcripts, including subagents |
@@ -192,6 +231,8 @@ The files stay the source of truth. `malac memory reindex` rebuilds the collecti
 ```bash
 malac-control serve --port 7878   # writes ~/.malac/control.json; malac connects to it
 malac-control profiles            # list browser profiles
+malac-control permissions         # macOS Screen Recording and Accessibility, and who holds them
+malac-control permissions --request   # ask for the missing ones and open System Settings
 ```
 
 Each browser profile is a separate Chrome instance with its own data directory, so logins persist and never mix. You can also attach to a browser you already started with remote debugging. Profiles go in `~/.malac/control.toml`:
@@ -204,13 +245,13 @@ clone_from = "Profile 1"           # copy an existing Chrome profile on first la
 cdp_url = "http://127.0.0.1:9222"
 ```
 
-On macOS, grant Screen Recording and Accessibility permissions to the terminal app (or to `malac-control`) for desktop control.
+On macOS, desktop control needs Screen Recording and Accessibility. macOS grants them to the app that started the process tree: the terminal you started the daemon from, or your editor if its extension started it. Grant both to that app, then restart it and the daemon (`malac daemon restart`). To make it independent of who starts the daemon, run `malac-control serve` in a terminal that has the permissions; the daemon connects to it. The daemon's snapshot and the `computer_permissions` tool report the current state.
 
 ## Web UI and VS Code
 
-`malac web` serves the UI on `127.0.0.1:7700` and protects it with a random token that is part of the printed URL. The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts, and every setting can be changed from it.
+`malac web` starts the daemon if needed and prints its UI address, `127.0.0.1:7700` by default, with a token that is part of the URL (kept in `~/.malac/daemon.token`; delete it to get a new one). The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts, and every setting can be changed from it.
 
-The web UI is local-only by default. `malac web --remote` (or `web.remote = true`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. `web.enabled = true` serves the UI alongside every interactive terminal session.
+The web UI is local-only by default. `web.remote = true` (or starting the daemon with `--remote`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. `web.enabled = true` serves the UI alongside every interactive terminal session.
 
 The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. Download `malac-vscode-<version>.vsix` from the [latest release](https://github.com/lobirus/malac/releases/latest) and install it with `code --install-extension malac-vscode-<version>.vsix`, or via Extensions → … → Install from VSIX. The same file works in VS Code–compatible editors such as Cursor, Windsurf and VSCodium. It is not on the Marketplace yet. To work on it, open `editors/vscode` in VS Code and press F5, or:
 
@@ -239,7 +280,8 @@ Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "
 - **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
 - **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.
 - **The web UI is local unless you say otherwise.** It needs the per-run token in the URL. `--web-remote` listens on your network over plain HTTP; use an SSH tunnel or a TLS proxy outside trusted networks.
-- **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions keep their version until you restart them.
+- **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions and the daemon keep their version until you restart them (`malac daemon restart`).
+- **The daemon keeps running.** Agents started through it continue after the terminal closes, until they finish; the daemon itself exits after two idle hours. It keeps the environment it was started with, so restart it after changing API key variables.
 - **Models without vision** get screenshots described by `vision_model` when you mark them `vision = false`.
 - **Inside tmux or byobu**, mouse clicks reach the terminal UI only with `set -g mouse on`. Everything also works from the keyboard.
 

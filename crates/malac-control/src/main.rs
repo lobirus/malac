@@ -43,6 +43,15 @@ enum Command {
     },
     /// List configured and system browser profiles
     Profiles,
+    /// Show the macOS permissions desktop control needs and who holds them
+    Permissions {
+        /// Ask for missing permissions and open System Settings
+        #[arg(long)]
+        request: bool,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -90,7 +99,30 @@ async fn run(cli: Cli) -> Result<()> {
             print!("{}", malac_control::list_profiles(&config.browser));
             Ok(())
         }
+        Command::Permissions { request, json } => {
+            let report = malac_control::permissions::report(request);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_permissions(&report);
+            }
+            Ok(())
+        }
     }
+}
+
+fn print_permissions(report: &malac_control::permissions::Report) {
+    let state = |granted: Option<bool>| match granted {
+        Some(true) => "granted",
+        Some(false) => "missing",
+        None => "not needed",
+    };
+    println!("Screen Recording: {}", state(report.screen_recording));
+    println!("Accessibility:    {}", state(report.accessibility));
+    if let Some(app) = &report.app {
+        println!("Granted to:       {} ({})", app.name, app.path);
+    }
+    println!("{}", report.hint);
 }
 
 async fn serve(config: Config, addr: SocketAddr, token: Option<String>) -> Result<()> {

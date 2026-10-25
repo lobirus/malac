@@ -2,6 +2,7 @@
 
 mod agents;
 mod fs;
+mod jobs;
 mod mcp;
 mod memory;
 mod search;
@@ -25,6 +26,7 @@ use crate::message::Block;
 use crate::runtime::Runtime;
 
 pub use mcp::McpTool;
+pub(crate) use shell::shell_command;
 
 /// Output beyond this is cut from the middle before it reaches the model.
 pub const MAX_OUTPUT_CHARS: usize = 40_000;
@@ -172,6 +174,9 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(fs::Write),
         Arc::new(fs::Edit),
         Arc::new(shell::Bash),
+        Arc::new(jobs::List),
+        Arc::new(jobs::Output),
+        Arc::new(jobs::Kill),
         Arc::new(search::Glob),
         Arc::new(search::Grep),
         Arc::new(web::WebFetch),

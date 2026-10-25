@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::attach;
 use crate::catalog::AgentType;
 use crate::config::ModelConfig;
 use crate::event::{AgentId, Event, Level, TurnStatus};
@@ -38,7 +39,7 @@ const PREVIEW_CHARS: usize = 4000;
 /// Images kept in the request; older screenshots are replaced by a placeholder.
 const MAX_IMAGES: usize = 4;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub id: AgentId,
     pub label: String,
@@ -50,7 +51,7 @@ pub struct AgentInfo {
     pub created: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
@@ -60,7 +61,7 @@ pub enum AgentStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     #[serde(flatten)]
     pub info: AgentInfo,
@@ -499,15 +500,10 @@ impl Agent {
         mut content: Vec<Block>,
         cancel: &CancellationToken,
     ) -> Result<String> {
-        let text: String = content
-            .iter()
-            .filter_map(|b| match b {
-                Block::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.emit(Event::UserMessage { text: text.clone() });
+        let text = typed_text(&content);
+        self.emit(Event::UserMessage {
+            text: with_attachment_list(&text, &content),
+        });
         if let Some(recalled) = self.recall(&text).await {
             content.insert(0, Block::text(recalled));
         }
@@ -905,6 +901,34 @@ impl Agent {
     }
 }
 
+/// What the user typed, without attached files.
+fn typed_text(content: &[Block]) -> String {
+    content
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text } if !attach::is_attachment(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The typed text plus one line naming the attached files, for front ends.
+fn with_attachment_list(text: &str, content: &[Block]) -> String {
+    let paths: Vec<String> = content
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text } => attach::attached_path(text),
+            _ => None,
+        })
+        .collect();
+    match (paths.is_empty(), text.is_empty()) {
+        (true, _) => text.to_owned(),
+        (false, true) => format!("[attached: {}]", paths.join(", ")),
+        (false, false) => format!("{text}\n\n[attached: {}]", paths.join(", ")),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Call {
     id: String,
@@ -1090,6 +1114,22 @@ mod tests {
         assert_eq!(content[1], image(2));
         assert_eq!(messages[2].content[0], image(3));
         assert_eq!(messages.iter().map(image_count).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn attachments_are_listed_not_echoed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "secret contents").unwrap();
+        let mut content = attach::attach(std::path::Path::new("a.txt"), dir.path())
+            .unwrap()
+            .blocks;
+        content.push(Block::text("summarize"));
+        let text = typed_text(&content);
+        assert_eq!(text, "summarize");
+        assert_eq!(
+            with_attachment_list(&text, &content),
+            "summarize\n\n[attached: a.txt]"
+        );
     }
 
     #[test]

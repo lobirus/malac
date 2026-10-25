@@ -199,6 +199,10 @@ pub struct Status {
     pub tokens: u64,
     pub cost: f64,
     pub running: usize,
+    /// Subagents under the tab's session, running or not.
+    pub subagents: usize,
+    /// Background jobs still running.
+    pub jobs: usize,
     pub spinner: &'static str,
     pub approvals: usize,
     /// `Some(remote)` while the web UI serves.
@@ -283,7 +287,26 @@ pub fn status_line(status: &Status, width: u16) -> (Line<'static>, Vec<Spot>) {
                 bar,
             )],
             3,
-            Some(Action::Agents),
+            Some(Action::AgentMap),
+        ));
+    } else if status.subagents > 0 {
+        let noun = if status.subagents == 1 {
+            "subagent"
+        } else {
+            "subagents"
+        };
+        segments.push(segment(
+            vec![Span::styled(format!("{} {noun}", status.subagents), dim)],
+            6,
+            Some(Action::AgentMap),
+        ));
+    }
+    if status.jobs > 0 {
+        let noun = if status.jobs == 1 { "job" } else { "jobs" };
+        segments.push(segment(
+            vec![Span::styled(format!("{} {noun}", status.jobs), bar)],
+            3,
+            Some(Action::Jobs),
         ));
     }
     if status.approvals > 0 {
@@ -455,6 +478,8 @@ mod tests {
             tokens: 12_345,
             cost: 0.1234,
             running: 2,
+            subagents: 3,
+            jobs: 2,
             spinner: "⠋",
             approvals: 1,
             web: Some(false),
@@ -468,10 +493,14 @@ mod tests {
     fn status_segments_collapse_by_priority() {
         let (wide, spots) = status_line(&status(), 160);
         let text = wide.to_string();
-        assert!(text.contains("lora/smart │ autopilot │ ctx ▰▰▱▱▱  34% │ 12.3k $0.12 │ ⠋ 2 agents │ ? 1 waiting │ web │ main │ 14:05"), "{text}");
+        assert!(text.contains("lora/smart │ autopilot │ ctx ▰▰▱▱▱  34% │ 12.3k $0.12 │ ⠋ 2 agents │ 2 jobs │ ? 1 waiting │ web │ main │ 14:05"), "{text}");
         let x = text.find("autopilot").unwrap();
         let col = text::width(&text[..x]) as u16;
         assert_eq!(spot_at(&spots, col), Some(&Target::Do(Action::CycleMode)));
+        let col = text::width(&text[..text.find("2 jobs").unwrap()]) as u16;
+        assert_eq!(spot_at(&spots, col), Some(&Target::Do(Action::Jobs)));
+        let col = text::width(&text[..text.find("2 agents").unwrap()]) as u16;
+        assert_eq!(spot_at(&spots, col), Some(&Target::Do(Action::AgentMap)));
         let (narrow, _) = status_line(&status(), 60);
         let text = narrow.to_string();
         assert_eq!(text::width(&text), 60);

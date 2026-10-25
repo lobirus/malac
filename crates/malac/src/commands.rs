@@ -9,6 +9,10 @@ use malac_core::config::{self, Config, ProviderKind};
 use malac_core::message::Role;
 use malac_core::{Block, Runtime, session};
 
+use crate::client;
+use crate::daemon::ServeArgs;
+use crate::daemon::store::Store;
+use crate::protocol::{Command, Request, WorkspaceSummary};
 use crate::repl::working_dir;
 
 #[derive(Subcommand)]
@@ -25,6 +29,21 @@ pub enum SessionsAction {
     Show { id: String },
     /// Delete a session file.
     Delete { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum WorkspacesAction {
+    /// List workspaces, the last used one marked with * (default).
+    List,
+    /// Rename a workspace, given by name or id.
+    Rename { workspace: String, name: String },
+    /// Delete a workspace. Its sessions stay on disk.
+    Delete {
+        workspace: String,
+        /// Even while its agents are working.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -75,6 +94,84 @@ pub enum MemoryAction {
     Search { query: Vec<String> },
     /// Re-embed every memory file into the vector store.
     Reindex,
+}
+
+/// Changes go through the daemon, started if needed, so its clients see
+/// them; listing reads the files when no daemon runs.
+pub async fn workspaces(action: Option<WorkspacesAction>) -> Result<()> {
+    let command = match action.unwrap_or(WorkspacesAction::List) {
+        WorkspacesAction::List => return list_workspaces().await,
+        WorkspacesAction::Rename { workspace, name } => {
+            Command::WorkspaceRename { workspace, name }
+        }
+        WorkspacesAction::Delete { workspace, force } => {
+            Command::WorkspaceDelete { workspace, force }
+        }
+    };
+    let file = client::ensure_daemon(&ServeArgs::default()).await?;
+    let request = Request {
+        command,
+        client_ref: None,
+    };
+    let _: serde_json::Value = client::post(&file, "/api/command", &request).await?;
+    list_workspaces().await
+}
+
+async fn list_workspaces() -> Result<()> {
+    let (workspaces, last) = match client::running().await {
+        Some(file) => {
+            #[derive(serde::Deserialize)]
+            struct Listing {
+                workspaces: Vec<WorkspaceSummary>,
+            }
+            let listing: Listing = client::get(&file, "/api/workspaces").await?;
+            (listing.workspaces, Store::new(config::home_dir()).last())
+        }
+        None => {
+            let store = Store::new(config::home_dir());
+            let workspaces = store
+                .load_all()
+                .into_iter()
+                .map(|w| WorkspaceSummary {
+                    tabs: w.tabs.len(),
+                    active_tab: w.active_tab,
+                    running: 0,
+                    id: w.id,
+                    name: w.name,
+                    created: w.created,
+                    updated: w.updated,
+                })
+                .collect();
+            (workspaces, store.last())
+        }
+    };
+    if workspaces.is_empty() {
+        println!("no workspaces yet; `malac` creates one");
+    }
+    for w in workspaces {
+        let marker = if last.as_deref() == Some(w.id.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        let running = if w.running > 0 {
+            format!(" · {} running", w.running)
+        } else {
+            String::new()
+        };
+        println!(
+            "{marker} {}  {}  {} tabs{running}  {}",
+            w.name.as_str().bold(),
+            w.id[..8.min(w.id.len())].to_owned().dark_grey(),
+            w.tabs,
+            w.updated
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+                .dark_grey()
+        );
+    }
+    Ok(())
 }
 
 pub fn sessions(action: Option<SessionsAction>) -> Result<()> {

@@ -73,9 +73,29 @@ fn push(line: &mut Vec<Span<'static>>, text: &str, style: Style) {
     }
 }
 
-/// Word-wraps styled text to `width` columns. Whitespace at a break is
-/// dropped and words longer than a line are split.
-pub fn wrap(spans: &[Span<'_>], width: usize) -> Vec<Vec<Span<'static>>> {
+/// How a rendered row relates to the text it shows, for selecting and copying.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowText {
+    /// Leading columns that decorate the row (markers, rules, indentation).
+    pub inset: usize,
+    /// Set when the row continues the previous one after a soft wrap: the
+    /// text the wrap dropped between them, a space or nothing.
+    pub join: Option<&'static str>,
+}
+
+impl RowText {
+    pub fn inset(inset: usize) -> Self {
+        Self { inset, join: None }
+    }
+}
+
+/// Word-wraps styled text to `width` columns, saying how each row joins
+/// the one before it. Whitespace at a break is dropped and words longer
+/// than a line are split.
+pub fn wrap_rows(
+    spans: &[Span<'_>],
+    width: usize,
+) -> Vec<(Vec<Span<'static>>, Option<&'static str>)> {
     let mut wrapper = Wrapper {
         width: width.max(1),
         lines: Vec::new(),
@@ -85,6 +105,7 @@ pub fn wrap(spans: &[Span<'_>], width: usize) -> Vec<Vec<Span<'static>>> {
         word_width: 0,
         space: Vec::new(),
         space_width: 0,
+        join: None,
     };
     for span in spans {
         let mut rest = span.content.as_ref();
@@ -107,25 +128,35 @@ pub fn wrap(spans: &[Span<'_>], width: usize) -> Vec<Vec<Span<'static>>> {
     }
     wrapper.place_word();
     if !wrapper.line.is_empty() || wrapper.lines.is_empty() {
-        wrapper.lines.push(wrapper.line);
+        wrapper.lines.push((wrapper.line, wrapper.join));
     }
     wrapper.lines
 }
 
 struct Wrapper {
     width: usize,
-    lines: Vec<Vec<Span<'static>>>,
+    lines: Vec<(Vec<Span<'static>>, Option<&'static str>)>,
     line: Vec<Span<'static>>,
     line_width: usize,
     word: Vec<(String, Style)>,
     word_width: usize,
     space: Vec<(String, Style)>,
     space_width: usize,
+    /// How the line being built joins the previous one.
+    join: Option<&'static str>,
 }
 
 impl Wrapper {
-    fn break_line(&mut self) {
-        self.lines.push(std::mem::take(&mut self.line));
+    /// Ends the line; `dropped` is what the break removes before the next.
+    fn break_line(&mut self, dropped: &'static str) {
+        let ends_in_space = self
+            .line
+            .last()
+            .is_some_and(|s| s.content.ends_with(char::is_whitespace));
+        // Copying trims rows, so a space kept at the end must come back as the join.
+        let dropped = if ends_in_space { " " } else { dropped };
+        let join = self.join.replace(dropped);
+        self.lines.push((std::mem::take(&mut self.line), join));
         self.line_width = 0;
     }
 
@@ -150,7 +181,7 @@ impl Wrapper {
         let word_width = std::mem::replace(&mut self.word_width, 0);
         let fits = self.line_width + self.space_width + word_width <= self.width;
         if !fits && self.line_width > 0 && word_width <= self.width {
-            self.break_line();
+            self.break_line(" ");
             self.space.clear();
             self.space_width = 0;
         } else {
@@ -165,7 +196,7 @@ impl Wrapper {
             for g in text.graphemes(true) {
                 let w = grapheme_width(g);
                 if self.line_width + w > self.width && self.line_width > 0 {
-                    self.break_line();
+                    self.break_line("");
                 }
                 push(&mut self.line, g, *style);
                 self.line_width += w;
@@ -192,6 +223,15 @@ pub fn hard_wrap(text: &str, width: usize) -> Vec<String> {
     }
     rows.push(row);
     rows
+}
+
+/// How a hard-wrapped row joins the row before it, which copying trims.
+pub fn hard_join(previous: &str) -> &'static str {
+    if previous.ends_with(char::is_whitespace) {
+        " "
+    } else {
+        ""
+    }
 }
 
 /// Cuts text to `width` columns, ending in `…` when something was cut.
@@ -248,6 +288,13 @@ pub fn first_line(text: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn wrap(spans: &[Span<'_>], width: usize) -> Vec<Vec<Span<'static>>> {
+        wrap_rows(spans, width)
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect()
+    }
+
     fn plain(lines: &[Vec<Span<'static>>]) -> Vec<String> {
         lines
             .iter()
@@ -262,6 +309,15 @@ mod tests {
             plain(&wrap(&spans, 10)),
             vec!["the quick", "brown fox", "jumps"]
         );
+    }
+
+    #[test]
+    fn rows_say_what_the_wrap_dropped() {
+        let joins: Vec<_> = wrap_rows(&[Span::raw("the quick abcdefghijkl")], 10)
+            .into_iter()
+            .map(|(_, join)| join)
+            .collect();
+        assert_eq!(joins, vec![None, Some(" "), Some("")]);
     }
 
     #[test]

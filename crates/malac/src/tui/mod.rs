@@ -1,13 +1,19 @@
 //! The full-screen terminal interface: tabs over sessions, a menu bar, a
 //! status line and function keys, with mouse support throughout.
 
+mod agentmap;
 mod app;
+mod attach;
 mod bars;
 mod dialog;
 mod editor;
+mod files;
+mod folder;
+mod jobs;
 mod markdown;
 mod menu;
 mod pig;
+mod select;
 mod term;
 mod text;
 mod theme;
@@ -97,7 +103,7 @@ async fn event_loop(
     let (tx, mut updates) = mpsc::unbounded_channel();
     let mut app = App::new(session, tx);
     if !prompt.trim().is_empty() {
-        app.send(prompt);
+        app.send(prompt.into());
     }
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));

@@ -20,6 +20,7 @@ const UNTRUSTED_PROJECT_KEYS: &[&str] = &[
     "memory",
     "web",
     "update",
+    "daemon",
     // A project profile could carry any of the keys above into `--profile`.
     "profiles",
 ];
@@ -48,6 +49,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub web: WebConfig,
     pub update: UpdateConfig,
+    pub daemon: DaemonConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +84,9 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// What the model is good at, e.g. "fast and cheap". Listed in the
+    /// system prompt so agents can pick a model for each subagent.
+    pub description: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,
     pub vision: Option<bool>,
@@ -213,7 +218,7 @@ pub struct AgentsConfig {
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
-            max_depth: 2,
+            max_depth: 3,
             max_concurrent: 4,
         }
     }
@@ -279,6 +284,26 @@ impl Default for UpdateConfig {
         Self {
             check: true,
             auto: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Exit after this many minutes without clients, running agents or
+    /// jobs; 0 keeps the daemon running.
+    pub idle_minutes: u64,
+    /// The directory picker (`GET /api/fs`) lists only directories below
+    /// this one. Defaults to the home directory.
+    pub browse_root: Option<PathBuf>,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            idle_minutes: 120,
+            browse_root: None,
         }
     }
 }
@@ -351,6 +376,18 @@ impl Config {
             .try_into()
             .context("invalid configuration")?;
         Ok(Loaded { config, warnings })
+    }
+
+    /// Built-in defaults and the user config, without any project config:
+    /// settings that belong to the user rather than a directory.
+    pub fn load_user() -> Result<Self> {
+        let mut merged = defaults();
+        if let Some(user) = read_table(&user_config_path())? {
+            merge(&mut merged, user);
+        }
+        toml::Value::Table(merged)
+            .try_into()
+            .context("invalid configuration")
     }
 
     /// Splits `provider/model`. A bare model name uses the default model's provider.

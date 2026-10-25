@@ -79,12 +79,56 @@ pub fn build(inputs: &PromptInputs<'_>) -> String {
         ));
     }
 
+    if inputs.depth < runtime.config.agents.max_depth {
+        if let Some(models) = models_section(&runtime.config, inputs.model) {
+            sections.push(models);
+        }
+    }
+
     for (server, text) in runtime.mcp_instructions() {
         sections.push(format!(
             "# Instructions from the `{server}` tool server\n\n{text}"
         ));
     }
     sections.join("\n\n")
+}
+
+/// Most models listed in the prompt.
+const MAX_LISTED_MODELS: usize = 40;
+
+/// The configured models and what they are for, so subagents get a model
+/// that fits their task. `None` when there is nothing to choose from.
+fn models_section(config: &config::Config, current: &str) -> Option<String> {
+    let mut specs: Vec<String> = config
+        .providers
+        .iter()
+        .flat_map(|(name, p)| p.models.iter().map(move |m| format!("{name}/{m}")))
+        .collect();
+    for (spec, model) in &config.models {
+        if model.description.is_some() && !specs.contains(spec) {
+            specs.push(spec.clone());
+        }
+    }
+    if specs.len() < 2 {
+        return None;
+    }
+    let lines: Vec<String> = specs
+        .iter()
+        .take(MAX_LISTED_MODELS)
+        .map(|spec| {
+            let yours = if spec == current { " (yours)" } else { "" };
+            match &config.model_config(spec).description {
+                Some(description) => format!("- {spec}{yours}: {description}"),
+                None => format!("- {spec}{yours}"),
+            }
+        })
+        .collect();
+    Some(format!(
+        "# Available models\n\n`agent_spawn` takes a `model`; without one a subagent uses yours ({current}). \
+         Match the model to the task: a fast, cheap one for searches, lookups, summaries and mechanical \
+         edits; the strongest one for design, hard debugging and reviews; one with vision for screenshots.\n\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// The part that can change between turns.
@@ -143,4 +187,53 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, ModelConfig, ProviderConfig};
+
+    #[test]
+    fn lists_models_with_descriptions() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "lora".into(),
+            ProviderConfig {
+                models: vec!["smart".into(), "fast".into()],
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "lora/fast".into(),
+            ModelConfig {
+                description: Some("fast and cheap".into()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "other/vision".into(),
+            ModelConfig {
+                description: Some("sees images".into()),
+                ..Default::default()
+            },
+        );
+        let section = models_section(&config, "lora/smart").unwrap();
+        assert!(section.contains("- lora/smart (yours)\n"));
+        assert!(section.contains("- lora/fast: fast and cheap"));
+        assert!(section.contains("- other/vision: sees images"));
+    }
+
+    #[test]
+    fn skips_the_section_without_a_choice() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "lora".into(),
+            ProviderConfig {
+                models: vec!["smart".into()],
+                ..Default::default()
+            },
+        );
+        assert!(models_section(&config, "lora/smart").is_none());
+    }
 }

@@ -2,6 +2,7 @@
 //! soft wrapping and history.
 
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Range;
 use std::path::Path;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -25,6 +26,8 @@ pub struct Editor {
     draft: String,
     /// Column kept while moving up and down through shorter rows.
     goal: Option<usize>,
+    /// The other end of the selection, which runs to the cursor.
+    anchor: Option<usize>,
 }
 
 fn is_word(c: char) -> bool {
@@ -56,6 +59,82 @@ impl Editor {
         self.text = text.to_owned();
         self.cursor = self.text.len();
         self.goal = None;
+        self.anchor = None;
+    }
+
+    /// The selected bytes, when anything is selected.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let anchor = self.anchor?;
+        let range = anchor.min(self.cursor)..anchor.max(self.cursor);
+        (!range.is_empty()).then_some(range)
+    }
+
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().map(|r| &self.text[r])
+    }
+
+    /// Selects from `anchor` to `cursor`, which stays where it is put.
+    pub fn select(&mut self, anchor: usize, cursor: usize) {
+        self.anchor = Some(self.floor(anchor));
+        self.cursor = self.floor(cursor);
+        self.goal = None;
+    }
+
+    /// Drops the selection; returns whether there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        let had = self.selection().is_some();
+        self.anchor = None;
+        had
+    }
+
+    /// Removes the selected text; returns whether there was any.
+    fn delete_selection(&mut self) -> bool {
+        match self.selection() {
+            Some(range) => {
+                self.anchor = None;
+                self.delete(range.start, range.end);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn floor(&self, at: usize) -> usize {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
+    /// The word around `at`, or the character there when it is not in one.
+    pub fn word_range(&self, at: usize) -> Range<usize> {
+        let at = self.floor(at);
+        let start = self.text[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word(*c))
+            .last()
+            .map_or(at, |(i, _)| i);
+        let end = self.text[at..]
+            .char_indices()
+            .take_while(|(_, c)| is_word(*c))
+            .last()
+            .map_or(at, |(i, c)| at + i + c.len_utf8());
+        if start == end {
+            return at..self.next_boundary(at);
+        }
+        start..end
+    }
+
+    /// The line around `at`, without its newline.
+    pub fn line_range(&self, at: usize) -> Range<usize> {
+        let at = self.floor(at);
+        let start = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i);
+        start..end
     }
 
     pub fn clear(&mut self) {
@@ -76,11 +155,14 @@ impl Editor {
     fn edited(&mut self) {
         self.goal = None;
         self.browsing = None;
+        self.anchor = None;
     }
 
-    /// Inserts typed or pasted text. Line endings are normalized and tabs
-    /// become spaces, so a multi-line paste stays one prompt.
+    /// Inserts typed or pasted text in place of the selection. Line endings
+    /// are normalized and tabs become spaces, so a multi-line paste stays
+    /// one prompt.
     pub fn insert(&mut self, input: &str) {
+        self.delete_selection();
         let mut clean = String::with_capacity(input.len());
         for c in input.replace("\r\n", "\n").chars() {
             match c {
@@ -92,6 +174,15 @@ impl Editor {
         }
         self.text.insert_str(self.cursor, &clean);
         self.cursor += clean.len();
+        self.edited();
+    }
+
+    /// Replaces a range of the text, leaving the cursor after the new text.
+    pub fn replace(&mut self, range: Range<usize>, with: &str) {
+        let start = self.floor(range.start);
+        let end = self.floor(range.end).max(start);
+        self.text.replace_range(start..end, with);
+        self.cursor = start + with.len();
         self.edited();
     }
 
@@ -150,6 +241,7 @@ impl Editor {
     fn move_to(&mut self, at: usize) {
         self.cursor = at;
         self.goal = None;
+        self.anchor = None;
     }
 
     fn delete(&mut self, from: usize, to: usize) {
@@ -185,19 +277,32 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
-        self.delete(self.prev_boundary(self.cursor), self.cursor);
+        if !self.delete_selection() {
+            self.delete(self.prev_boundary(self.cursor), self.cursor);
+        }
     }
 
     pub fn delete_forward(&mut self) {
-        self.delete(self.cursor, self.next_boundary(self.cursor));
+        if !self.delete_selection() {
+            self.delete(self.cursor, self.next_boundary(self.cursor));
+        }
     }
 
     pub fn delete_word_back(&mut self) {
-        self.delete(self.word_start(), self.cursor);
+        if !self.delete_selection() {
+            self.delete(self.word_start(), self.cursor);
+        }
     }
 
     pub fn delete_word_forward(&mut self) {
-        self.delete(self.cursor, self.word_end());
+        if !self.delete_selection() {
+            self.delete(self.cursor, self.word_end());
+        }
+    }
+
+    /// Whether the cursor is at the very start with nothing selected.
+    pub fn at_start(&self) -> bool {
+        self.cursor == 0 && self.selection().is_none()
     }
 
     /// Deletes to the start of the line, or joins with the previous line
@@ -312,11 +417,19 @@ impl Editor {
         true
     }
 
-    /// Puts the cursor where the user clicked.
-    pub fn click(&mut self, width: usize, row: usize, col: usize) {
+    /// The byte offset shown at a row and column of the wrapped layout.
+    pub fn offset_at(&self, width: usize, row: usize, col: usize) -> usize {
         let rows = self.rows(width);
         let row = row.min(rows.len() - 1);
-        self.move_to(self.offset_in(&rows, row, col));
+        self.offset_in(&rows, row, col)
+    }
+
+    pub fn cursor_offset(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn set_cursor(&mut self, at: usize) {
+        self.move_to(self.floor(at));
     }
 
     pub fn history_prev(&mut self) -> bool {
@@ -333,6 +446,7 @@ impl Editor {
         self.text = self.history[index].clone();
         self.cursor = self.text.len();
         self.goal = None;
+        self.anchor = None;
         true
     }
 
@@ -349,6 +463,7 @@ impl Editor {
         }
         self.cursor = self.text.len();
         self.goal = None;
+        self.anchor = None;
         true
     }
 }
@@ -520,8 +635,29 @@ mod tests {
         e.end();
         assert!(e.up(5));
         assert_eq!(e.cursor_position(5), (1, 4));
-        e.click(5, 0, 99);
+        e.set_cursor(e.offset_at(5, 0, 99));
         assert_eq!(e.cursor_position(5), (0, 4));
+    }
+
+    #[test]
+    fn selections_are_replaced_and_deleted() {
+        let mut e = editor("fix the parser now");
+        e.select(4, 7);
+        assert_eq!(e.selected_text(), Some("the"));
+        e.insert("a");
+        assert_eq!(e.text(), "fix a parser now");
+        let word = e.word_range(8);
+        assert_eq!(&e.text()[word.clone()], "parser");
+        e.select(word.start, word.end);
+        e.backspace();
+        assert_eq!(e.text(), "fix a  now");
+        let mut e = editor("one\ntwo three");
+        let line = e.line_range(6);
+        assert_eq!(&e.text()[line.clone()], "two three");
+        e.select(line.end, line.start);
+        assert_eq!(e.cursor(), 4);
+        e.left();
+        assert_eq!(e.selection(), None, "moving drops the selection");
     }
 
     #[test]

@@ -13,13 +13,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use serde_json::Value;
 
-use super::app::{Action, HitMap, Outcome, Target};
+use super::app::{Action, HitMap, Outcome, TUI_COMMANDS, Target};
 use super::text::{self, sanitize};
 use super::theme::theme;
 use crate::repl::{COMMANDS, TAGLINE};
 
 /// A centered box of at most `w` x `h`, drawn with a title; returns the inside.
-fn frame_box(
+pub(super) fn frame_box(
     frame: &mut Frame,
     w: u16,
     h: u16,
@@ -55,7 +55,7 @@ fn frame_box(
     }
 }
 
-fn put(frame: &mut Frame, area: Rect, row: u16, line: Line<'static>) {
+pub(super) fn put(frame: &mut Frame, area: Rect, row: u16, line: Line<'static>) {
     if row < area.height {
         let line = text::truncate_line(line, area.width as usize);
         frame.render_widget(
@@ -338,12 +338,19 @@ pub struct Help {
 const KEYS: &[(&str, &str)] = &[
     ("F1  ?", "help (? on an empty prompt)"),
     ("F2  Ctrl-Y", "copy the last answer"),
-    ("F3", "agents: open, pin as a tab, stop"),
+    (
+        "F3",
+        "agents as a list or a map (F3 again switches); open, pin, stop",
+    ),
     ("F4  Ctrl-P", "pick a model"),
     ("F5  Shift-Tab", "cycle the mode: ask, edits, autopilot"),
     ("F6", "tab menu"),
     ("F7", "open a saved session"),
     ("F8  Esc  Ctrl-C", "stop the running turn and its subagents"),
+    (
+        "Esc",
+        "clear a selection, close the @ picker, leave a subagent",
+    ),
     ("F9  Ctrl-O  Alt-M", "menu bar"),
     ("F10  Ctrl-D", "quit (Ctrl-C twice on an empty prompt)"),
     (
@@ -353,6 +360,15 @@ const KEYS: &[(&str, &str)] = &[
     ("Alt-1…9", "go to tab"),
     ("Alt-←/→  Ctrl-PgUp/PgDn", "previous or next tab"),
     ("Enter", "send; runs the highlighted /command"),
+    (
+        "@",
+        "attach a file from the tab's folder (fuzzy, .gitignore honored)",
+    ),
+    ("Ctrl-V", "attach the image on the clipboard (macOS)"),
+    (
+        "Backspace",
+        "at the start of the prompt, drop the last attachment",
+    ),
     ("Shift-Enter  Alt-Enter  Ctrl-J", "new line"),
     ("↑ ↓", "move between lines, then through history"),
     ("Ctrl-←/→  Alt-B/F", "word left or right"),
@@ -365,6 +381,7 @@ const KEYS: &[(&str, &str)] = &[
         "Tab",
         "move to the transcript: ↑↓ select, Enter expand or open, y copy, o open in a tab",
     ),
+    ("[  ]", "in the transcript: previous or next answer"),
     ("PgUp/PgDn", "scroll; Home/End on an empty prompt jump"),
     ("Ctrl-G", "toggle the sidebar"),
     (
@@ -379,9 +396,22 @@ const MOUSE: &[(&str, &str)] = &[
         "click",
         "expand a tool call, open a subagent, switch tabs, use menus and the bars",
     ),
+    (
+        "drag",
+        "select text in the transcript or the prompt; release copies it",
+    ),
+    ("double / triple click", "select and copy a word / a line"),
     ("right click", "copy, copy code, expand, open in a tab"),
     ("middle click", "close a tab"),
-    ("wheel", "scroll the transcript or a list"),
+    ("wheel", "scroll the transcript, a list or the agent map"),
+    (
+        "drop a file",
+        "attach it: terminals paste the path of a dropped file",
+    ),
+    (
+        "Option-drag  Shift-drag",
+        "the terminal's own selection: Option in iTerm2 and Ghostty, Shift in kitty",
+    ),
 ];
 
 impl Help {
@@ -410,7 +440,7 @@ impl Help {
         lines.extend(MOUSE.iter().map(|(k, w)| row(k, w)));
         lines.push(Line::default());
         lines.push(section("Commands"));
-        for (name, args, help) in COMMANDS {
+        for (name, args, help) in COMMANDS.iter().chain(TUI_COMMANDS) {
             lines.push(row(format!("/{name} {args}").trim_end(), help));
         }
         lines.push(Line::default());

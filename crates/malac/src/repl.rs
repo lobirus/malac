@@ -15,8 +15,10 @@ use rustyline::error::ReadlineError;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approve::{FirstAnswer, TerminalApprover, TerminalLock};
+use crate::client::Client;
+use crate::daemon::ServeArgs;
 use crate::render::{self, Renderer};
-use crate::{RunArgs, SessionOptions, tui, web};
+use crate::{RunArgs, SessionOptions, remote, tui, web};
 
 /// What the line REPL and the TUI share: the runtime, the agent being
 /// talked to and the web UI serving it.
@@ -91,6 +93,27 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     }
     if !interactive && prompt.trim().is_empty() {
         bail!("no prompt given");
+    }
+    // The line interface is a daemon client; the full-screen one, scripts
+    // (-p, --json) and pipes still run here, in this process, and so does
+    // the line interface when the daemon cannot be reached.
+    if interactive && !use_tui {
+        match Client::connect_or_start(&ServeArgs::default()).await {
+            Ok(connection) => {
+                return remote::run(connection, &args, &cwd, prompt, show_thinking).await;
+            }
+            Err(err) => eprintln!(
+                "{}",
+                format!("! cannot reach the malac daemon ({err:#}); this session runs here only")
+                    .yellow()
+            ),
+        }
+    }
+    if use_tui && (args.new_workspace || args.workspace.is_some() || args.name.is_some()) {
+        eprintln!(
+            "{}",
+            "! -n, -w and --name need the daemon, which only --plain uses so far".yellow()
+        );
     }
 
     let runtime = Runtime::new(config, cwd.clone())?;
@@ -532,14 +555,14 @@ impl Repl {
     }
 }
 
-fn print_help() {
+pub(crate) fn print_help() {
     for (name, args, help) in COMMANDS {
         let command = format!("/{name} {args}");
         println!("  {:<30} {}", command.trim_end().bold(), help);
     }
 }
 
-fn print_sessions(limit: usize) -> Result<()> {
+pub(crate) fn print_sessions(limit: usize) -> Result<()> {
     for summary in session::list(false, limit)? {
         println!(
             "{}  {}  {}",

@@ -18,10 +18,16 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::Pending;
+use super::agentmap::{AgentMap, Node, State};
+use super::attach::{self, Attachment};
 use super::bars::{self, Mark};
 use super::dialog::{self, Approval, Help, PickKind, Picker, Rename, Row, UpdateDialog};
 use super::editor::{self, Editor};
+use super::files;
+use super::folder::FolderBrowser;
+use super::jobs::{self, Job, JobStatus, JobsView};
 use super::menu::{Item, Menu, Place};
+use super::select::{self, Point, Selection};
 use super::term;
 use super::text;
 use super::theme::theme;
@@ -30,9 +36,17 @@ use crate::render::tokens;
 use crate::repl::{COMMANDS, Session, Slash};
 
 mod actions;
+mod backend;
 mod input;
+mod mouse;
 
 pub use actions::Action;
+
+/// Commands only the full-screen interface has, completed with the rest.
+pub const TUI_COMMANDS: &[(&str, &str, &str)] = &[
+    ("cd", "[dir]", "work in another folder, in a new tab"),
+    ("jobs", "", "background processes the agents started"),
+];
 
 /// What a menu or dialog wants after a key or click.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +71,13 @@ pub enum Target {
         index: usize,
         line: usize,
     },
+    /// The transcript pane, under its entries.
+    Transcript,
     Completion(usize),
+    /// A row of the `@` file picker.
+    FileMatch(usize),
+    /// An attachment chip above the prompt; clicking removes it.
+    Chip(usize),
     Input,
     Pick(usize),
     /// Inside a menu or dialog, on nothing in particular.
@@ -104,8 +124,31 @@ pub struct Tab {
     pub seen: usize,
     pub selected: Option<usize>,
     pub draft: String,
+    pub draft_attachments: Vec<Attachment>,
     /// Prompts typed while the agent was busy, sent one by one as it frees up.
-    pub queued: VecDeque<String>,
+    pub queued: VecDeque<Prompt>,
+}
+
+/// A prompt on its way: what was typed and what was attached.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Prompt {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
+impl From<String> for Prompt {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            attachments: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
 }
 
 impl Tab {
@@ -118,6 +161,7 @@ impl Tab {
             seen: 0,
             selected: None,
             draft: String::new(),
+            draft_attachments: Vec::new(),
             queued: VecDeque::new(),
         }
     }
@@ -147,6 +191,9 @@ pub enum Overlay {
     Models(Picker),
     Sessions(Picker),
     Agents(Picker),
+    AgentMap(AgentMap),
+    Folder(FolderBrowser),
+    Jobs(JobsView),
     Help(Help),
     Rename(Rename),
     Update(UpdateDialog),
@@ -157,16 +204,70 @@ pub enum Update {
     Models(Vec<ProviderModels>),
     Checked(Result<Status, String>),
     Installed(Result<Status, String>),
+    Files {
+        root: PathBuf,
+        list: Vec<String>,
+    },
+    /// The clipboard's image, saved to a file.
+    Pasted(Result<PathBuf, String>),
 }
 
 /// Where things were drawn in the last frame, for keys that depend on layout.
 #[derive(Default)]
 pub struct Geometry {
     pub transcript: Rect,
+    /// Where the prompt's text starts, below the attachment chips.
     pub input: Rect,
+    /// The first wrapped row of the prompt shown, when it scrolls.
+    pub input_first: usize,
     pub titles: Vec<u16>,
     pub tabs_x: u16,
     pub sidebar: bool,
+}
+
+/// A message in the status line for a few seconds.
+pub struct Flash {
+    pub text: String,
+    /// Confirms something worked, rather than warning.
+    pub ok: bool,
+    pub at: Instant,
+}
+
+/// What the left button is doing between press and release.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Drag {
+    /// Pressed on the transcript; a click unless it moves.
+    Transcript {
+        start: Point,
+        entry: Option<usize>,
+        moved: bool,
+    },
+    /// Selecting in the prompt from a byte offset.
+    Input { anchor: usize },
+}
+
+/// Recent presses, to tell double and triple clicks.
+#[derive(Debug, Clone, Copy)]
+struct Clicks {
+    at: Instant,
+    x: u16,
+    y: u16,
+    count: u8,
+}
+
+/// Files under the tab's folder for the `@` picker; `None` while indexing.
+#[derive(Default)]
+pub struct FileIndex {
+    pub root: PathBuf,
+    pub list: Option<Vec<String>>,
+    pub loading: bool,
+}
+
+/// Which agents view F3 opens: the last one used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsView {
+    List,
+    Map,
 }
 
 pub struct App {
@@ -192,7 +293,23 @@ pub struct App {
     pub snapshots: HashMap<AgentId, AgentSnapshot>,
     pub branch: Option<String>,
     pub recent: Vec<SessionSummary>,
-    pub flash: Option<(String, Instant)>,
+    pub flash: Option<Flash>,
+    /// Text selected in the transcript with the mouse.
+    pub selection: Option<Selection>,
+    pub drag: Option<Drag>,
+    /// The pointer during a drag, for scrolling while it is past an edge.
+    pointer: (u16, u16),
+    clicks: Option<Clicks>,
+    /// Files and images attached to the prompt being written.
+    pub attachments: Vec<Attachment>,
+    pub files: FileIndex,
+    /// The highlighted row of the `@` picker.
+    pub file_choice: usize,
+    /// Where the `@` was when the picker was dismissed with Esc.
+    file_dismissed: Option<usize>,
+    pub jobs: Vec<Job>,
+    jobs_polled: Instant,
+    pub agents_view: AgentsView,
     pub started: Instant,
     pub dirty: bool,
     pub clear_screen: bool,
@@ -238,6 +355,17 @@ impl App {
             branch: git_branch(&runtime.cwd),
             recent: Vec::new(),
             flash: None,
+            selection: None,
+            drag: None,
+            pointer: (0, 0),
+            clicks: None,
+            attachments: Vec::new(),
+            files: FileIndex::default(),
+            file_choice: 0,
+            file_dismissed: None,
+            jobs: Vec::new(),
+            jobs_polled: Instant::now(),
+            agents_view: AgentsView::List,
             started: Instant::now(),
             dirty: true,
             clear_screen: false,
@@ -326,7 +454,20 @@ impl App {
     }
 
     pub fn flash(&mut self, message: impl Into<String>) {
-        self.flash = Some((message.into(), Instant::now()));
+        self.flash = Some(Flash {
+            text: message.into(),
+            ok: false,
+            at: Instant::now(),
+        });
+    }
+
+    /// A flash confirming something worked.
+    pub fn flash_ok(&mut self, message: impl Into<String>) {
+        self.flash = Some(Flash {
+            text: message.into(),
+            ok: true,
+            at: Instant::now(),
+        });
     }
 
     /// Adds a line to the transcript on screen.
@@ -384,14 +525,30 @@ impl App {
             return;
         }
         if index != self.active {
-            let draft = self.editor.text().to_owned();
-            self.tabs[self.active].draft = draft;
+            self.stash_draft();
             self.active = index;
-            let draft = std::mem::take(&mut self.tabs[index].draft);
-            self.editor.set_text(&draft);
+            self.restore_draft();
         }
         self.focus = Focus::Input;
+        self.selection = None;
+        self.branch = git_branch(&self.tab_cwd());
         self.session.switch_to(self.tabs[index].handle.clone());
+    }
+
+    /// Keeps what is being written with the active tab.
+    fn stash_draft(&mut self) {
+        let draft = self.editor.text().to_owned();
+        let attachments = std::mem::take(&mut self.attachments);
+        let tab = &mut self.tabs[self.active];
+        tab.draft = draft;
+        tab.draft_attachments = attachments;
+    }
+
+    fn restore_draft(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        let draft = std::mem::take(&mut tab.draft);
+        self.attachments = std::mem::take(&mut tab.draft_attachments);
+        self.editor.set_text(&draft);
     }
 
     pub fn tab_label(&self, index: usize) -> String {
@@ -405,7 +562,14 @@ impl App {
         }
         view.and_then(|v| {
             v.transcript.items().iter().find_map(|i| match &i.entry {
-                Entry::User(text) => Some(text::first_line(text).to_owned()),
+                Entry::User(text) => {
+                    let (prompt, mentions) = attach::split_user_text(text);
+                    let first = text::first_line(&prompt).to_owned();
+                    match mentions.first() {
+                        Some(mention) if first.is_empty() => Some(mention.name.clone()),
+                        _ => Some(first),
+                    }
+                }
                 _ => None,
             })
         })
@@ -442,6 +606,46 @@ impl App {
         completions(self.editor.text())
     }
 
+    /// The `@` being typed before the cursor and the query after it.
+    pub fn file_query(&self) -> Option<(usize, &str)> {
+        if self.focus != Focus::Input || self.tab().read_only() {
+            return None;
+        }
+        let text = &self.editor.text()[..self.editor.cursor_offset()];
+        let at = text.rfind('@')?;
+        let query = &text[at + 1..];
+        let starts_word = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let open = starts_word && !query.contains(char::is_whitespace);
+        (open && self.file_dismissed != Some(at)).then_some((at, query))
+    }
+
+    /// Files matching the `@` query, best first.
+    pub fn file_matches(&self) -> Vec<files::Match> {
+        match (self.file_query(), &self.files.list) {
+            (Some((_, query)), Some(list)) => files::best(list, query, 50),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Attaches a file; refusals are flashed.
+    pub fn attach(&mut self, path: &Path) -> bool {
+        match Attachment::open(path, &self.tab_cwd()) {
+            Ok(attachment) => {
+                if !self.attachments.iter().any(|a| a.path == attachment.path) {
+                    self.attachments.push(attachment);
+                }
+                true
+            }
+            Err(err) => {
+                self.flash(err);
+                false
+            }
+        }
+    }
+
     pub fn on_bus(&mut self, envelope: &Envelope) {
         match &envelope.event {
             Event::Update { status } => {
@@ -454,8 +658,12 @@ impl App {
             _ => {}
         }
         self.agents.apply(envelope);
-        if matches!(envelope.event, Event::TurnFinished { .. }) {
-            self.send_queued();
+        match &envelope.event {
+            Event::TurnFinished { .. } => self.send_queued(),
+            Event::ToolFinished { call_id, tool, .. } if tool == "bash" => {
+                self.track_job(&envelope.agent, call_id);
+            }
+            _ => {}
         }
     }
 
@@ -463,8 +671,8 @@ impl App {
     fn send_queued(&mut self) {
         for tab in &mut self.tabs {
             if !tab.handle.is_busy() {
-                if let Some(text) = tab.queued.pop_front() {
-                    tab.handle.send(vec![Block::text(text)]);
+                if let Some(prompt) = tab.queued.pop_front() {
+                    tab.handle.send(Self::prompt_blocks(&prompt));
                 }
             }
         }
@@ -493,6 +701,18 @@ impl App {
                     picker.note.clear();
                 }
             }
+            Update::Files { root, list } => {
+                if root == self.files.root {
+                    self.files.list = Some(list);
+                    self.files.loading = false;
+                }
+            }
+            Update::Pasted(Ok(path)) => {
+                if self.attach(&path) {
+                    self.flash_ok("attached the clipboard image");
+                }
+            }
+            Update::Pasted(Err(err)) => self.flash(err),
             Update::Checked(result) | Update::Installed(result) => {
                 let message = match &result {
                     Ok(status) => {
@@ -535,17 +755,22 @@ impl App {
         if self
             .flash
             .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
+            .is_some_and(|f| f.at.elapsed() > Duration::from_secs(4))
         {
             self.flash = None;
             changed = true;
         }
         if self.branch_read.elapsed() > Duration::from_secs(5) {
             self.branch_read = Instant::now();
-            let branch = git_branch(&self.session.runtime.cwd);
+            let branch = git_branch(&self.tab_cwd());
             changed |= branch != self.branch;
             self.branch = branch;
         }
+        if self.jobs_polled.elapsed() > Duration::from_secs(1) {
+            self.jobs_polled = Instant::now();
+            changed |= self.poll_jobs();
+        }
+        changed |= self.drag_scroll();
         let clock = chrono::Local::now().format("%H:%M").to_string();
         if clock != self.clock {
             self.clock = clock;
@@ -566,17 +791,33 @@ impl App {
         &self.clock
     }
 
+    /// Pasted text goes to the prompt or the open dialog's filter. Paths
+    /// of files dropped on the terminal attach those files instead.
     pub fn on_paste(&mut self, text: &str) {
+        let line = text.lines().next().unwrap_or_default();
         match &mut self.overlay {
             Some(Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p)) => {
-                p.filter.push_str(text.lines().next().unwrap_or_default());
+                p.filter.push_str(line);
             }
-            Some(Overlay::Rename(r)) => r.text.push_str(text.lines().next().unwrap_or_default()),
+            Some(Overlay::Folder(f)) => f.filter.push_str(line),
+            Some(Overlay::Rename(r)) => r.text.push_str(line),
             Some(_) => {}
             None => {
                 self.focus = Focus::Input;
-                self.editor.insert(text);
-                self.completion_dismissed = false;
+                let dropped = attach::dropped_paths(text).filter(|_| !self.tab().read_only());
+                match dropped {
+                    Some(paths) => {
+                        let attached = paths.iter().filter(|p| self.attach(p)).count();
+                        if attached > 0 {
+                            let noun = if attached == 1 { "file" } else { "files" };
+                            self.flash_ok(format!("attached {attached} {noun}"));
+                        }
+                    }
+                    None => {
+                        self.editor.insert(text);
+                        self.completion_dismissed = false;
+                    }
+                }
             }
         }
     }
@@ -584,8 +825,14 @@ impl App {
     /// The status line's left side: a message, what the agent does, or the directory.
     pub fn activity(&self) -> Vec<Span<'static>> {
         let t = theme();
-        if let Some((message, _)) = &self.flash {
-            return vec![Span::styled(message.clone(), t.fg(t.warning))];
+        if let Some(flash) = &self.flash {
+            return match flash.ok {
+                true => vec![
+                    Span::styled("✓ ", t.fg(t.accent)),
+                    Span::raw(flash.text.clone()),
+                ],
+                false => vec![Span::styled(flash.text.clone(), t.fg(t.warning))],
+            };
         }
         let tab = self.tab();
         if self.busy() {
@@ -612,7 +859,7 @@ impl App {
                 Span::styled(format!("{elapsed}{queued} · F8 stops"), t.dim()),
             ];
         }
-        vec![Span::styled(short_path(&self.session.runtime.cwd), t.dim())]
+        vec![Span::styled(short_path(&self.tab_cwd()), t.dim())]
     }
 
     pub fn update_segment(&self) -> Option<String> {
@@ -637,6 +884,7 @@ pub fn completions(input: &str) -> Vec<&'static (&'static str, &'static str, &'s
     }
     COMMANDS
         .iter()
+        .chain(TUI_COMMANDS)
         .filter(|(name, ..)| name.starts_with(prefix))
         .collect()
 }
@@ -686,7 +934,9 @@ mod tests {
         assert_eq!(names, vec!["model", "mode", "mcp", "memory"]);
         assert!(completions("/model lora").is_empty());
         assert!(completions("hello").is_empty());
-        assert_eq!(completions("/").len(), COMMANDS.len());
+        assert_eq!(completions("/").len(), COMMANDS.len() + TUI_COMMANDS.len());
+        assert_eq!(completions("/c")[0].0, "compact");
+        assert!(completions("/c").iter().any(|c| c.0 == "cd"));
     }
 
     #[test]

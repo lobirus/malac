@@ -10,7 +10,7 @@ Configuration is TOML, merged in this order (later wins, tables merge key by key
 
 `MALAC_HOME` moves `~/.malac` elsewhere. `malac config show` prints the merged result; `malac config path` prints the file locations.
 
-A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web`, `update` or `profiles`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
+A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web`, `update`, `daemon` or `profiles`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
 
 See [`examples/config.toml`](../examples/config.toml) for a complete example.
 
@@ -41,11 +41,22 @@ Keys are looked up in `api_key_env` first, then in `~/.malac/credentials.toml` (
 
 | Key | Default | Meaning |
 |---|---|---|
+| `description` | none | What the model is good at, e.g. `"fast and cheap"` or `"strongest reasoning"` |
 | `context_window` | `200000` | Compaction starts at 80% of this |
 | `max_output_tokens` | `16384` | `max_tokens` sent with each request |
 | `vision` | assumed `true` | Set `false` to route images through `vision_model` |
 | `thinking_budget` | none | Anthropic extended thinking budget |
 | `temperature` | provider default | |
+
+Agents that can delegate get an "Available models" section in their system prompt: every model in the providers' `models` lists, plus any model here with a `description`, with that description and a line on matching models to tasks. `agent_spawn` takes the chosen one as `model`.
+
+```toml
+[models."lora/fast"]
+description = "fast and cheap: searches, summaries, mechanical edits"
+
+[models."lora/smart"]
+description = "strongest reasoning: design, hard bugs, reviews"
+```
 
 ## `[permissions]`
 
@@ -108,7 +119,7 @@ model = "embed"
 
 | Key | Default | Meaning |
 |---|---|---|
-| `max_depth` | `2` | How deep subagents may nest |
+| `max_depth` | `3` | How deep subagents may nest; agents at the limit get no delegation tools |
 | `max_concurrent` | `4` | Subagents running at the same time |
 
 Agent types live in `~/.malac/agents/*.md` and `<project>/.malac/agents/*.md`:
@@ -142,13 +153,22 @@ Updates replace the binaries with an atomic rename, so running sessions and thei
 
 The agent has two tools for its own configuration. `malac_settings` shows the config files, this reference, the available models and the update status, and switches the current session's model. `malac_configure` sets or removes keys (comments in the file are kept and every change is validated), stores API keys and installs updates. `malac_configure` asks for approval unless you are in autopilot. Rules such as `malac_configure(set:ui.*)` pre-approve specific edits.
 
+## `[daemon]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `idle_minutes` | `120` | Exit after this long with no clients, running agents, jobs or pending approvals; `0` never exits |
+| `browse_root` | home directory | The directory picker (`GET /api/fs`) lists only directories below this (`~/` allowed) |
+
+The daemon reads `[daemon]`, `[web]`, `[update]` and `[control]` from the user config only. Each tab loads the full configuration for its own directory. The daemon keeps the environment it was started with, so after changing an API key variable, restart it (`malac daemon restart`) or store the key with `malac provider add --api-key-stdin`.
+
 ## `[ui]` and `[web]`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
 | `ui.tui` | `true` | Full-screen terminal UI; `false` uses the line-based interface (`--plain`) |
-| `web.enabled` | `false` | Serve the web UI with every interactive terminal session |
-| `web.remote` | `false` | Listen on all interfaces instead of `web.host` |
+| `web.enabled` | `false` | Serve a web UI with every full-screen terminal session, for that session's runtime |
+| `web.remote` | `false` | The daemon (and `--web`) listen on all interfaces instead of `web.host` |
 | `web.host` | `127.0.0.1` | Bind address when not remote |
-| `web.port` | `7700` | Web UI port |
+| `web.port` | `7700` | Port of the daemon and its web UI; any free port when it is taken |

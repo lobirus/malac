@@ -13,7 +13,7 @@ use crate::message::{Message, Usage};
 
 pub type AgentId = String;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub agent: AgentId,
     pub seq: u64,
@@ -161,5 +161,15 @@ impl EventBus {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Envelope>> {
         self.tx.subscribe()
+    }
+
+    /// A bus with its own subscribers that shares this one's sequence
+    /// numbers, so events from several runtimes can be ordered.
+    pub fn sibling(&self) -> Self {
+        let (tx, _) = broadcast::channel(8192);
+        Self {
+            tx,
+            seq: self.seq.clone(),
+        }
     }
 }

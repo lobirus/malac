@@ -1,10 +1,8 @@
 //! Entering and leaving the full-screen terminal, and copying to the clipboard.
 
 use std::io::{self, Stdout, Write};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -99,10 +97,27 @@ pub fn set_mouse_capture(on: bool) {
     };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What tests copied, instead of the clipboard.
+    pub static COPIED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Copies through OSC 52, which Ghostty, Kitty, WezTerm and tmux (with
 /// `set-clipboard on`) honor, and through `pbcopy` on a local Mac, which
 /// covers iTerm2 and Terminal.app with their default settings.
 pub fn copy(text: &str) {
+    #[cfg(test)]
+    COPIED.with(|c| *c.borrow_mut() = Some(text.to_owned()));
+    #[cfg(not(test))]
+    to_clipboard(text);
+}
+
+#[cfg(not(test))]
+fn to_clipboard(text: &str) {
+    use base64::Engine;
+    use std::process::{Command, Stdio};
+
     let encoded = base64::engine::general_purpose::STANDARD.encode(text);
     let osc = format!("\x1b]52;c;{encoded}\x07");
     let mut stdout = io::stdout();

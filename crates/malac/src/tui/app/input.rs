@@ -1,4 +1,4 @@
-//! What keys, clicks and the mouse wheel do.
+//! What keys do: in the prompt, the transcript, dialogs and menus.
 
 use super::*;
 
@@ -11,6 +11,9 @@ impl App {
         }
         if self.overlay.is_some() {
             return self.overlay_key(key);
+        }
+        if key.code == KeyCode::Esc && self.clear_selections() {
+            return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -111,10 +114,26 @@ impl App {
         }
     }
 
+    /// Drops any mouse selection; returns whether there was one.
+    pub(super) fn clear_selections(&mut self) -> bool {
+        let transcript = self.selection.take().is_some();
+        self.editor.clear_selection() || transcript
+    }
+
     fn overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // F3 switches between the agent list and the map.
+        match (&self.overlay, key.code) {
+            (Some(Overlay::Agents(_)), KeyCode::F(3)) => return Some(Action::AgentMap),
+            (Some(Overlay::AgentMap(_)), KeyCode::F(3)) => return Some(Action::AgentList),
+            _ => {}
+        }
+        let jobs = &self.jobs;
         let outcome = match self.overlay.as_mut()? {
             Overlay::Menu(menu) => menu.key(key),
             Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p) => p.key(key),
+            Overlay::AgentMap(map) => map.key(key),
+            Overlay::Folder(browser) => browser.key(key),
+            Overlay::Jobs(view) => view.key(key, jobs),
             Overlay::Help(help) => help.key(key),
             Overlay::Rename(rename) => rename.key(key),
             Overlay::Update(dialog) => dialog.key(key, &self.update),
@@ -122,7 +141,7 @@ impl App {
         self.outcome(outcome)
     }
 
-    fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
+    pub(super) fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         match outcome {
             Outcome::Stay => None,
             Outcome::Close => {
@@ -132,7 +151,10 @@ impl App {
             Outcome::Run(action) => {
                 let keep = matches!(
                     action,
-                    Action::InstallUpdate | Action::CheckUpdate | Action::StopAgent(_)
+                    Action::InstallUpdate
+                        | Action::CheckUpdate
+                        | Action::StopAgent(_)
+                        | Action::StopJob(_)
                 );
                 if !keep {
                     self.overlay = None;
@@ -160,6 +182,9 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let width = self.input_width();
+        if let Some(action) = self.file_key(key, more_input) {
+            return action;
+        }
         let completions = self.completions();
         if !completions.is_empty() {
             let len = completions.len();
@@ -196,6 +221,10 @@ impl App {
         match key.code {
             KeyCode::Enter if shift || alt || more_input => e.newline(),
             KeyCode::Enter => return self.submit(),
+            KeyCode::Char('v') if ctrl => return Some(Action::PasteImage),
+            KeyCode::Backspace if e.at_start() && !self.attachments.is_empty() => {
+                self.attachments.pop();
+            }
             KeyCode::Char('j') if ctrl => e.newline(),
             KeyCode::Char('a') if ctrl => e.home(),
             KeyCode::Char('e') if ctrl => e.end(),
@@ -242,8 +271,49 @@ impl App {
         if self.editor.text().len() != before {
             self.completion = 0;
             self.completion_dismissed = false;
+            self.file_choice = 0;
+        }
+        if self.file_query().is_some() {
+            self.index_files();
         }
         None
+    }
+
+    /// Keys for the `@` file picker while it is open; `None` passes the
+    /// key on to the prompt.
+    fn file_key(&mut self, key: KeyEvent, more_input: bool) -> Option<Option<Action>> {
+        let (at, _) = self.file_query()?;
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        let loading = self.files.list.is_none();
+        let count = self.file_matches().len();
+        match key.code {
+            KeyCode::Esc => self.file_dismissed = Some(at),
+            KeyCode::Up if count > 0 => self.file_choice = (self.file_choice + count - 1) % count,
+            KeyCode::Down if count > 0 => self.file_choice = (self.file_choice + 1) % count,
+            KeyCode::Enter | KeyCode::Tab if plain && !more_input && loading => {}
+            KeyCode::Enter | KeyCode::Tab if plain && !more_input && count > 0 => {
+                self.choose_file(self.file_choice.min(count - 1));
+            }
+            _ => return None,
+        }
+        Some(None)
+    }
+
+    /// Replaces the `@query` with the chosen file's chip.
+    pub(super) fn choose_file(&mut self, index: usize) {
+        let Some((at, _)) = self.file_query() else {
+            return;
+        };
+        let Some(chosen) = self.file_matches().into_iter().nth(index) else {
+            return;
+        };
+        let path = self.files.root.join(&chosen.path);
+        let cursor = self.editor.cursor_offset();
+        self.editor.replace(at..cursor, "");
+        self.file_choice = 0;
+        self.attach(&path);
     }
 
     /// Esc leaves a subagent's view first; on the tab's own view it stops the turn.
@@ -267,9 +337,9 @@ impl App {
             .max(1)
     }
 
-    fn submit(&mut self) -> Option<Action> {
+    pub(super) fn submit(&mut self) -> Option<Action> {
         let text = self.editor.text().trim_end().to_owned();
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && self.attachments.is_empty() {
             return None;
         }
         if let Some(command) = text.strip_prefix('/') {
@@ -277,6 +347,9 @@ impl App {
             if !name.contains('/') {
                 self.editor.submit();
                 editor::append_history(&self.history_path, &text);
+                if let Some(action) = self.tui_command(command) {
+                    return action;
+                }
                 return match Slash::parse(command) {
                     Ok(slash) => self.slash(slash),
                     Err(err) => {
@@ -291,18 +364,42 @@ impl App {
             return None;
         }
         self.editor.submit();
-        editor::append_history(&self.history_path, &text);
-        self.send(text);
+        if !text.is_empty() {
+            editor::append_history(&self.history_path, &text);
+        }
+        let attachments = std::mem::take(&mut self.attachments);
+        self.send(Prompt { text, attachments });
         None
     }
 
+    /// The commands only this interface has; `None` when it is another.
+    fn tui_command(&mut self, command: &str) -> Option<Option<Action>> {
+        let (name, arg) = command
+            .trim()
+            .split_once(' ')
+            .map_or((command.trim(), ""), |(n, a)| (n, a.trim()));
+        Some(match name {
+            "cd" if arg.is_empty() => Some(Action::FolderDialog),
+            "cd" => {
+                let home = dirs_home().map(PathBuf::from);
+                let path = match (arg.strip_prefix('~'), home) {
+                    (Some(rest), Some(home)) => home.join(rest.trim_start_matches('/')),
+                    _ => self.tab_cwd().join(arg),
+                };
+                Some(Action::OpenFolder(path))
+            }
+            "jobs" => Some(Action::Jobs),
+            _ => return None,
+        })
+    }
+
     /// Prompts the active tab's agent, or queues the prompt while it works.
-    pub fn send(&mut self, text: String) {
+    pub fn send(&mut self, prompt: Prompt) {
         let tab = self.tab_mut();
         if tab.handle.is_busy() || !tab.queued.is_empty() {
-            tab.queued.push_back(text);
+            tab.queued.push_back(prompt);
         } else {
-            tab.handle.send(vec![Block::text(text)]);
+            tab.handle.send(Self::prompt_blocks(&prompt));
         }
         tab.reset_view();
         self.focus = Focus::Input;
@@ -348,7 +445,7 @@ impl App {
         })
     }
 
-    fn focus_transcript(&mut self) {
+    pub(super) fn focus_transcript(&mut self) {
         let last = self.visible_entries().last().copied();
         if last.is_some() {
             self.focus = Focus::Transcript;
@@ -372,8 +469,33 @@ impl App {
         self.reveal(entries[next]);
     }
 
+    /// Selects the previous or next turn's answer.
+    fn jump_answer(&mut self, direction: isize) {
+        let Some(view) = self.shown() else {
+            return;
+        };
+        let answers = view.transcript.answers();
+        let current = self.tab().selected.unwrap_or(usize::MAX);
+        let next = if direction < 0 {
+            answers
+                .iter()
+                .rev()
+                .find(|&&i| i < current)
+                .or(answers.first())
+        } else {
+            answers
+                .iter()
+                .find(|&&i| i > current && current != usize::MAX)
+                .or(answers.last())
+        };
+        if let Some(&index) = next {
+            self.tab_mut().selected = Some(index);
+            self.reveal(index);
+        }
+    }
+
     /// Scrolls so an entry is on screen.
-    fn reveal(&mut self, index: usize) {
+    pub(super) fn reveal(&mut self, index: usize) {
         let Some(view) = self.shown() else {
             return;
         };
@@ -409,10 +531,15 @@ impl App {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
+        let top = self.transcript_top() as isize + delta;
+        self.set_top(top.max(0) as usize);
+    }
+
+    /// The transcript row at the top of its pane.
+    pub(super) fn transcript_top(&self) -> usize {
         let total = self.shown().map_or(0, |v| v.transcript.height());
         let max_top = total.saturating_sub(self.geometry.transcript.height as usize);
-        let top = self.tab().scroll.unwrap_or(max_top) as isize + delta;
-        self.set_top(top.max(0) as usize);
+        self.tab().scroll.map_or(max_top, |top| top.min(max_top))
     }
 
     fn scroll_page(&mut self, direction: isize) {
@@ -447,6 +574,8 @@ impl App {
             }
             KeyCode::Char('y') | KeyCode::Char('c') => return selected.map(Action::CopyEntry),
             KeyCode::Char('b') => return selected.map(|i| Action::CopyCode(i, None)),
+            KeyCode::Char('[') => self.jump_answer(-1),
+            KeyCode::Char(']') => self.jump_answer(1),
             KeyCode::Tab => {
                 self.focus = Focus::Input;
                 self.tab_mut().selected = None;
@@ -460,179 +589,5 @@ impl App {
             _ => {}
         }
         None
-    }
-
-    pub fn on_mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
-        let (x, y) = (mouse.column, mouse.row);
-        match mouse.kind {
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if mouse.kind == MouseEventKind::ScrollUp {
-                    -3
-                } else {
-                    3
-                };
-                let approval = self.approval_visible();
-                match &mut self.overlay {
-                    Some(Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p)) => {
-                        p.scroll_by(delta);
-                    }
-                    Some(Overlay::Help(help)) => {
-                        help.scroll = (help.scroll as isize + delta).max(0) as usize;
-                    }
-                    Some(_) => {}
-                    None if !approval => self.scroll_by(delta),
-                    None => {}
-                }
-                self.dirty = true;
-                None
-            }
-            MouseEventKind::Moved => {
-                let target = self.hits.at(x, y).cloned();
-                if let Some(Overlay::Menu(menu)) = &mut self.overlay {
-                    match target {
-                        Some(Target::MenuItem(index)) => self.dirty |= menu.hover(index),
-                        Some(Target::MenuTitle(index))
-                            if menu.open && menu.place != Place::Bar(index) =>
-                        {
-                            if matches!(menu.place, Place::Bar(_)) {
-                                self.open_menu(index, true);
-                                self.dirty = true;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.dirty = true;
-                self.click(x, y)
-            }
-            MouseEventKind::Down(MouseButton::Right) => {
-                self.dirty = true;
-                self.context_menu(x, y);
-                None
-            }
-            MouseEventKind::Down(MouseButton::Middle) => match self.hits.at(x, y) {
-                Some(Target::Tab(index)) => {
-                    self.dirty = true;
-                    Some(Action::CloseTab(*index))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn click(&mut self, x: u16, y: u16) -> Option<Action> {
-        let target = self.hits.at(x, y).cloned();
-        if self.approval_visible() {
-            return match target {
-                Some(Target::Do(action @ Action::Answer(_))) => Some(action),
-                _ => None,
-            };
-        }
-        if let Some(overlay) = &mut self.overlay {
-            let outcome = match (overlay, &target) {
-                (Overlay::Menu(menu), Some(Target::MenuItem(index))) => menu.activate(*index),
-                (
-                    Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p),
-                    Some(Target::Pick(index)),
-                ) => p.click(*index),
-                (_, Some(Target::Do(action))) => Outcome::Run(action.clone()),
-                (Overlay::Menu(menu), Some(Target::MenuTitle(index))) => {
-                    if menu.place == Place::Bar(*index) {
-                        Outcome::Close
-                    } else {
-                        Outcome::Switch(*index)
-                    }
-                }
-                (_, Some(Target::Overlay)) => Outcome::Stay,
-                _ => Outcome::Close,
-            };
-            if let Outcome::Switch(index) = outcome {
-                self.open_menu(index, true);
-                return None;
-            }
-            return self.outcome(outcome);
-        }
-        match target? {
-            Target::Do(action) => Some(action),
-            Target::MenuTitle(index) => {
-                self.open_menu(index, true);
-                None
-            }
-            Target::Tab(index) => Some(Action::GoTab(index)),
-            Target::CloseTab(index) => Some(Action::CloseTab(index)),
-            Target::Entry { index, .. } => {
-                let entry = &self.shown()?.transcript.items().get(index)?.entry;
-                match entry {
-                    Entry::Agent(card) => Some(Action::OpenAgent(card.id.clone())),
-                    Entry::Tool(_) | Entry::Thinking { .. } => Some(Action::ToggleEntry(index)),
-                    _ => None,
-                }
-            }
-            Target::Completion(index) => {
-                let (name, ..) = *self.completions().get(index)?;
-                self.editor.set_text(&format!("/{name}"));
-                self.submit()
-            }
-            Target::Input => {
-                self.focus = Focus::Input;
-                let area = self.geometry.input;
-                let row = (y.saturating_sub(area.y)) as usize;
-                let col = (x.saturating_sub(area.x + 2)) as usize;
-                let width = self.input_width();
-                self.editor.click(width, row, col);
-                None
-            }
-            Target::MenuItem(_) | Target::Pick(_) | Target::Overlay => None,
-        }
-    }
-
-    fn context_menu(&mut self, x: u16, y: u16) {
-        if self.approval_visible() {
-            return;
-        }
-        if self.overlay.is_some() {
-            self.overlay = None;
-            return;
-        }
-        let Some(Target::Entry { index, line }) = self.hits.at(x, y).cloned() else {
-            return;
-        };
-        let Some(item) = self.shown().and_then(|v| v.transcript.items().get(index)) else {
-            return;
-        };
-        let mut items = vec![Item::new("Copy", 'c', Action::CopyEntry(index))];
-        if item.code_block(Some(line)).is_some() {
-            items.push(Item::new(
-                "Copy code block",
-                'b',
-                Action::CopyCode(index, Some(line)),
-            ));
-        }
-        match &item.entry {
-            Entry::Tool(tool) => {
-                let label = if tool.expanded { "Collapse" } else { "Expand" };
-                items.push(Item::new(label, 'e', Action::ToggleEntry(index)));
-            }
-            Entry::Thinking { expanded, .. } => {
-                let label = if *expanded { "Collapse" } else { "Expand" };
-                items.push(Item::new(label, 'e', Action::ToggleEntry(index)));
-            }
-            Entry::Agent(card) => {
-                items.push(Item::new("Open", 'o', Action::OpenAgent(card.id.clone())));
-                items.push(Item::new(
-                    "Open in a new tab",
-                    't',
-                    Action::PinAgent(card.id.clone()),
-                ));
-                items.push(Item::new("Stop", 's', Action::StopAgent(card.id.clone())));
-            }
-            _ => {}
-        }
-        self.tab_mut().selected = Some(index);
-        self.overlay = Some(Overlay::Menu(Menu::new(Place::At(x, y), items, true)));
     }
 }

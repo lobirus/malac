@@ -13,8 +13,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
+use super::attach;
 use super::markdown;
-use super::text::{self, sanitize};
+use super::text::{self, RowText, sanitize};
 use super::theme::theme;
 use crate::render::tokens;
 
@@ -59,7 +60,11 @@ pub struct AgentCard {
 #[derive(Debug, Clone)]
 pub enum Entry {
     User(String),
-    Assistant(String),
+    Assistant {
+        text: String,
+        /// The turn's closing text: its answer.
+        last: bool,
+    },
     Thinking {
         text: String,
         expanded: bool,
@@ -96,14 +101,27 @@ impl Entry {
         }
     }
 
+    /// Secondary entries sit together without blank rows between them.
     fn is_compact(&self) -> bool {
-        matches!(self, Entry::Tool(_) | Entry::Agent(_))
+        matches!(
+            self,
+            Entry::Tool(_) | Entry::Agent(_) | Entry::Thinking { .. } | Entry::Todos(_)
+        )
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Entry::Assistant {
+            text: text.into(),
+            last: false,
+        }
     }
 
     /// The text copied for this entry.
     pub fn plain_text(&self) -> String {
         match self {
-            Entry::User(text) | Entry::Assistant(text) | Entry::Footer(text) => text.clone(),
+            Entry::Assistant { text, .. } => text.clone(),
+            Entry::User(text) => attach::split_user_text(text).0,
+            Entry::Footer(text) => text.clone(),
             Entry::Thinking { text, .. } => text.clone(),
             Entry::Tool(tool) => {
                 let mut out = format!("{} {}", tool.name, tool.summary);
@@ -140,6 +158,7 @@ impl Entry {
 struct Rendered {
     width: usize,
     lines: Vec<Line<'static>>,
+    rows: Vec<RowText>,
     code: Vec<markdown::CodeBlock>,
 }
 
@@ -169,6 +188,11 @@ impl Item {
 
     pub fn lines(&self) -> &[Line<'static>] {
         self.rendered.as_ref().map_or(&[], |r| &r.lines)
+    }
+
+    /// What of each line is text, for selecting and copying.
+    pub fn rows(&self) -> &[RowText] {
+        self.rendered.as_ref().map_or(&[], |r| &r.rows)
     }
 
     /// The code block shown on `line` (relative to the item's first line),
@@ -284,9 +308,41 @@ impl Transcript {
     /// The newest answer, for copying.
     pub fn last_answer(&self) -> Option<&str> {
         self.items.iter().rev().find_map(|i| match &i.entry {
-            Entry::Assistant(text) if !text.trim().is_empty() => Some(text.as_str()),
+            Entry::Assistant { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
             _ => None,
         })
+    }
+
+    /// Marks the newest text of the turn since the last prompt as its answer.
+    fn mark_answer(&mut self) {
+        let index = self
+            .items
+            .iter()
+            .rposition(|i| matches!(i.entry, Entry::Assistant { .. } | Entry::User(_)));
+        if let Some(Entry::Assistant { last, .. }) = index.and_then(|i| self.entry_mut(i)) {
+            *last = true;
+        }
+    }
+
+    /// Marks every turn's answer, for a loaded conversation.
+    fn mark_answers(&mut self) {
+        let mut answer = None;
+        for index in 0..self.items.len() {
+            match self.items[index].entry {
+                Entry::Assistant { .. } => answer = Some(index),
+                Entry::User(_) => {
+                    if let Some(Entry::Assistant { last, .. }) =
+                        answer.take().and_then(|i| self.entry_mut(i))
+                    {
+                        *last = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(Entry::Assistant { last, .. }) = answer.and_then(|i| self.entry_mut(i)) {
+            *last = true;
+        }
     }
 
     /// Renders entries that changed, or all of them after a resize.
@@ -300,11 +356,49 @@ impl Transcript {
             }
             let visible = !item.lines().is_empty();
             let compact = item.entry.is_compact();
-            item.gap = visible && previous_compact.is_some_and(|p| !(p && compact));
+            let footer = matches!(item.entry, Entry::Footer(_));
+            item.gap = visible && !footer && previous_compact.is_some_and(|p| !(p && compact));
             if visible {
                 previous_compact = Some(compact);
             }
         }
+    }
+
+    /// The lines drawn at rows `range` and what of each is text; blank
+    /// rows between entries have none.
+    pub fn rows_in(&self, range: Range<usize>) -> Vec<Option<(&Line<'static>, RowText)>> {
+        let mut out = Vec::with_capacity(range.len());
+        let mut row = 0;
+        for item in &self.items {
+            let height = item.height();
+            if row + height <= range.start {
+                row += height;
+                continue;
+            }
+            if row >= range.end {
+                break;
+            }
+            for i in 0..height {
+                let at = row + i;
+                if at < range.start || at >= range.end {
+                    continue;
+                }
+                let line = i.checked_sub(usize::from(item.gap));
+                out.push(line.map(|l| (&item.lines()[l], item.rows()[l])));
+            }
+            row += height;
+        }
+        out
+    }
+
+    /// Entries that are the answers of their turns, for jumping between them.
+    pub fn answers(&self) -> Vec<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i.entry, Entry::Assistant { last: true, .. }))
+            .map(|(n, _)| n)
+            .collect()
     }
 
     /// Total rows after [`Transcript::prepare`].
@@ -348,9 +442,21 @@ impl Transcript {
                     }
                     (Role::User, Block::Text { text })
                         if text.starts_with("<recalled-memories>") => {}
-                    (Role::User, Block::Text { text }) => self.push(Entry::User(text.clone())),
+                    // A prompt's attachments follow it as more text blocks.
+                    (Role::User, Block::Text { text }) => match self.items.last_mut() {
+                        Some(Item {
+                            entry: Entry::User(prompt),
+                            rendered,
+                            ..
+                        }) if text.starts_with("<file ") || text.starts_with("<image ") => {
+                            prompt.push('\n');
+                            prompt.push_str(text);
+                            *rendered = None;
+                        }
+                        _ => self.push(Entry::User(text.clone())),
+                    },
                     (Role::Assistant, Block::Text { text }) if !text.trim().is_empty() => {
-                        self.push(Entry::Assistant(text.clone()));
+                        self.push(Entry::assistant(text.clone()));
                     }
                     (Role::Assistant, Block::Thinking { text, .. }) if !text.trim().is_empty() => {
                         self.push(Entry::Thinking {
@@ -402,6 +508,7 @@ impl Transcript {
                 }
             }
         }
+        self.mark_answers();
     }
 }
 
@@ -462,8 +569,8 @@ impl AgentView {
             Event::TextDelta { text: delta } => {
                 t.streamed = true;
                 match t.last_mut() {
-                    Some(Entry::Assistant(text)) => text.push_str(delta),
-                    _ => t.push(Entry::Assistant(delta.clone())),
+                    Some(Entry::Assistant { text, .. }) => text.push_str(delta),
+                    _ => t.push(Entry::assistant(delta.clone())),
                 }
             }
             Event::ThinkingDelta { text: delta } => {
@@ -483,7 +590,7 @@ impl AgentView {
                     for block in &message.content {
                         match block {
                             Block::Text { text } if !text.trim().is_empty() => {
-                                t.push(Entry::Assistant(text.clone()));
+                                t.push(Entry::assistant(text.clone()));
                             }
                             Block::Thinking { text, .. } if !text.trim().is_empty() => {
                                 t.push(Entry::Thinking {
@@ -594,6 +701,9 @@ impl AgentView {
                 self.running = false;
                 self.writing = None;
                 self.last_status = Some(*status);
+                if *status == TurnStatus::Completed {
+                    t.mark_answer();
+                }
                 let footer = self.footer(*status);
                 self.transcript.push(Entry::Footer(footer));
             }
@@ -757,62 +867,87 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
+/// Rendered lines with what of each is text.
+#[derive(Default)]
+struct Out {
+    lines: Vec<Line<'static>>,
+    rows: Vec<RowText>,
+}
+
+impl Out {
+    fn push(&mut self, line: Line<'static>, inset: usize) {
+        self.row(line, RowText::inset(inset));
+    }
+
+    fn row(&mut self, line: Line<'static>, row: RowText) {
+        self.lines.push(line);
+        self.rows.push(row);
+    }
+}
+
+/// Secondary entries (tool calls, thinking, subagents, todos) are indented
+/// under the answer text so the text keeps the left edge.
+const NEST: &str = "  ";
+
 fn render(entry: &Entry, cwd: &str, ctx: &Ctx<'_>) -> Rendered {
     let t = theme();
     let width = ctx.width.max(10);
     let body = width - 2;
     let mut code = Vec::new();
-    let lines = match entry {
-        _ if entry.is_hidden() => Vec::new(),
-        Entry::User(text) => {
-            let band = Style::new().bg(t.code_bg);
-            let mut lines = Vec::new();
-            for source in sanitize(text).trim_end().split('\n') {
-                for row in text::wrap(&[Span::raw(source.to_owned())], body.saturating_sub(1)) {
-                    let marker = if lines.is_empty() { "› " } else { "  " };
-                    let mut spans = vec![Span::styled(
-                        marker,
-                        band.fg(t.dim).add_modifier(Modifier::BOLD),
-                    )];
-                    spans.extend(row);
-                    lines.push(pad(Line::from(spans).style(band), width));
-                }
-            }
-            lines
-        }
-        Entry::Assistant(text) => {
+    let mut out = Out::default();
+    match entry {
+        _ if entry.is_hidden() => {}
+        Entry::User(text) => render_user(text, width, &mut out),
+        Entry::Assistant { text, last } => {
             let rendered = markdown::render(text, body);
             code = rendered.code;
-            indent(rendered.lines, "  ")
+            // The answer gets the accent rule; text on the way there a quiet one.
+            let rule = if *last {
+                Span::styled("┃ ", t.fg(t.accent))
+            } else {
+                Span::styled("│ ", t.faint())
+            };
+            for (mut line, row) in rendered.lines.into_iter().zip(rendered.rows) {
+                line.spans.insert(0, rule.clone());
+                out.row(
+                    line,
+                    RowText {
+                        inset: row.inset + 2,
+                        ..row
+                    },
+                );
+            }
         }
         Entry::Thinking { text, expanded } => {
-            let style = t.dim().add_modifier(Modifier::ITALIC);
-            let mut head = vec![Span::styled("∴ Thinking", style)];
+            let style = t.faint().add_modifier(Modifier::ITALIC);
+            let mut head = vec![Span::raw(NEST), Span::styled("∴ Thinking", style)];
             if *expanded {
-                let mut lines = vec![Line::from(head)];
+                out.push(Line::from(head), 4);
+                let style = t.dim().add_modifier(Modifier::ITALIC);
                 for source in sanitize(text).trim().split('\n') {
-                    for row in text::wrap(&[Span::styled(source.to_owned(), style)], body) {
-                        lines.push(Line::from(row));
+                    let spans = [Span::styled(source.to_owned(), style)];
+                    for (row, join) in text::wrap_rows(&spans, body.saturating_sub(2)) {
+                        let mut spans = vec![Span::raw("    ")];
+                        spans.extend(row);
+                        out.row(Line::from(spans), RowText { inset: 4, join });
                     }
                 }
-                indent_rest(lines)
             } else {
                 let preview = text::first_line(text);
                 if !preview.is_empty() {
-                    let room = body.saturating_sub(12);
+                    let room = body.saturating_sub(14);
                     head.push(Span::styled(
                         format!("  {}", text::truncate(&sanitize(preview), room)),
-                        t.faint(),
+                        style,
                     ));
                 }
-                vec![Line::from(head)]
+                out.push(Line::from(head), 4);
             }
         }
-        Entry::Tool(tool) => render_tool(tool, cwd, width, ctx),
-        Entry::Agent(card) => render_card(card, width, ctx),
-        Entry::Todos(items) => items
-            .iter()
-            .map(|item| {
+        Entry::Tool(tool) => render_tool(tool, cwd, width, ctx, &mut out),
+        Entry::Agent(card) => render_card(card, width, ctx, &mut out),
+        Entry::Todos(items) => {
+            for item in items {
                 let (mark, mark_style, text_style) = match item.status {
                     TodoStatus::Completed => (
                         "✓",
@@ -820,72 +955,91 @@ fn render(entry: &Entry, cwd: &str, ctx: &Ctx<'_>) -> Rendered {
                         t.dim().add_modifier(Modifier::CROSSED_OUT),
                     ),
                     TodoStatus::InProgress => ("▸", t.bold(), t.bold()),
-                    TodoStatus::Pending => ("○", t.dim(), Style::new()),
+                    TodoStatus::Pending => ("○", t.dim(), t.dim()),
                 };
                 let content =
                     text::truncate(&sanitize(&item.content), body.saturating_sub(2)).into_owned();
-                Line::from(vec![
-                    Span::raw("  "),
+                let line = Line::from(vec![
+                    Span::raw(NEST),
                     Span::styled(format!("{mark} "), mark_style),
                     Span::styled(content, text_style),
-                ])
-            })
-            .collect(),
+                ]);
+                out.push(line, 4);
+            }
+        }
         Entry::Notice(level, message) => {
             let (mark, style) = match level {
                 Level::Info => ("  ", t.dim()),
                 Level::Warning => ("! ", t.fg(t.warning)),
                 Level::Error => ("✗ ", t.fg(t.error)),
             };
-            let rows = text::wrap(&[Span::styled(sanitize(message).into_owned(), style)], body);
-            rows.into_iter()
-                .enumerate()
-                .map(|(i, row)| {
-                    let mut spans = vec![Span::styled(if i == 0 { mark } else { "  " }, style)];
-                    spans.extend(row);
-                    Line::from(spans)
-                })
-                .collect()
+            let spans = [Span::styled(sanitize(message).into_owned(), style)];
+            for (i, (row, join)) in text::wrap_rows(&spans, body).into_iter().enumerate() {
+                let mut spans = vec![Span::styled(if i == 0 { mark } else { "  " }, style)];
+                spans.extend(row);
+                out.row(Line::from(spans), RowText { inset: 2, join });
+            }
         }
         Entry::Compacted => {
             let label = " conversation compacted ";
             let side = width.saturating_sub(text::width(label)) / 2;
-            vec![Line::styled(
-                format!("{}{label}{}", "─".repeat(side), "─".repeat(side)),
-                t.faint(),
-            )]
+            let rule = "─".repeat(side);
+            out.push(Line::styled(format!("{rule}{label}{rule}"), t.faint()), 0);
         }
-        Entry::Footer(footer) => vec![Line::styled(
-            text::truncate(&format!("  ─ {footer}"), width).into_owned(),
-            t.faint(),
-        )],
-        Entry::Info(lines) => lines
-            .iter()
-            .map(|l| text::truncate_line(l.clone(), width))
-            .collect(),
-    };
+        Entry::Footer(footer) => {
+            let line = text::truncate(&format!("  ─ {footer}"), width).into_owned();
+            out.push(Line::styled(line, t.faint()), 4);
+        }
+        Entry::Info(lines) => {
+            for line in lines {
+                out.push(text::truncate_line(line.clone(), width), 0);
+            }
+        }
+    }
     Rendered {
         width: ctx.width,
-        lines,
+        lines: out.lines,
+        rows: out.rows,
         code,
     }
 }
 
-fn indent(lines: Vec<Line<'static>>, prefix: &'static str) -> Vec<Line<'static>> {
-    lines
-        .into_iter()
-        .map(|mut line| {
-            line.spans.insert(0, Span::raw(prefix));
-            line
-        })
-        .collect()
-}
-
-fn indent_rest(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    for line in lines.iter_mut().skip(1) {
-        line.spans.insert(0, Span::raw("  "));
+/// A prompt on its band, with the files and images it carried as chips.
+fn render_user(text: &str, width: usize, out: &mut Out) {
+    let t = theme();
+    let band = Style::new().bg(t.code_bg);
+    let marker = band.fg(t.dim).add_modifier(Modifier::BOLD);
+    let (prompt, mentions) = attach::split_user_text(text);
+    let body = width.saturating_sub(3);
+    let lead = |out: &Out| if out.lines.is_empty() { "› " } else { "  " };
+    if !prompt.trim().is_empty() || mentions.is_empty() {
+        for source in sanitize(&prompt).trim_end().split('\n') {
+            for (row, join) in text::wrap_rows(&[Span::raw(source.to_owned())], body) {
+                let mut spans = vec![Span::styled(lead(out), marker)];
+                spans.extend(row);
+                let line = pad(Line::from(spans).style(band), width);
+                out.row(line, RowText { inset: 2, join });
+            }
+        }
     }
-    lines
+    if mentions.is_empty() {
+        return;
+    }
+    let chips: Vec<Span<'static>> = mentions
+        .iter()
+        .enumerate()
+        .flat_map(|(i, mention)| {
+            let gap = (i > 0).then(|| Span::raw("   "));
+            gap.into_iter()
+                .chain([Span::styled(mention.label(), band.fg(t.dim))])
+        })
+        .collect();
+    for (row, join) in text::wrap_rows(&chips, body) {
+        let mut spans = vec![Span::styled(lead(out), marker)];
+        spans.extend(row);
+        let line = pad(Line::from(spans).style(band), width);
+        out.row(line, RowText { inset: 2, join });
+    }
 }
 
 /// Extends a line with spaces so its background spans the full width.
@@ -908,13 +1062,14 @@ fn header(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> 
     Line::from(spans)
 }
 
-fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>) -> Vec<Line<'static>> {
+/// A tool call: one quiet line until expanded.
+fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mut Out) {
     let t = theme();
     let (mark, mark_style) = match tool.state {
         ToolState::Asking => ("?", t.fg(t.warning).add_modifier(Modifier::BOLD)),
-        ToolState::Running => (ctx.spinner(), t.dim()),
-        ToolState::Done => ("●", t.fg(t.accent)),
-        ToolState::Failed | ToolState::Denied => ("●", t.fg(t.error)),
+        ToolState::Running => (ctx.spinner(), t.fg(t.accent)),
+        ToolState::Done => ("●", t.faint()),
+        ToolState::Failed | ToolState::Denied => ("✗", t.fg(t.error)),
     };
     let output_lines = tool.output.lines().filter(|l| !l.trim().is_empty()).count();
     let mut meta = Vec::new();
@@ -923,13 +1078,20 @@ fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>) -> Vec<L
         ToolState::Denied => meta.push(Span::styled("denied", t.fg(t.error))),
         ToolState::Running => meta.push(Span::styled(duration(tool.started.elapsed()), t.dim())),
         ToolState::Done | ToolState::Failed => {
-            if output_lines > 1 {
+            if tool.state == ToolState::Failed && !tool.expanded {
+                let error = sanitize(text::first_line(&tool.output)).into_owned();
+                let room = (width / 3).max(12);
+                meta.push(Span::styled(
+                    format!("{}  ", text::truncate(&error, room)),
+                    t.fg(t.error),
+                ));
+            } else if output_lines > 1 {
                 meta.push(Span::styled(format!("{output_lines} lines  "), t.faint()));
             }
             if tool.millis > 0 {
                 meta.push(Span::styled(
                     duration(Duration::from_millis(tool.millis)),
-                    t.dim(),
+                    t.faint(),
                 ));
             }
         }
@@ -944,63 +1106,75 @@ fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>) -> Vec<L
     let summary = sanitize(&tool.summary).replace(cwd, "");
     let head = header(
         vec![
+            Span::raw(NEST),
             Span::styled(format!("{mark} "), mark_style),
-            Span::styled(tool.name.clone(), t.bold()),
+            Span::styled(tool.name.clone(), t.dim().add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::raw(summary),
+            Span::styled(summary, t.dim()),
         ],
         meta,
         width,
     );
-    let mut lines = vec![head];
-    let body = width.saturating_sub(4).max(4);
-    let bar = Span::styled("  │ ", t.faint());
+    out.push(head, 4);
     if !tool.expanded {
-        if tool.state == ToolState::Failed {
-            let first = text::first_line(&tool.output);
-            lines.push(Line::from(vec![
-                Span::styled("  └ ", t.faint()),
-                Span::styled(
-                    text::truncate(&sanitize(first), body).into_owned(),
-                    t.fg(t.error),
-                ),
-            ]));
-        }
-        return lines;
+        return;
     }
-    for row in input_lines(tool, body) {
+    let body = width.saturating_sub(6).max(4);
+    let bar = Span::styled(format!("{NEST}  │ "), t.faint());
+    for (row, text) in input_lines(tool, body) {
         let mut spans = vec![bar.clone()];
         spans.extend(row.spans);
-        lines.push(Line::from(spans));
+        out.row(
+            Line::from(spans),
+            RowText {
+                inset: text.inset + 6,
+                ..text
+            },
+        );
     }
     if !tool.output.is_empty() {
-        lines.push(Line::from(bar.clone()));
+        out.push(Line::from(bar.clone()), 6);
         let style = if tool.state == ToolState::Failed {
             t.fg(t.error)
         } else {
             t.dim()
         };
         for source in sanitize(&tool.output).trim_end().split('\n') {
+            let mut join = None;
             for row in text::hard_wrap(source, body) {
-                lines.push(Line::from(vec![bar.clone(), Span::styled(row, style)]));
+                let next = text::hard_join(&row);
+                let line = Line::from(vec![bar.clone(), Span::styled(row, style)]);
+                out.row(
+                    line,
+                    RowText {
+                        inset: 6,
+                        join: join.replace(next),
+                    },
+                );
             }
         }
     }
-    lines
 }
 
 /// The tool's input, shaped for the common tools and as `key: value` otherwise.
-fn input_lines(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
+fn input_lines(tool: &ToolCall, width: usize) -> Vec<(Line<'static>, RowText)> {
     const MAX: usize = 60;
     let t = theme();
     let mut lines = Vec::new();
-    let block = |text: &str, prefix: &'static str, style: Style, lines: &mut Vec<Line<'static>>| {
+    let block = |text: &str,
+                 prefix: &'static str,
+                 style: Style,
+                 lines: &mut Vec<(Line<'static>, RowText)>| {
         for source in sanitize(text).split('\n') {
+            let mut join = None;
             for row in text::hard_wrap(source, width.saturating_sub(prefix.len())) {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled(row, style),
-                ]));
+                let next = text::hard_join(&row);
+                let line = Line::from(vec![Span::styled(prefix, style), Span::styled(row, style)]);
+                let row = RowText {
+                    inset: prefix.len(),
+                    join: join.replace(next),
+                };
+                lines.push((line, row));
             }
         }
     };
@@ -1012,7 +1186,7 @@ fn input_lines(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
         }
         ("edit", Some(map)) => {
             let path = map.get("path").and_then(Value::as_str).unwrap_or_default();
-            lines.push(Line::styled(path.to_owned(), t.bold()));
+            lines.push((Line::styled(path.to_owned(), t.bold()), RowText::default()));
             let old = map
                 .get("old_string")
                 .and_then(Value::as_str)
@@ -1028,7 +1202,8 @@ fn input_lines(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
             for (key, value) in map {
                 match value.as_str() {
                     Some(text) if text.contains('\n') => {
-                        lines.push(Line::styled(format!("{key}:"), t.dim()));
+                        let line = Line::styled(format!("{key}:"), t.dim());
+                        lines.push((line, RowText::default()));
                         block(text, "  ", Style::new(), &mut lines);
                     }
                     Some(text) => block(&format!("{key}: {text}"), "", Style::new(), &mut lines),
@@ -1042,24 +1217,26 @@ fn input_lines(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
     if lines.len() > MAX {
         let more = lines.len() - MAX;
         lines.truncate(MAX);
-        lines.push(Line::styled(format!("… {more} more lines"), t.faint()));
+        let line = Line::styled(format!("… {more} more lines"), t.faint());
+        lines.push((line, RowText::default()));
     }
     lines
 }
 
-fn render_card(card: &AgentCard, width: usize, ctx: &Ctx<'_>) -> Vec<Line<'static>> {
+/// A subagent on one line: what it does or what it reported.
+fn render_card(card: &AgentCard, width: usize, ctx: &Ctx<'_>, out: &mut Out) {
     let t = theme();
     let snapshot = ctx.snapshots.get(&card.id);
     let (mark, mark_style, status) = match card.finished {
         None => (
             ctx.spinner(),
-            t.dim(),
+            t.fg(t.accent),
             Span::styled(duration(card.started.elapsed()), t.dim()),
         ),
         Some((TurnStatus::Completed, took)) => (
             "◆",
             t.fg(t.accent),
-            Span::styled(format!("done · {}", duration(took)), t.dim()),
+            Span::styled(format!("done · {}", duration(took)), t.faint()),
         ),
         Some((TurnStatus::Failed, _)) => {
             ("◆", t.fg(t.error), Span::styled("failed", t.fg(t.error)))
@@ -1070,35 +1247,27 @@ fn render_card(card: &AgentCard, width: usize, ctx: &Ctx<'_>) -> Vec<Line<'stati
             Span::styled("cancelled", t.fg(t.warning)),
         ),
     };
-    let head = header(
-        vec![
-            Span::styled(format!("{mark} "), mark_style),
-            Span::styled(card.label.clone(), t.bold()),
-            Span::styled(format!("  {}", card.model), t.faint()),
-        ],
-        vec![status, Span::styled(" ›", t.faint())],
-        width,
-    );
     let detail = match (card.finished, snapshot) {
         (None, Some(snap)) if !snap.activity.is_empty() => snap.activity.clone(),
         (None, _) => "starting".to_owned(),
         (Some(_), _) => card.report.clone(),
     };
-    let mut lines = vec![head];
-    let room = width.saturating_sub(4);
-    let detail = markdown::render(text::first_line(&detail), room)
+    let mut left = vec![
+        Span::raw(NEST),
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(card.label.clone(), t.bold()),
+        Span::raw("  "),
+    ];
+    let detail = markdown::render(text::first_line(&detail), width)
         .lines
         .into_iter()
         .next();
-    if let Some(detail) = detail {
-        let mut spans = vec![Span::styled("  └ ", t.faint())];
-        for span in detail.spans {
-            let style = t.dim().patch(span.style);
-            spans.push(span.style(style));
-        }
-        lines.push(Line::from(spans));
+    for span in detail.into_iter().flat_map(|l| l.spans) {
+        let style = t.dim().patch(span.style);
+        left.push(span.style(style));
     }
-    lines
+    let head = header(left, vec![status, Span::styled(" ›", t.faint())], width);
+    out.push(head, 4);
 }
 
 #[cfg(test)]
@@ -1137,7 +1306,7 @@ mod tests {
             .iter()
             .map(|i| match &i.entry {
                 Entry::User(_) => "user",
-                Entry::Assistant(_) => "assistant",
+                Entry::Assistant { .. } => "assistant",
                 Entry::Thinking { .. } => "thinking",
                 Entry::Tool(_) => "tool",
                 Entry::Agent(_) => "agent",
@@ -1247,13 +1416,19 @@ mod tests {
         assert_eq!(view.transcript.last_answer(), Some("Running **now**."));
         let lines = rendered(&mut agents, "m", 50);
         assert_eq!(lines[0], "› run the tests");
-        assert_eq!(lines[2], "∴ Thinking  Let me check.");
-        assert_eq!(lines[4], "  Running now.");
+        assert_eq!(lines[2], "  ∴ Thinking  Let me check.");
+        assert_eq!(
+            lines[4], "┃ Running now.",
+            "the turn's answer gets the accent rule"
+        );
         assert_eq!(
             lines[6],
-            "● bash cargo test                  2 lines  1.2s ▸"
+            format!("  ● bash cargo test{}2 lines  1.2s ▸", " ".repeat(16))
         );
-        assert!(lines[8].starts_with("  ─ lora/smart"));
+        assert!(
+            lines[7].starts_with("  ─ lora/smart"),
+            "the footer hugs the turn"
+        );
     }
 
     #[test]
@@ -1271,7 +1446,7 @@ mod tests {
             },
         ));
         let lines = rendered(&mut agents, "m", 50);
-        assert!(lines[0].starts_with("? bash rm -rf build"));
+        assert!(lines[0].starts_with("  ? bash rm -rf build"));
         assert!(lines[0].contains("awaiting approval"));
         agents.apply(&envelope(
             "m",
@@ -1309,12 +1484,17 @@ mod tests {
             },
         ));
         let lines = rendered(&mut agents, "m", 40);
-        assert!(lines[0].starts_with("● bash ls src"));
+        assert!(lines[0].starts_with("  ● bash ls src"));
         assert!(agents.get_mut("m").unwrap().transcript.toggle(0));
         let lines = rendered(&mut agents, "m", 40);
         assert_eq!(
             &lines[1..],
-            ["  │ $ ls /work/src", "  │", "  │ main.rs", "  │ lib.rs"]
+            [
+                "    │ $ ls /work/src",
+                "    │",
+                "    │ main.rs",
+                "    │ lib.rs"
+            ]
         );
     }
 
@@ -1349,10 +1529,13 @@ mod tests {
             },
         ));
         let lines = rendered(&mut agents, "m", 50);
-        assert_eq!(lines.len(), 2, "the agent_spawn call is shown as the card");
-        assert!(lines[0].starts_with("◆ helper  lora/smart"));
+        assert_eq!(lines.len(), 1, "the agent_spawn call is shown as the card");
+        assert!(
+            lines[0].starts_with("  ◆ helper  Found it."),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("done ·"));
-        assert_eq!(lines[1], "  └ Found it.");
     }
 
     #[test]
@@ -1386,6 +1569,14 @@ mod tests {
                 is_error: true,
             }]),
             Message::user_text(format!("{COMPACTED_PREFIX} Summary of everything")),
+            Message::user(vec![
+                Block::text("look"),
+                Block::text("<image path=\"a.png\" bytes=\"9\"/>"),
+                Block::Image {
+                    media_type: "image/png".into(),
+                    data: String::new(),
+                },
+            ]),
         ];
         let mut transcript = Transcript::new("/work");
         transcript.load(&history, |name, input| format!("{name}:{}", input["path"]));
@@ -1401,6 +1592,8 @@ mod tests {
             matches!(&transcript.items()[2].entry, Entry::Tool(t) if t.state == ToolState::Failed)
         );
         assert!(matches!(transcript.items()[3].entry, Entry::Compacted));
+        assert_eq!(entries[4], "look", "attachments join their prompt");
+        assert_eq!(entries.len(), 5);
     }
 
     #[test]

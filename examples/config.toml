@@ -1,8 +1,8 @@
 # ~/.malac/config.toml
 #
 # Project settings go in <repo>/.malac/config.toml. For safety a project file
-# cannot set mode, providers, mcp, control, permissions, memory, web, update or profiles
-# unless you set `trust_project_config = true` here.
+# cannot set mode, providers, mcp, control, permissions, memory, web, update,
+# daemon or profiles unless you set `trust_project_config = true` here.
 
 model = "lora/default"
 small_model = "lora/fast"
@@ -30,11 +30,20 @@ models = ["smart"]
 kind = "openai"
 base_url = "http://localhost:11434/v1"
 
+# Descriptions are listed in the system prompt so agents pick a model per subagent.
 [models."lora/default"]
+description = "general purpose"
 context_window = 200000
 vision = false
 
+[models."lora/smart"]
+description = "strongest reasoning: design, hard bugs, reviews"
+
+[models."lora/fast"]
+description = "fast and cheap: searches, summaries, mechanical edits"
+
 [models."lora/vision"]
+description = "reads screenshots and images"
 vision = true
 
 [permissions]
@@ -54,8 +63,12 @@ provider = "local"
 model = "nomic-embed-text"
 
 [agents]
-max_depth = 2
+max_depth = 3
 max_concurrent = 4
+
+# The background daemon that holds workspaces, tabs and agents.
+[daemon]
+idle_minutes = 120
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"

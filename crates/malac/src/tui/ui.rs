@@ -13,9 +13,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::app::{Action, App, Focus, Overlay, Target, short_path};
+use super::attach::Attachment;
 use super::bars::{self, Spot, TabInfo};
 use super::menu::{self, Place};
 use super::pig;
+use super::select;
 use super::text;
 use super::theme::theme;
 use super::transcript::Ctx;
@@ -34,7 +36,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     let text_width = (area.width as usize).saturating_sub(5).max(1);
-    let rows = app.editor.rows(text_width).len().clamp(1, MAX_INPUT_ROWS);
+    let chips = chip_rows(&app.attachments, area.width.saturating_sub(4));
+    let rows = app.editor.rows(text_width).len().clamp(1, MAX_INPUT_ROWS) + chips.len();
     let [header, body, input, status, keys] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -56,13 +59,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         draw_transcript(frame, app, body);
     }
-    draw_input(frame, app, input);
+    draw_input(frame, app, input, &chips);
     draw_line(frame, app, status, |app, width| {
         let status = status_info(app);
         bars::status_line(&status, width)
     });
     draw_line(frame, app, keys, |_, width| bars::key_bar(width));
     draw_completions(frame, app, input);
+    draw_files(frame, app, input);
     draw_overlay(frame, app);
     if app.approval_visible() {
         let position = (0, app.approvals.len());
@@ -143,6 +147,8 @@ fn status_info(app: &App) -> bars::Status {
         tokens: used,
         cost,
         running: app.running_count(),
+        subagents: app.agents.tree(tab.root()).len().saturating_sub(1),
+        jobs: app.running_jobs(),
         spinner: app.spinner(),
         approvals: app.approvals.len(),
         web,
@@ -161,7 +167,16 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         area.y += 1;
         area.height = area.height.saturating_sub(1);
     }
-    let queued: Vec<String> = app.tab().queued.iter().take(3).cloned().collect();
+    let queued: Vec<String> = app
+        .tab()
+        .queued
+        .iter()
+        .take(3)
+        .map(|p| match p.attachments.len() {
+            0 => p.text.clone(),
+            n => format!("{} (+{n} attached)", text::first_line(&p.text)),
+        })
+        .collect();
     if !queued.is_empty() {
         let rows = queued.len() as u16;
         let bottom = Rect::new(
@@ -191,6 +206,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         ..area
     };
     app.geometry.transcript = content;
+    app.hits.push(content, Target::Transcript);
     let empty = app
         .agents
         .get(&shown)
@@ -220,11 +236,15 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected = tab.selected.filter(|_| {
         app.focus == Focus::Transcript || matches!(app.overlay, Some(Overlay::Menu(_)))
     });
+    let highlight = app
+        .selection
+        .as_ref()
+        .filter(|s| s.agent == shown && s.width == content.width as usize);
     let buffer = frame.buffer_mut();
     for (index, first_row) in transcript.visible(top..top + height) {
         let item = &transcript.items()[index];
         let start = first_row + usize::from(item.gap());
-        for (i, line) in item.lines().iter().enumerate() {
+        for (i, (line, text)) in item.lines().iter().zip(item.rows()).enumerate() {
             let row = start + i;
             if row < top || row >= top + height {
                 continue;
@@ -237,6 +257,16 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 buffer[(area.x, y)]
                     .set_symbol("▎")
                     .set_style(t.fg(t.accent));
+            }
+            if let Some(columns) = highlight.and_then(|s| s.columns(row)) {
+                let from = columns.start.max(text.inset);
+                let to = columns
+                    .end
+                    .min(select::text_end(line))
+                    .min(rect.width as usize);
+                for x in from..to {
+                    buffer[(rect.x + x as u16, y)].set_style(t.highlight());
+                }
             }
             app.hits.push(rect, Target::Entry { index, line: i });
         }
@@ -329,7 +359,10 @@ fn welcome_text(app: &App) -> Vec<(Line<'static>, Option<Action>)> {
         field("mode", mode.as_str().to_owned(), mode_style),
         Some(Action::CycleMode),
     ));
-    lines.push((field("cwd", short_path(&runtime.cwd), Style::new()), None));
+    lines.push((
+        field("cwd", short_path(&app.tab_cwd()), Style::new()),
+        Some(Action::FolderDialog),
+    ));
     for url in &app.session.web_urls {
         lines.push((
             field(
@@ -351,6 +384,7 @@ fn welcome_text(app: &App) -> Vec<(Line<'static>, Option<Action>)> {
         "Describe a task and press Enter; Shift+Enter or Ctrl+J adds a line.",
         "F4 picks a model, F5 cycles the mode, F9 opens the menus.",
         "/ lists commands, F1 shows every key, Ctrl+T opens a tab.",
+        "@ attaches a file, Ctrl+V an image; drag over text to copy it.",
     ] {
         lines.push((Line::styled(tip, t.dim()), None));
     }
@@ -584,7 +618,34 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_input(frame: &mut Frame, app: &mut App, area: Rect) {
+/// One attachment chip: which attachment, where it starts and its text.
+struct Chip {
+    index: usize,
+    x: u16,
+    label: String,
+}
+
+/// Attachments laid out as chips in rows of at most `width` columns.
+fn chip_rows(attachments: &[Attachment], width: u16) -> Vec<Vec<Chip>> {
+    let mut rows: Vec<Vec<Chip>> = Vec::new();
+    let mut x = 0;
+    for (index, attachment) in attachments.iter().enumerate() {
+        let room = (width as usize).saturating_sub(6).max(8);
+        let label = format!(" {} ", text::truncate(&attachment.label(), room));
+        let w = text::width(&label) as u16 + 2;
+        if rows.is_empty() || (x > 0 && x + w > width) {
+            rows.push(Vec::new());
+            x = 0;
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push(Chip { index, x, label });
+        }
+        x += w + 1;
+    }
+    rows
+}
+
+fn draw_input(frame: &mut Frame, app: &mut App, area: Rect, chips: &[Vec<Chip>]) {
     let t = theme();
     let focused = app.focus == Focus::Input && app.overlay.is_none() && !app.approval_visible();
     let border = if focused { t.fg(t.accent) } else { t.faint() };
@@ -592,15 +653,37 @@ fn draw_input(frame: &mut Frame, app: &mut App, area: Rect) {
         ""
     } else if app.busy() {
         " enter queues · esc stops "
+    } else if !app.attachments.is_empty() {
+        " enter send · ⌫ at the start drops the last file "
     } else {
-        " enter send · shift+enter newline "
+        " enter send · @ attach a file "
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title_bottom(Line::styled(hint, t.faint()).right_aligned());
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
+    for (y, row) in chips.iter().enumerate() {
+        let y = inner.y + y as u16;
+        for chip in row {
+            let x = inner.x + chip.x;
+            let chip_style = Style::new().bg(t.selection_bg);
+            let label_width = text::width(&chip.label) as u16;
+            let line = Line::from(vec![
+                Span::styled(chip.label.clone(), chip_style),
+                Span::styled("× ", chip_style.fg(t.dim)),
+            ]);
+            frame.render_widget(Paragraph::new(line), Rect::new(x, y, label_width + 2, 1));
+            app.hits.push(
+                Rect::new(x + label_width.saturating_sub(1), y, 3, 1),
+                Target::Chip(chip.index),
+            );
+        }
+    }
+    let chip_rows = (chips.len() as u16).min(inner.height.saturating_sub(1));
+    inner.y += chip_rows;
+    inner.height -= chip_rows;
     app.geometry.input = inner;
     app.hits.push(inner, Target::Input);
     if app.tab().read_only() {
@@ -627,13 +710,16 @@ fn draw_input(frame: &mut Frame, app: &mut App, area: Rect) {
         if focused {
             frame.set_cursor_position((inner.x + 2, inner.y));
         }
+        app.geometry.input_first = 0;
         return;
     }
     let rows = app.editor.rows(width);
     let (cursor_row, cursor_col) = app.editor.cursor_position(width);
     let height = inner.height as usize;
     let first = cursor_row.saturating_sub(height.saturating_sub(1));
+    app.geometry.input_first = first;
     let source = app.editor.text();
+    let selection = app.editor.selection();
     for (i, row) in rows.iter().enumerate().skip(first).take(height) {
         let starts_line = row.start == 0 || source.as_bytes()[row.start - 1] == b'\n';
         let prefix = if i == 0 {
@@ -643,12 +729,30 @@ fn draw_input(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Span::raw("  ")
         };
-        let line = Line::from(vec![
-            prefix,
-            Span::raw(source[row.start..row.end].to_owned()),
-        ]);
+        let mut spans = vec![prefix];
+        // The selected part of the row, if any, split out to highlight it.
+        let cut = selection
+            .as_ref()
+            .map(|s| {
+                (
+                    s.start.clamp(row.start, row.end),
+                    s.end.clamp(row.start, row.end),
+                )
+            })
+            .filter(|(from, to)| from < to);
+        match cut {
+            Some((from, to)) => {
+                spans.push(Span::raw(source[row.start..from].to_owned()));
+                spans.push(Span::styled(source[from..to].to_owned(), t.highlight()));
+                spans.push(Span::raw(source[to..row.end].to_owned()));
+            }
+            None => spans.push(Span::raw(source[row.start..row.end].to_owned())),
+        }
         let y = inner.y + (i - first) as u16;
-        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
     }
     if focused {
         let x = inner.x + 2 + cursor_col as u16;
@@ -702,12 +806,88 @@ fn draw_completions(frame: &mut Frame, app: &mut App, input: Rect) {
     }
 }
 
+/// The `@` file picker, above the prompt like the command completions.
+fn draw_files(frame: &mut Frame, app: &mut App, input: Rect) {
+    if app.file_query().is_none() || app.overlay.is_some() || app.approval_visible() {
+        return;
+    }
+    let t = theme();
+    let matches = app.file_matches();
+    let shown = matches.len().clamp(1, 8);
+    let selected = app.file_choice.min(matches.len().saturating_sub(1));
+    let first = selected.saturating_sub(shown - 1);
+    let width = input.width.min(80);
+    let height = shown as u16 + 2;
+    let area = Rect::new(input.x, input.y.saturating_sub(height), width, height);
+    frame.render_widget(Clear, area);
+    let folder = app.files.root.file_name().map_or_else(
+        || short_path(&app.files.root),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let room = (width as usize).saturating_sub(30);
+    let title = format!(" @ {} ", text::truncate(&folder, room));
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(t.faint())
+        .title(Line::styled(title, t.dim()))
+        .title_bottom(Line::styled(" tab attach · esc close ", t.faint()).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if matches.is_empty() {
+        let note = if app.files.list.is_none() {
+            " indexing files…"
+        } else {
+            " no matching files"
+        };
+        frame.render_widget(Paragraph::new(Line::styled(note, t.dim())), inner);
+        return;
+    }
+    for (row, (index, found)) in matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .enumerate()
+    {
+        let style = if index == selected {
+            t.selected()
+        } else {
+            Style::new()
+        };
+        let hit = if index == selected {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            t.fg(t.accent).add_modifier(Modifier::BOLD)
+        };
+        let mut spans = vec![Span::styled(" ", style)];
+        for (i, c) in found.path.chars().enumerate() {
+            let s = if found.positions.contains(&i) {
+                hit
+            } else {
+                style
+            };
+            spans.push(Span::styled(c.to_string(), s));
+        }
+        let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
+        let line = text::truncate_line(Line::from(spans), inner.width as usize);
+        frame.render_widget(Paragraph::new(line).style(style), rect);
+        app.hits.push(rect, Target::FileMatch(index));
+    }
+}
+
 fn draw_overlay(frame: &mut Frame, app: &mut App) {
     // Rebuilt every frame so status and activity stay live.
     if matches!(app.overlay, Some(Overlay::Agents(_))) {
         let rows = app.agent_rows();
         if let Some(Overlay::Agents(picker)) = &mut app.overlay {
             picker.set_rows(rows);
+        }
+    }
+    if matches!(app.overlay, Some(Overlay::AgentMap(_))) {
+        let nodes = app.agent_nodes();
+        let spinner = app.spinner();
+        if let Some(Overlay::AgentMap(map)) = &mut app.overlay {
+            map.set_nodes(nodes, spinner);
         }
     }
     let anchor = match &app.overlay {
@@ -722,6 +902,9 @@ fn draw_overlay(frame: &mut Frame, app: &mut App) {
     match &mut app.overlay {
         Some(Overlay::Menu(menu)) => menu::draw(frame, menu, anchor, hits),
         Some(Overlay::Models(p) | Overlay::Sessions(p) | Overlay::Agents(p)) => p.draw(frame, hits),
+        Some(Overlay::AgentMap(map)) => map.draw(frame, hits),
+        Some(Overlay::Folder(browser)) => browser.draw(frame, hits),
+        Some(Overlay::Jobs(view)) => view.draw(frame, &app.jobs, hits),
         Some(Overlay::Help(help)) => help.draw(frame, hits),
         Some(Overlay::Rename(rename)) => rename.draw(frame, hits),
         Some(Overlay::Update(dialog)) => dialog.draw(frame, &app.update, hits),
@@ -744,6 +927,8 @@ mod tests {
     use malac_core::{AgentSpec, Runtime};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use serde_json::json;
     use tokio::sync::{mpsc, oneshot};
 
@@ -793,18 +978,36 @@ mod tests {
         app
     }
 
-    fn render(app: &mut App, width: u16, height: u16) -> String {
+    fn draw_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         app.tick();
         terminal.draw(|frame| draw(frame, app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height)
+        terminal.backend().buffer().clone()
+    }
+
+    fn screen(buffer: &Buffer) -> String {
+        let area = buffer.area;
+        (0..area.height)
             .map(|y| {
-                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
                 row.trim_end().to_owned()
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        screen(&draw_buffer(app, width, height))
+    }
+
+    fn copied() -> Option<String> {
+        crate::tui::term::COPIED.with(|c| c.borrow_mut().take())
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(press(KeyCode::Char(c)), false);
+        }
     }
 
     fn emit(app: &mut App, event: Event) {
@@ -828,13 +1031,20 @@ mod tests {
         }
     }
 
-    fn click(app: &mut App, x: u16, y: u16, button: MouseButton) -> Option<Action> {
+    fn mouse(app: &mut App, kind: MouseEventKind, x: u16, y: u16) -> Option<Action> {
         app.on_mouse(MouseEvent {
-            kind: MouseEventKind::Down(button),
+            kind,
             column: x,
             row: y,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    /// Presses and releases; what either asks for.
+    fn click(app: &mut App, x: u16, y: u16, button: MouseButton) -> Option<Action> {
+        let pressed = mouse(app, MouseEventKind::Down(button), x, y);
+        let released = mouse(app, MouseEventKind::Up(button), x, y);
+        pressed.or(released)
     }
 
     /// Where `needle` is on screen.
@@ -892,6 +1102,397 @@ mod tests {
                 text: "All 46 tests pass.".into(),
             },
         );
+    }
+
+    fn answer(app: &mut App, prompt: &str, text: &str) {
+        emit(
+            app,
+            Event::UserMessage {
+                text: prompt.into(),
+            },
+        );
+        emit(app, Event::TextDelta { text: text.into() });
+        emit(
+            app,
+            Event::TurnFinished {
+                status: TurnStatus::Completed,
+                text: text.into(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn answers_lead_and_tool_calls_recede() {
+        let mut app = app();
+        a_turn(&mut app);
+        let buffer = draw_buffer(&mut app, 90, 24);
+        let frame = screen(&buffer);
+        println!("{frame}");
+        let t = theme();
+        let (x, y) = find(&frame, "All 46 tests pass.");
+        assert_eq!(buffer[(x - 2, y)].symbol(), "┃", "the answer has a rule");
+        assert_eq!(buffer[(x - 2, y)].fg, t.accent, "in the accent");
+        assert_eq!(
+            buffer[(x, y)].fg,
+            Color::Reset,
+            "its text is the plain foreground"
+        );
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+        let (x, y) = find(&frame, "Running the");
+        assert_eq!(buffer[(x - 2, y)].symbol(), "│");
+        assert_eq!(
+            buffer[(x - 2, y)].fg,
+            t.faint,
+            "text before the answer has a quiet rule"
+        );
+        assert_eq!(buffer[(x, y)].fg, Color::Reset);
+        let (tool_x, tool_y) = find(&frame, "bash cargo test");
+        assert_eq!(buffer[(tool_x, tool_y)].fg, t.dim, "tool calls are grey");
+        assert_eq!(tool_x, x + 2, "and nested under the text");
+        assert_eq!(
+            frame.lines().nth(tool_y as usize + 1),
+            Some(""),
+            "on one line"
+        );
+        let (x, y) = find(&frame, "› run the tests");
+        assert_eq!(buffer[(x + 2, y)].bg, t.code_bg, "prompts keep their band");
+    }
+
+    #[tokio::test]
+    async fn dragging_selects_text_and_copies_it() {
+        let mut app = app();
+        answer(
+            &mut app,
+            "why",
+            "The parser drops the last token when the input ends without a newline. \
+             A final check fixes it.\n\nRun `cargo test` to see.",
+        );
+        let frame = render(&mut app, 60, 24);
+        println!("{frame}");
+        let (x0, y0) = find(&frame, "parser");
+        let (x1, y1) = find(&frame, "final");
+        assert!(y1 > y0, "the paragraph wraps");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x0, y0);
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            x1 + 4,
+            y1,
+        );
+        let buffer = draw_buffer(&mut app, 60, 24);
+        let t = theme();
+        assert_eq!(
+            buffer[(x0, y0)].bg,
+            t.highlight_bg,
+            "the selection is highlighted"
+        );
+        assert_ne!(buffer[(x0 - 1, y0)].bg, t.highlight_bg);
+        assert_eq!(buffer[(x1 + 4, y1)].bg, t.highlight_bg);
+        assert_ne!(buffer[(x1 + 5, y1)].bg, t.highlight_bg);
+        assert_eq!(
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x1 + 4, y1),
+            None,
+            "a drag is not a click"
+        );
+        let text = copied().unwrap();
+        assert!(text.starts_with("parser drops the last token"), "{text}");
+        assert!(
+            text.ends_with("newline. A final"),
+            "wrapped rows join with a space: {text}"
+        );
+        assert!(render(&mut app, 60, 24).contains("✓ Copied"));
+
+        app.on_key(press(KeyCode::Esc), false);
+        assert!(app.selection.is_none(), "Esc clears the selection");
+
+        let (x, y) = find(&frame, "cargo");
+        click(&mut app, x + 1, y, MouseButton::Left);
+        click(&mut app, x + 1, y, MouseButton::Left);
+        assert_eq!(
+            copied().as_deref(),
+            Some("cargo"),
+            "a double click takes a word"
+        );
+        let (x, y) = find(&frame, "without");
+        click(&mut app, x, y, MouseButton::Left);
+        click(&mut app, x, y, MouseButton::Left);
+        click(&mut app, x, y, MouseButton::Left);
+        let line = copied().unwrap();
+        assert!(
+            line.starts_with("The parser") && line.ends_with("fixes it."),
+            "{line}"
+        );
+        click(&mut app, 0, 0, MouseButton::Left);
+        assert!(app.selection.is_none(), "a click elsewhere clears it");
+    }
+
+    #[tokio::test]
+    async fn dragging_past_the_top_scrolls_the_selection_along() {
+        let mut app = app();
+        let rows: Vec<String> = (1..=40).map(|i| format!("row {i}")).collect();
+        answer(&mut app, "count", &rows.join("\n\n"));
+        let frame = render(&mut app, 60, 24);
+        let first_shown = (1..=40)
+            .find(|i| frame.contains(&format!("row {i}\n")))
+            .unwrap();
+        let (x, y) = find(&frame, "row 40");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        let above = app.geometry.transcript.y - 1;
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x, above);
+        assert!(
+            app.tab().scroll.is_some(),
+            "dragging past the top scrolls up"
+        );
+        for _ in 0..6 {
+            app.tick();
+        }
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, above);
+        let text = copied().unwrap();
+        assert!(text.ends_with("row 39\n\nrow 40"), "{text}");
+        let earlier = format!("row {}", first_shown - 2);
+        assert!(
+            text.contains(&earlier),
+            "holding past the edge keeps scrolling: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prompt_selects_with_the_mouse_too() {
+        let mut app = app();
+        type_text(&mut app, "rename the parser module");
+        let frame = render(&mut app, 80, 20);
+        let (x, y) = find(&frame, "parser");
+        click(&mut app, x, y, MouseButton::Left);
+        click(&mut app, x, y, MouseButton::Left);
+        assert_eq!(copied().as_deref(), Some("parser"));
+        let buffer = draw_buffer(&mut app, 80, 20);
+        assert_eq!(buffer[(x, y)].bg, theme().highlight_bg);
+        type_text(&mut app, "lexer");
+        assert_eq!(
+            app.editor.text(),
+            "rename the lexer module",
+            "typing replaces it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_map_draws_the_tree() {
+        let mut app = app();
+        let root = app.tab().root().to_owned();
+        let runtime = app.session.runtime.clone();
+        let mut spawn = |label: &str, parent: &str, depth| {
+            let spec = AgentSpec {
+                label: label.into(),
+                parent: Some(parent.to_owned()),
+                depth,
+                ..Default::default()
+            };
+            let handle = runtime.spawn_agent(spec).unwrap();
+            app.on_bus(&Envelope {
+                agent: handle.id.clone(),
+                seq: 0,
+                at: chrono::Utc::now(),
+                event: Event::AgentStarted {
+                    label: label.into(),
+                    parent: Some(parent.to_owned()),
+                    model: "lora/fast".into(),
+                    cwd: "/work".into(),
+                },
+            });
+            handle.id
+        };
+        let lister = spawn("lister", &root, 1);
+        let grep = spawn("grep", &lister, 2);
+        let tester = spawn("tester", &root, 1);
+        let (reply, _answer) = oneshot::channel();
+        app.on_approval(Pending {
+            request: PermissionRequest {
+                id: "r1".into(),
+                agent: grep.clone(),
+                agent_label: "grep".into(),
+                tool: "bash".into(),
+                summary: "rg parse".into(),
+                input: json!({"command": "rg parse"}),
+            },
+            reply,
+        });
+        app.approvals_hidden = true;
+        let frame = render(&mut app, 120, 34);
+        assert!(frame.contains("3 subagents"), "the footer counts them");
+        let (x, y) = find(&frame, "3 subagents");
+        let action = click(&mut app, x, y, MouseButton::Left).unwrap();
+        assert_eq!(action, Action::AgentMap);
+        app.perform(action).await;
+        let frame = render(&mut app, 120, 34);
+        println!("{frame}");
+        assert!(frame.contains("Agent map"));
+        assert!(frame.contains(" main "));
+        assert!(frame.contains(" tab 1 "));
+        assert!(frame.contains(" lister "));
+        assert!(frame.contains(" d1 "));
+        assert!(frame.contains(" d2 "));
+        assert!(
+            frame.contains("? awaiting approval"),
+            "grep waits for approval"
+        );
+        assert!(frame.contains("┃──┬──▸│"), "children hang off their parent");
+        assert!(frame.contains("│─────▸│"));
+        let (lister_x, lister_y) = find(&frame, " lister ");
+        let (tester_x, tester_y) = find(&frame, " tester ");
+        let (grep_x, _) = find(&frame, " grep ");
+        assert_eq!(lister_x, tester_x, "siblings share a column");
+        assert!(tester_y > lister_y && grep_x > lister_x);
+        assert!(frame.contains("┏"), "the shown agent is selected");
+
+        click(&mut app, tester_x + 2, tester_y + 2, MouseButton::Left);
+        let action = click(&mut app, tester_x + 2, tester_y + 2, MouseButton::Left);
+        assert_eq!(
+            action,
+            Some(Action::OpenAgent(tester.clone())),
+            "a double click opens"
+        );
+        assert!(app.overlay.is_none());
+        app.perform(Action::AgentMap).await;
+        render(&mut app, 120, 34);
+        app.on_key(press(KeyCode::Right), false);
+        assert_eq!(
+            app.on_key(press(KeyCode::Char('t')), false),
+            Some(Action::PinAgent(lister.clone()))
+        );
+        app.perform(Action::AgentMap).await;
+        assert_eq!(
+            app.on_key(press(KeyCode::F(3)), false),
+            Some(Action::AgentList)
+        );
+        app.perform(Action::AgentList).await;
+        assert!(matches!(app.overlay, Some(Overlay::Agents(_))));
+        app.overlay = None;
+        key(&mut app, KeyCode::F(3)).await;
+        assert!(
+            matches!(app.overlay, Some(Overlay::Agents(_))),
+            "F3 opens the last view"
+        );
+    }
+
+    #[tokio::test]
+    async fn at_attaches_files_from_the_folder() {
+        let mut app = app();
+        let root = app.tab_cwd();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("target/main.o"), "").unwrap();
+        std::fs::write(root.join("notes.md"), "# notes\n").unwrap();
+        app.files = crate::tui::app::FileIndex {
+            root: root.clone(),
+            list: Some(crate::tui::files::index(&root)),
+            loading: false,
+        };
+        type_text(&mut app, "explain @mai");
+        let frame = render(&mut app, 90, 24);
+        println!("{frame}");
+        assert!(frame.contains("src/main.rs"));
+        assert!(!frame.contains("target/main.o"), ".gitignore is honored");
+        app.on_key(press(KeyCode::Tab), false);
+        assert_eq!(app.editor.text(), "explain ");
+        let frame = render(&mut app, 90, 24);
+        println!("{frame}");
+        assert!(
+            frame.contains("▤ src/main.rs · 13 B ×"),
+            "the file is a chip"
+        );
+
+        app.on_paste(&root.join("notes.md").display().to_string());
+        assert_eq!(app.attachments.len(), 2, "a dropped path attaches");
+        assert_eq!(app.editor.text(), "explain ");
+        let frame = render(&mut app, 90, 24);
+        let (x, y) = find(&frame, "notes.md · 8 B ×");
+        click(&mut app, x + 14, y, MouseButton::Left);
+        assert_eq!(app.attachments.len(), 1, "clicking × removes a chip");
+        app.editor.set_text("");
+        app.on_key(press(KeyCode::Backspace), false);
+        assert!(
+            app.attachments.is_empty(),
+            "Backspace at the start removes one"
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_a_folder_opens_a_tab_there() {
+        let mut app = app();
+        let dir = app.tab_cwd().join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        type_text(&mut app, "/cd");
+        let action = app.on_key(press(KeyCode::Enter), false).unwrap();
+        assert_eq!(action, Action::FolderDialog);
+        app.perform(action).await;
+        let frame = render(&mut app, 100, 30);
+        println!("{frame}");
+        assert!(frame.contains("Open folder"));
+        assert!(frame.contains("Work in this folder"));
+        assert!(frame.contains("elsewhere/"));
+        type_text(&mut app, "elsew");
+        app.on_key(press(KeyCode::Enter), false);
+        let action = app.on_key(press(KeyCode::Enter), false).unwrap();
+        assert_eq!(action, Action::OpenFolder(dir.clone()));
+        app.perform(action).await;
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tab_cwd(), dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_commands_become_jobs() {
+        use std::os::unix::process::CommandExt;
+        let mut app = app();
+        let log = scratch_home().join(format!("job-{}.log", std::process::id()));
+        std::fs::write(&log, "compiling\nlistening on :3000\n").unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let input = json!({"command": "npm run dev", "background": true});
+        emit(
+            &mut app,
+            Event::ToolStarted {
+                call_id: "j1".into(),
+                tool: "bash".into(),
+                summary: "npm run dev".into(),
+                input,
+            },
+        );
+        emit(
+            &mut app,
+            Event::ToolFinished {
+                call_id: "j1".into(),
+                tool: "bash".into(),
+                output: format!(
+                    "Started in background (pid {}). Output is written to {}",
+                    child.id(),
+                    log.display()
+                ),
+                is_error: false,
+                millis: 5,
+            },
+        );
+        let frame = render(&mut app, 120, 30);
+        let (x, y) = find(&frame, "1 job");
+        let action = click(&mut app, x, y, MouseButton::Left).unwrap();
+        assert_eq!(action, Action::Jobs);
+        app.perform(action).await;
+        let frame = render(&mut app, 120, 30);
+        println!("{frame}");
+        assert!(frame.contains("running"));
+        assert!(frame.contains("npm run dev"));
+        assert!(frame.contains("listening on :3000"), "the log's tail");
+        let action = app.on_key(press(KeyCode::Char('k')), false).unwrap();
+        assert_eq!(action, Action::StopJob("j1".into()));
+        app.perform(action).await;
+        assert_eq!(app.jobs[0].status, crate::tui::jobs::JobStatus::Stopped);
+        child.wait().unwrap();
+        std::fs::remove_file(log).unwrap();
     }
 
     #[tokio::test]
@@ -1067,7 +1668,8 @@ mod tests {
         app.send("second".into());
         app.send("third".into());
         assert!(app.busy());
-        assert_eq!(app.tab().queued, ["second", "third"]);
+        let queued: Vec<&str> = app.tab().queued.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(queued, ["second", "third"]);
         let frame = render(&mut app, 90, 24);
         assert!(frame.contains("› second  queued"), "{frame}");
         app.perform(Action::Stop).await;

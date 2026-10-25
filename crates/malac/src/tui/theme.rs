@@ -22,6 +22,8 @@ pub struct Theme {
     /// The header and status bars.
     pub bar_bg: Color,
     pub selection_bg: Color,
+    /// Text selected with the mouse: a dark green, so it reads as the accent.
+    pub highlight_bg: Color,
     /// Labels in the function-key bar.
     pub key_bg: Color,
     pub truecolor: bool,
@@ -48,6 +50,7 @@ impl Theme {
             code_bg: pick((0x26, 0x26, 0x26), 235),
             bar_bg: pick((0x2e, 0x2e, 0x2e), 236),
             selection_bg: pick((0x3a, 0x3a, 0x3a), 237),
+            highlight_bg: pick((0x2c, 0x4f, 0x36), 22),
             key_bg: pick((0x58, 0x58, 0x58), 240),
             truecolor,
             no_color,
@@ -76,6 +79,15 @@ impl Theme {
             Style::new().add_modifier(Modifier::REVERSED)
         } else {
             Style::new().bg(self.accent).fg(Color::Black)
+        }
+    }
+
+    /// Text selected with the mouse.
+    pub fn highlight(&self) -> Style {
+        if self.no_color {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().bg(self.highlight_bg)
         }
     }
 

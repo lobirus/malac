@@ -126,7 +126,7 @@ pub fn compaction_message(summary: &str) -> Message {
     ))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     #[serde(flatten)]
     pub meta: SessionMeta,
@@ -164,6 +164,18 @@ pub fn list(include_subagents: bool, limit: usize) -> Result<Vec<SessionSummary>
         });
     }
     Ok(out)
+}
+
+/// One session's summary, read from the head of its file.
+pub fn summary(id: &str) -> Option<SessionSummary> {
+    let path = session_path(id).ok()?;
+    let updated = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let (meta, title) = read_head(&path)?;
+    Some(SessionSummary {
+        meta,
+        title,
+        updated: updated.into(),
+    })
 }
 
 fn read_head(path: &PathBuf) -> Option<(SessionMeta, String)> {

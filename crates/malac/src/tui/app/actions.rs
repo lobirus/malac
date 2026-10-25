@@ -7,7 +7,17 @@ use super::*;
 pub enum Action {
     Help,
     Copy,
+    /// The agent list or map, whichever was used last.
     Agents,
+    AgentList,
+    AgentMap,
+    FolderDialog,
+    OpenFolder(PathBuf),
+    Jobs,
+    StopJob(String),
+    /// Attach the clipboard's image.
+    PasteImage,
+    CopySelection,
     PickModel,
     CycleMode,
     TabMenu,
@@ -62,6 +72,7 @@ impl App {
                 Item::new("New tab", 'n', Action::NewTab).hint("^T"),
                 Item::new("Rename tab…", 'r', Action::RenameTab),
                 Item::new("Open session…", 'o', Action::Sessions).hint("F7"),
+                Item::new("Open folder…", 'f', Action::FolderDialog).hint("/cd"),
                 Item::new("Compact conversation", 'c', Action::Compact).enabled(!read_only),
                 Item::new("Start over", 's', Action::Clear).enabled(!read_only),
                 Item::new("Close tab", 't', Action::CloseTab(self.active))
@@ -107,8 +118,13 @@ impl App {
                 Item::new("Cycle", 'c', Action::CycleMode).hint("F5"),
             ],
             3 => {
+                let (list, map) = match self.agents_view {
+                    AgentsView::List => ("F3", ""),
+                    AgentsView::Map => ("", "F3"),
+                };
                 let mut items = vec![
-                    Item::new("Agents…", 'a', Action::Agents).hint("F3"),
+                    Item::new("Agent list…", 'l', Action::AgentList).hint(list),
+                    Item::new("Agent map…", 'm', Action::AgentMap).hint(map),
                     Item::new("Back to parent", 'b', Action::Back)
                         .hint("Esc")
                         .enabled(!self.tab().view.is_empty()),
@@ -136,6 +152,7 @@ impl App {
                 Item::new("Thinking", 't', Action::ToggleThinking)
                     .checked(self.agents.show_thinking),
                 Item::separator(),
+                Item::new("Jobs…", 'j', Action::Jobs).hint("/jobs"),
                 Item::new("Usage and cost", 'u', Action::ShowCost),
                 Item::new("MCP servers", 'c', Action::ShowMcp),
                 Item::new("Memories", 'e', Action::ShowMemory),
@@ -385,15 +402,38 @@ impl App {
         tab.view = path;
     }
 
-    fn copy(&mut self, text: &str) {
+    pub(super) fn copy(&mut self, text: &str) {
         if text.is_empty() {
             self.flash("nothing to copy");
             return;
         }
         term::copy(text);
         let lines = text.lines().count();
-        let noun = if lines == 1 { "line" } else { "lines" };
-        self.flash(format!("copied {lines} {noun}"));
+        self.flash_ok(match (lines, text.chars().count()) {
+            (0 | 1, 1) => "Copied 1 character".to_owned(),
+            (0 | 1, chars) => format!("Copied {chars} characters"),
+            (lines, _) => format!("Copied {lines} lines"),
+        });
+    }
+
+    fn open_agent_list(&mut self) {
+        self.agents_view = AgentsView::List;
+        let picker = Picker::new(
+            PickKind::Agent,
+            "Agents",
+            "enter open · tab open in a new tab · ^X stop · F3 map · esc close",
+            self.agent_rows(),
+        );
+        self.overlay = Some(Overlay::Agents(picker));
+    }
+
+    fn open_agent_map(&mut self) {
+        self.agents_view = AgentsView::Map;
+        let shown = self.tab().shown().to_owned();
+        self.overlay = Some(Overlay::AgentMap(AgentMap::new(
+            self.agent_nodes(),
+            Some(shown),
+        )));
     }
 
     fn usage_lines(&self) -> Vec<Line<'static>> {
@@ -474,15 +514,27 @@ impl App {
                     .to_owned();
                 self.copy(&answer);
             }
-            Action::Agents => {
-                let picker = Picker::new(
-                    PickKind::Agent,
-                    "Agents",
-                    "enter open · tab open in a new tab · ^X stop · esc close",
-                    self.agent_rows(),
-                );
-                self.overlay = Some(Overlay::Agents(picker));
+            Action::Agents => match self.agents_view {
+                AgentsView::List => self.open_agent_list(),
+                AgentsView::Map => self.open_agent_map(),
+            },
+            Action::AgentList => self.open_agent_list(),
+            Action::AgentMap => self.open_agent_map(),
+            Action::FolderDialog => {
+                let browser = FolderBrowser::new(&self.tab_cwd(), self.recent_dirs());
+                self.overlay = Some(Overlay::Folder(browser));
             }
+            Action::OpenFolder(dir) => self.open_folder(&dir),
+            Action::Jobs => self.overlay = Some(Overlay::Jobs(JobsView::default())),
+            Action::StopJob(id) => self.stop_job(&id),
+            Action::PasteImage => {
+                if self.tab().read_only() {
+                    self.flash("this tab watches a subagent; attach to a session tab");
+                } else {
+                    self.paste_image();
+                }
+            }
+            Action::CopySelection => self.copy_selection(),
             Action::PickModel => self.open_models(),
             Action::CycleMode => {
                 let next = match runtime.policy.mode() {
@@ -556,8 +608,7 @@ impl App {
                     self.flash("this is the last tab · F10 quits");
                 } else if index < self.tabs.len() {
                     if index != self.active {
-                        let draft = self.editor.text().to_owned();
-                        self.tabs[self.active].draft = draft;
+                        self.stash_draft();
                     }
                     self.tabs.remove(index);
                     self.active = if self.active > index {
@@ -565,8 +616,7 @@ impl App {
                     } else {
                         self.active.min(self.tabs.len() - 1)
                     };
-                    let draft = std::mem::take(&mut self.tabs[self.active].draft);
-                    self.editor.set_text(&draft);
+                    self.restore_draft();
                     self.switch_tab(self.active);
                 }
             }
@@ -607,7 +657,10 @@ impl App {
             }
             Action::SetModel(spec) => self.tab().handle.set_model(&spec),
             Action::Resume(id) => self.open_session(&id),
-            Action::OpenAgent(id) => self.open_agent(&id),
+            Action::OpenAgent(id) => {
+                self.selection = None;
+                self.open_agent(&id);
+            }
             Action::PinAgent(id) => {
                 if let Some(handle) = runtime.agent(&id) {
                     let index = match self.tabs.iter().position(|t| t.root() == id) {
@@ -619,6 +672,7 @@ impl App {
             }
             Action::StopAgent(id) => runtime.cancel_tree(&id),
             Action::Back => {
+                self.selection = None;
                 let tab = self.tab_mut();
                 tab.view.pop();
                 tab.scroll = None;

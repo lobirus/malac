@@ -2,9 +2,11 @@
 //! [`Runtime`], spawn agents on it and render the [`event`] stream.
 
 pub mod agent;
+pub mod attach;
 pub mod catalog;
 pub mod config;
 pub mod event;
+pub mod jobs;
 pub mod mcp;
 pub mod memory;
 pub mod message;
@@ -20,4 +22,4 @@ pub use agent::{AgentHandle, AgentSnapshot, AgentStatus};
 pub use config::Config;
 pub use event::{Envelope, Event};
 pub use message::{Block, Message};
-pub use runtime::{AgentSpec, Runtime};
+pub use runtime::{AgentSpec, Host, Runtime};

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use futures::future::join_all;
@@ -14,7 +14,7 @@ use crate::tools::{McpTool, Tool};
 
 pub const CONTROL_SERVER: &str = "control";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
     pub name: String,
     pub tools: usize,
@@ -26,12 +26,132 @@ pub struct ServerStatus {
 pub struct Connected {
     pub tools: Vec<Arc<dyn Tool>>,
     pub servers: Vec<ServerStatus>,
-    pub clients: Vec<Arc<Client>>,
 }
 
-pub async fn connect_all(config: &Config) -> Connected {
-    // Each server has candidate endpoints tried in order; only the control
-    // service has more than one.
+/// Connections to MCP servers, keyed by each server's configuration, so the
+/// runtimes of one process (the daemon's tabs) start every server once and
+/// share it: one control service, one browser per profile.
+#[derive(Default)]
+pub struct McpPool {
+    slots: Mutex<HashMap<String, Slot>>,
+}
+
+type Slot = Arc<tokio::sync::Mutex<Option<Live>>>;
+
+#[derive(Clone)]
+struct Live {
+    name: String,
+    client: Arc<Client>,
+    tools: Vec<malac_mcp::Tool>,
+    prefix: bool,
+}
+
+impl McpPool {
+    /// Connects the servers `config` enables, reusing live connections.
+    /// Failed connections are retried on the next call.
+    pub async fn connect_all(&self, config: &Config) -> Connected {
+        let attempts = targets(config).into_iter().map(|(name, candidates)| {
+            let key = format!(
+                "{name}\n{}",
+                serde_json::to_string(&candidates).unwrap_or_default()
+            );
+            let slot = self.slot(&key);
+            async move {
+                let mut slot = slot.lock().await;
+                if let Some(live) = slot.as_ref() {
+                    return (name, Ok(live.clone()));
+                }
+                let mut last_error = None;
+                for server in candidates {
+                    match connect(&server).await {
+                        Ok((client, tools)) => {
+                            let live = Live {
+                                name: name.clone(),
+                                client: Arc::new(client),
+                                tools,
+                                prefix: server.prefix,
+                            };
+                            *slot = Some(live.clone());
+                            return (name, Ok(live));
+                        }
+                        Err(err) => last_error = Some(err),
+                    }
+                }
+                (
+                    name,
+                    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no endpoint"))),
+                )
+            }
+        });
+
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut servers = Vec::new();
+        for (name, result) in join_all(attempts).await {
+            match result {
+                Ok(live) => {
+                    for tool in &live.tools {
+                        tools.push(Arc::new(McpTool::new(
+                            &name,
+                            live.client.clone(),
+                            tool.clone(),
+                            live.prefix,
+                        )));
+                    }
+                    servers.push(ServerStatus {
+                        instructions: live.client.server_info().instructions.clone(),
+                        name,
+                        tools: live.tools.len(),
+                        error: None,
+                    });
+                }
+                Err(err) => servers.push(ServerStatus {
+                    name,
+                    tools: 0,
+                    error: Some(format!("{err:#}")),
+                    instructions: None,
+                }),
+            }
+        }
+        Connected { tools, servers }
+    }
+
+    /// A connected server by name, e.g. [`CONTROL_SERVER`].
+    pub fn client(&self, name: &str) -> Option<Arc<Client>> {
+        let slots: Vec<Slot> = self.slots.lock().unwrap().values().cloned().collect();
+        slots.iter().find_map(|slot| {
+            let live = slot.try_lock().ok()?;
+            live.as_ref()
+                .filter(|l| l.name == name)
+                .map(|l| l.client.clone())
+        })
+    }
+
+    /// Closes every connection so servers can clean up (the control service
+    /// closes the browsers it launched).
+    pub async fn close(&self) {
+        let slots: Vec<Slot> = self.slots.lock().unwrap().drain().map(|(_, s)| s).collect();
+        let mut clients = Vec::new();
+        for slot in slots {
+            if let Some(live) = slot.lock().await.take() {
+                clients.push(live.client);
+            }
+        }
+        join_all(clients.iter().map(|c| c.close())).await;
+    }
+
+    fn slot(&self, key: &str) -> Slot {
+        self.slots
+            .lock()
+            .unwrap()
+            .entry(key.to_owned())
+            .or_default()
+            .clone()
+    }
+}
+
+/// Each enabled server with its candidate endpoints, tried in order; only
+/// the control service has more than one.
+fn targets(config: &Config) -> Vec<(String, Vec<McpServerConfig>)> {
     let mut targets: Vec<(String, Vec<McpServerConfig>)> = config
         .mcp
         .iter()
@@ -44,53 +164,7 @@ pub async fn connect_all(config: &Config) -> Connected {
             targets.push((CONTROL_SERVER.into(), candidates));
         }
     }
-
-    let attempts = targets.into_iter().map(|(name, candidates)| async move {
-        let mut last_error = None;
-        for server in candidates {
-            match connect(&server).await {
-                Ok(connected) => return (name, Ok((server.prefix, connected))),
-                Err(err) => last_error = Some(err),
-            }
-        }
-        (
-            name,
-            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no endpoint"))),
-        )
-    });
-
-    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let mut servers = Vec::new();
-    let mut clients = Vec::new();
-    for (name, result) in join_all(attempts).await {
-        match result {
-            Ok((prefix, (client, remote_tools))) => {
-                let client = Arc::new(client);
-                clients.push(client.clone());
-                let count = remote_tools.len();
-                for tool in remote_tools {
-                    tools.push(Arc::new(McpTool::new(&name, client.clone(), tool, prefix)));
-                }
-                servers.push(ServerStatus {
-                    instructions: client.server_info().instructions.clone(),
-                    name,
-                    tools: count,
-                    error: None,
-                });
-            }
-            Err(err) => servers.push(ServerStatus {
-                name,
-                tools: 0,
-                error: Some(format!("{err:#}")),
-                instructions: None,
-            }),
-        }
-    }
-    Connected {
-        tools,
-        servers,
-        clients,
-    }
+    targets
 }
 
 async fn connect(server: &McpServerConfig) -> Result<(Client, Vec<malac_mcp::Tool>)> {

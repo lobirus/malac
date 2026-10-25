@@ -1,35 +1,40 @@
-//! Web UI: an HTTP server with a WebSocket event stream.
+//! Web UI and daemon API: an HTTP server with a WebSocket message stream.
 //!
-//! Every API call needs the per-run token (bearer header or `token` query
-//! parameter), and requests must name a loopback host, which blocks DNS
-//! rebinding when bound to localhost.
+//! Every API call needs the token (bearer header or `token` query
+//! parameter). Requests from this machine must name a loopback host, which
+//! blocks DNS rebinding; other machines can connect only when the server
+//! listens on all interfaces. The protocol is described in `docs/protocol.md`.
 
+mod fs;
 mod settings;
 
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
+use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Args;
 use futures::{SinkExt, StreamExt};
-use malac_core::permission::{Approver, Decision, Mode, PermissionRequest};
-use malac_core::{AgentSpec, AgentStatus, Block, Runtime, session};
+use malac_core::permission::Approver;
+use malac_core::{Runtime, session, update};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::SessionOptions;
-use crate::repl::{load_config, working_dir};
+use crate::client::{self, Client};
+use crate::daemon::hub::Conn;
+use crate::daemon::{Hub, HubOptions, ServeArgs};
+use crate::protocol::{Command, Request as ClientRequest, ServerMessage, TabSpec};
+use crate::repl::working_dir;
+use settings::ApiError;
 
 const INDEX_HTML: &str = include_str!("../../../../web/index.html");
 const APP_JS: &str = include_str!("../../../../web/app.js");
@@ -48,61 +53,57 @@ const GEIST_MONO_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/GeistMono-
 
 #[derive(Args)]
 pub struct WebArgs {
-    /// Bind address (default 127.0.0.1, or 0.0.0.0 with --remote).
-    #[arg(long)]
-    host: Option<String>,
-    /// Accept connections from other machines. The token is still required.
-    #[arg(long)]
-    remote: bool,
-    /// Port to listen on; 0 picks a free one.
-    #[arg(long)]
-    port: Option<u16>,
-    /// Use this token instead of a random one.
-    #[arg(long, env = "MALAC_WEB_TOKEN", hide_env_values = true)]
-    token: Option<String>,
+    #[command(flatten)]
+    serve: ServeArgs,
     /// Open the UI in the default browser.
     #[arg(long)]
     open: bool,
-    /// Print one JSON line with the URL and token once listening (for editor integrations).
+    /// Print one JSON line with the URL and token, then stay attached until
+    /// stopped (for editor integrations).
     #[arg(long)]
     json_ready: bool,
     #[command(flatten)]
     session: SessionOptions,
 }
 
+/// `malac web`: makes sure the daemon runs and prints or opens its URL.
+/// With `--cwd` (as the editor extension passes), the daemon's current
+/// workspace gets a tab for that directory and makes it active.
 pub async fn run(args: WebArgs) -> Result<()> {
-    let cwd = working_dir(args.session.cwd.as_ref())?;
-    let config = load_config(&args.session, &cwd)?;
-    config.main_model()?;
-    let remote = args.remote || config.web.remote;
-    let host = match &args.host {
-        Some(host) => host.clone(),
-        None if remote => "0.0.0.0".into(),
-        None => config.web.host.clone(),
+    let file = client::ensure_daemon(&args.serve).await?;
+    if args.serve.token.as_ref().is_some_and(|t| *t != file.token) {
+        eprintln!("! the daemon was already running with its own token; use the URL below");
+    }
+    let (client, mut events, snapshot) = Client::connect(&file).await?;
+    if args.serve.remote && !snapshot.daemon.remote {
+        eprintln!(
+            "! the daemon already runs for this machine only; `malac daemon restart --remote` opens it up"
+        );
+    }
+    if let Some(cwd) = &args.session.cwd {
+        let spec = TabSpec {
+            cwd: working_dir(Some(cwd))?,
+            options: args.session.tab_options(),
+            reuse: true,
+            ..Default::default()
+        };
+        client.request(Command::TabCreate(spec)).await?;
+    }
+    let urls = if file.urls.is_empty() {
+        vec![file.web_url()]
+    } else {
+        file.urls.clone()
     };
-    let port = args.port.unwrap_or(config.web.port);
-    let runtime = start_runtime(config, cwd.clone()).await?;
-    let approver = Arc::new(WebApprover::default());
-    runtime.set_approver(approver.clone());
-    let reload = Reload {
-        options: args.session.clone(),
-        cwd,
-        lock: tokio::sync::Mutex::new(()),
-    };
-    let token = args.token.clone().unwrap_or_else(random_token);
-    let server = Server::bind(runtime, approver, &host, port, false, token, Some(reload)).await?;
-
-    let urls = server.urls();
     if args.json_ready {
         println!(
             "{}",
-            json!({ "url": server.base_url(), "token": server.token, "urls": urls })
+            json!({ "url": file.url, "token": file.token, "urls": urls })
         );
     } else {
         for url in &urls {
             eprintln!("malac web UI: {url}");
         }
-        if !server.loopback_only() {
+        if snapshot.daemon.remote {
             eprintln!(
                 "! listening on all interfaces over plain HTTP: anyone with the URL can control malac"
             );
@@ -111,29 +112,15 @@ pub async fn run(args: WebArgs) -> Result<()> {
     if args.open {
         open_browser(&urls[0]);
     }
-    let state = server.state.clone();
-    // Open WebSockets would hold a graceful shutdown forever; just stop serving.
-    let result = tokio::select! {
-        result = server.serve() => result,
-        _ = tokio::signal::ctrl_c() => Ok(()),
-    };
-    state.runtime().shutdown().await;
-    result
-}
-
-async fn start_runtime(config: malac_core::Config, cwd: PathBuf) -> Result<Arc<Runtime>> {
-    let runtime = Runtime::new(config, cwd)?;
-    runtime.start_update_check();
-    for server in runtime.connect_mcp().await {
-        if let Some(err) = server.error {
-            eprintln!(
-                "! MCP server `{}` unavailable: {}",
-                server.name,
-                err.lines().next().unwrap_or_default()
-            );
+    if args.json_ready {
+        // Editors keep this process while their panel is open; as a
+        // connected client it also keeps the daemon from idling out.
+        tokio::select! {
+            _ = async { while events.recv().await.is_some() {} } => {}
+            _ = tokio::signal::ctrl_c() => {}
         }
     }
-    Ok(runtime)
+    Ok(())
 }
 
 /// Serves the UI for a terminal session's runtime. Falls back to a free port
@@ -144,17 +131,17 @@ pub async fn spawn_for(
     host: &str,
     port: u16,
 ) -> Result<(Vec<String>, Arc<dyn Approver>)> {
-    let approver = Arc::new(WebApprover::default());
-    let server = Server::bind(
+    let remote = host.parse::<IpAddr>().is_ok_and(|ip| !ip.is_loopback());
+    let hub = Hub::attached(
         runtime,
-        approver.clone(),
-        host,
-        port,
-        true,
-        random_token(),
-        None,
-    )
-    .await?;
+        HubOptions {
+            remote,
+            idle_minutes: 0,
+            browse_root: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+        },
+    );
+    let approver = hub.approver();
+    let server = Server::bind(hub, host, port, true, random_token()).await?;
     let urls = server.urls();
     tokio::spawn(async move {
         if let Err(err) = server.serve().await {
@@ -164,23 +151,21 @@ pub async fn spawn_for(
     Ok((urls, approver))
 }
 
-struct Server {
+/// A bound listener with its routes, ready to serve a [`Hub`].
+pub struct Server {
     listener: tokio::net::TcpListener,
     router: Router,
     addr: SocketAddr,
     token: String,
-    state: Arc<AppState>,
 }
 
 impl Server {
-    async fn bind(
-        runtime: Arc<Runtime>,
-        approver: Arc<WebApprover>,
+    pub async fn bind(
+        hub: Arc<Hub>,
         host: &str,
         port: u16,
         any_port_if_taken: bool,
         token: String,
-        reload: Option<Reload>,
     ) -> Result<Self> {
         let listener = match tokio::net::TcpListener::bind((host, port)).await {
             Ok(listener) => listener,
@@ -190,15 +175,10 @@ impl Server {
             Err(err) => return Err(err).with_context(|| format!("cannot listen on {host}:{port}")),
         };
         let addr: SocketAddr = listener.local_addr()?;
-        let (runtime, _) = watch::channel(runtime);
-        let (notices, _) = broadcast::channel(64);
         let state = Arc::new(AppState {
-            runtime,
-            notices,
-            approver,
+            hub,
             token: token.clone(),
-            loopback_only: addr.ip().is_loopback(),
-            reload,
+            url: base_url(addr),
         });
         let api = Router::new()
             .route("/api/state", get(api_state))
@@ -207,6 +187,14 @@ impl Server {
                 get(api_session).delete(settings::delete_session),
             )
             .route("/api/ws", get(api_ws))
+            .route("/api/daemon", get(api_daemon))
+            .route("/api/daemon/stop", post(api_daemon_stop))
+            .route("/api/snapshot", get(api_snapshot))
+            .route("/api/command", post(api_command))
+            .route("/api/workspaces", get(api_workspaces))
+            .route("/api/jobs", get(api_jobs))
+            .route("/api/jobs/{id}/output", get(api_job_output))
+            .route("/api/fs", get(fs::list))
             .merge(settings::routes())
             .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
         let router = Router::new()
@@ -252,32 +240,23 @@ impl Server {
                 get(|| async { font("fonts/GeistMono-Regular.woff2", GEIST_MONO_WOFF2) }),
             )
             .merge(api)
-            .layer(middleware::from_fn_with_state(state.clone(), check_host))
-            .with_state(state.clone());
+            .layer(middleware::from_fn(check_host))
+            .with_state(state);
         Ok(Self {
             listener,
             router,
             addr,
             token,
-            state,
         })
     }
 
-    fn loopback_only(&self) -> bool {
-        self.state.loopback_only
-    }
-
-    fn base_url(&self) -> String {
-        let host = if self.addr.ip().is_unspecified() {
-            "127.0.0.1".to_owned()
-        } else {
-            self.addr.ip().to_string()
-        };
-        format!("http://{host}:{}", self.addr.port())
+    /// The address local clients use, e.g. `http://127.0.0.1:7700`.
+    pub fn base_url(&self) -> String {
+        base_url(self.addr)
     }
 
     /// The local URL, plus the LAN URL when listening on all interfaces.
-    fn urls(&self) -> Vec<String> {
+    pub fn urls(&self) -> Vec<String> {
         let mut urls = vec![format!("{}/?token={}", self.base_url(), self.token)];
         if self.addr.ip().is_unspecified() {
             if let Some(ip) = lan_address() {
@@ -291,10 +270,26 @@ impl Server {
         urls
     }
 
-    async fn serve(self) -> Result<()> {
-        axum::serve(self.listener, self.router).await?;
+    /// Serves until the future is dropped. Open WebSockets would hold a
+    /// graceful shutdown forever, so callers just stop serving.
+    pub async fn serve(self) -> Result<()> {
+        axum::serve(
+            self.listener,
+            self.router
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
+}
+
+fn base_url(addr: SocketAddr) -> String {
+    let host = if addr.ip().is_unspecified() {
+        "127.0.0.1".to_owned()
+    } else {
+        addr.ip().to_string()
+    };
+    format!("http://{host}:{}", addr.port())
 }
 
 /// The address of the interface used for outbound traffic. Connecting a UDP
@@ -305,57 +300,10 @@ fn lan_address() -> Option<IpAddr> {
     Some(socket.local_addr().ok()?.ip())
 }
 
-/// How to rebuild the runtime after a settings change.
-struct Reload {
-    options: SessionOptions,
-    cwd: PathBuf,
-    lock: tokio::sync::Mutex<()>,
-}
-
 struct AppState {
-    runtime: watch::Sender<Arc<Runtime>>,
-    /// Server-wide messages for every connected page (mode changes, reloads).
-    notices: broadcast::Sender<Value>,
-    approver: Arc<WebApprover>,
+    hub: Arc<Hub>,
     token: String,
-    loopback_only: bool,
-    /// `None` when the runtime belongs to a terminal session, which owns it.
-    reload: Option<Reload>,
-}
-
-impl AppState {
-    fn runtime(&self) -> Arc<Runtime> {
-        self.runtime.borrow().clone()
-    }
-
-    fn notify(&self, message: Value) {
-        let _ = self.notices.send(message);
-    }
-
-    /// Rebuilds the runtime from the configuration files. Saved sessions
-    /// carry over; running agents must finish first.
-    async fn reload(&self) -> Result<()> {
-        let Some(reload) = &self.reload else {
-            bail!("saved; restart this malac session to apply the changes");
-        };
-        let _guard = reload.lock.lock().await;
-        let old = self.runtime();
-        let running = old
-            .agents()
-            .iter()
-            .filter(|a| a.status == AgentStatus::Running)
-            .count();
-        if running > 0 {
-            bail!("saved, but {running} agents are running; stop them or wait, then apply again");
-        }
-        let config = load_config(&reload.options, &reload.cwd)?;
-        let new = start_runtime(config, reload.cwd.clone()).await?;
-        new.set_approver(self.approver.clone());
-        self.runtime.send_replace(new);
-        self.notify(json!({ "type": "reloaded" }));
-        old.shutdown().await;
-        Ok(())
-    }
+    url: String,
 }
 
 /// Serves an embedded file, or the copy in `$MALAC_WEB_DIR` when set, so the
@@ -393,8 +341,14 @@ fn font(name: &str, embedded: &'static [u8]) -> Response {
         .into_response()
 }
 
-async fn check_host(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
-    if state.loopback_only {
+/// Connections from this machine must name a loopback host, so a web page
+/// on another origin cannot reach the API through DNS rebinding.
+async fn check_host(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if peer.ip().is_loopback() {
         let host = request
             .headers()
             .get(header::HOST)
@@ -431,27 +385,32 @@ async fn authorize(
     next.run(request).await
 }
 
-async fn api_state(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let runtime = state.runtime();
+type Shared = State<Arc<AppState>>;
+
+/// The web UI's original state call: the active tab's runtime and every
+/// live agent.
+async fn api_state(State(state): Shared) -> Result<Json<Value>, ApiError> {
+    let hub = &state.hub;
+    let runtime = hub.settings_runtime().await?;
     let models: Vec<String> = runtime
         .config
         .providers
         .iter()
         .flat_map(|(name, p)| p.models.iter().map(move |m| format!("{name}/{m}")))
         .collect();
-    Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
+    Ok(Json(json!({
+        "version": update::CURRENT,
         "cwd": runtime.cwd,
         "mode": runtime.policy.mode().as_str(),
         "default_model": runtime.config.model,
         "models": models,
-        "agents": runtime.agents(),
+        "agents": hub.live_agents(),
         "sessions": session::list(false, 50).unwrap_or_default(),
         "servers": runtime.servers(),
-        "pending": state.approver.pending(),
-        "web": { "remote": !state.loopback_only, "reloadable": state.reload.is_some() },
-        "update": malac_core::update::status(),
-    }))
+        "pending": hub.pending_requests(),
+        "web": { "remote": hub.options().remote, "reloadable": !hub.is_attached() },
+        "update": update::status(),
+    })))
 }
 
 async fn api_session(Path(id): Path<String>) -> Response {
@@ -463,8 +422,108 @@ async fn api_session(Path(id): Path<String>) -> Response {
     }
 }
 
+async fn api_daemon(State(state): Shared) -> Json<Value> {
+    Json(serde_json::to_value(state.hub.info(&state.url)).unwrap_or_default())
+}
+
+#[derive(Deserialize, Default)]
+struct StopBody {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn api_daemon_stop(State(state): Shared, body: Option<Json<StopBody>>) -> Response {
+    let force = body.is_some_and(|b| b.force);
+    let hub = state.hub.clone();
+    if hub.is_attached() {
+        let error = json!({ "error": "this server belongs to a terminal session" });
+        return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+    }
+    let info = hub.info(&state.url);
+    if info.busy() && !force {
+        let error = json!({
+            "error": format!(
+                "{} agents and {} jobs are running; pass force to stop anyway",
+                info.agents_running, info.jobs_running
+            )
+        });
+        return (StatusCode::CONFLICT, Json(error)).into_response();
+    }
+    // Stop after the response is on its way.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        hub.request_stop("stopped by a client");
+    });
+    Json(json!({ "stopping": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct SnapshotQuery {
+    workspace: Option<String>,
+}
+
+async fn api_snapshot(
+    State(state): Shared,
+    Query(query): Query<SnapshotQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = Conn::default();
+    let command = Command::Snapshot {
+        workspace: query.workspace,
+    };
+    let reply = state.hub.execute(&mut conn, command).await?;
+    Ok(Json(serde_json::to_value(reply).context("encode")?))
+}
+
+/// Runs any protocol command; the body is the same JSON as on the WebSocket.
+async fn api_command(
+    State(state): Shared,
+    Json(request): Json<ClientRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = Conn::default();
+    let reply = state.hub.execute(&mut conn, request.command).await?;
+    let reply = match reply {
+        Some(reply) => reply.answering(request.client_ref),
+        None => ServerMessage::Ack {
+            client_ref: request.client_ref,
+            agent: None,
+            tab: None,
+            attachments: Vec::new(),
+        },
+    };
+    Ok(Json(serde_json::to_value(reply).context("encode")?))
+}
+
+async fn api_workspaces(State(state): Shared) -> Json<Value> {
+    Json(json!({ "workspaces": state.hub.summaries() }))
+}
+
+async fn api_jobs(State(state): Shared) -> Json<Value> {
+    Json(json!({ "jobs": state.hub.jobs() }))
+}
+
+#[derive(Deserialize)]
+struct TailQuery {
+    tail: Option<usize>,
+}
+
+async fn api_job_output(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Query(query): Query<TailQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let output = state.hub.job_output(&id, query.tail)?;
+    Ok(Json(serde_json::to_value(output).context("encode")?))
+}
+
+#[derive(Deserialize)]
+struct WsQuery {
+    /// The client's malac version, for the version-skew notice.
+    version: Option<String>,
+}
+
 async fn api_ws(
-    State(state): State<Arc<AppState>>,
+    State(state): Shared,
+    Query(query): Query<WsQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -484,213 +543,97 @@ async fn api_ws(
     if !allowed {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    ws.on_upgrade(move |socket| session_socket(state, socket))
+    ws.on_upgrade(move |socket| client_socket(state, socket, query.version))
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMessage {
-    Prompt {
-        agent: Option<String>,
-        text: String,
-        #[serde(default)]
-        images: Vec<ImageInput>,
-        model: Option<String>,
-        client_ref: Option<String>,
-    },
-    Resume {
-        session: String,
-        client_ref: Option<String>,
-    },
-    Cancel {
-        agent: String,
-    },
-    Approve {
-        request_id: String,
-        decision: Decision,
-    },
-    Mode {
-        mode: Mode,
-    },
-    Model {
-        agent: String,
-        model: String,
-    },
-    Compact {
-        agent: String,
-    },
-}
-
-#[derive(Deserialize)]
-struct ImageInput {
-    media_type: String,
-    data: String,
-}
-
-async fn session_socket(state: Arc<AppState>, socket: WebSocket) {
+/// One client: the snapshot first, then every broadcast message and the
+/// replies to its own commands, which run one at a time in order.
+async fn client_socket(state: Arc<AppState>, socket: WebSocket, version: Option<String>) {
+    let hub = state.hub.clone();
+    let _client = hub.connected();
     let (mut sink, mut source) = socket.split();
-    let mut runtimes = state.runtime.subscribe();
-    let mut events = runtimes.borrow_and_update().bus.subscribe();
-    let mut notices = state.notices.subscribe();
-    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let mut conn = Conn {
+        workspace: None,
+        version,
+    };
+    // Subscribed before the snapshot is taken, so no change falls between.
+    let mut outbox = hub.subscribe();
+    let snapshot = ServerMessage::Snapshot(Box::new(hub.snapshot(&conn)));
+    let Ok(text) = serde_json::to_string(&snapshot) else {
+        return;
+    };
+    if sink.send(WsMessage::Text(text.into())).await.is_err() {
+        return;
+    }
 
+    let (reply_tx, mut replies) = mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
         loop {
-            let payload = tokio::select! {
-                changed = runtimes.changed() => {
-                    if changed.is_err() {
-                        break;
+            let text: String = tokio::select! {
+                message = outbox.recv() => match message {
+                    Ok(text) => text.to_string(),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        json!({ "type": "lagged", "skipped": skipped }).to_string()
                     }
-                    events = runtimes.borrow_and_update().bus.subscribe();
-                    continue;
-                }
-                notice = notices.recv() => match notice {
-                    Ok(notice) => notice,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
-                event = events.recv() => match event {
-                    Ok(envelope) => json!({ "type": "event", "envelope": envelope.as_ref() }),
-                    Err(broadcast::error::RecvError::Lagged(n)) => json!({ "type": "lagged", "skipped": n }),
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-                reply = reply_rx.recv() => match reply {
+                reply = replies.recv() => match reply {
                     Some(reply) => reply,
                     None => break,
                 },
             };
-            if sink
-                .send(WsMessage::Text(payload.to_string().into()))
-                .await
-                .is_err()
-            {
+            if sink.send(WsMessage::Text(text.into())).await.is_err() {
                 break;
             }
         }
     });
 
-    while let Some(Ok(frame)) = source.next().await {
+    let stopped = hub.stopped();
+    tokio::pin!(stopped);
+    loop {
+        let frame = tokio::select! {
+            frame = source.next() => frame,
+            _ = &mut stopped => break,
+        };
+        let Some(Ok(frame)) = frame else { break };
         let WsMessage::Text(text) = frame else {
             continue;
         };
-        let reply = match serde_json::from_str::<ClientMessage>(text.as_str()) {
-            Ok(message) => handle(&state, message)
-                .unwrap_or_else(|err| json!({ "type": "error", "message": format!("{err:#}") })),
-            Err(err) => json!({ "type": "error", "message": format!("bad message: {err}") }),
+        let reply = match serde_json::from_str::<ClientRequest>(text.as_str()) {
+            Ok(request) => {
+                let reference = request.client_ref.clone();
+                match hub.execute(&mut conn, request.command).await {
+                    Ok(Some(reply)) => Some(reply.answering(reference)),
+                    Ok(None) => reference.map(|r| ServerMessage::Ack {
+                        client_ref: Some(r),
+                        agent: None,
+                        tab: None,
+                        attachments: Vec::new(),
+                    }),
+                    Err(err) => Some(ServerMessage::Error {
+                        client_ref: reference,
+                        message: format!("{err:#}"),
+                    }),
+                }
+            }
+            Err(err) => Some(ServerMessage::Error {
+                client_ref: None,
+                message: format!("bad message: {err}"),
+            }),
         };
-        if !reply.is_null() && reply_tx.send(reply).is_err() {
+        let Some(reply) = reply else { continue };
+        let Ok(text) = serde_json::to_string(&reply) else {
+            continue;
+        };
+        if reply_tx.send(text).is_err() {
             break;
         }
     }
-    writer.abort();
-}
-
-fn handle(state: &AppState, message: ClientMessage) -> Result<Value> {
-    let runtime = state.runtime();
-    Ok(match message {
-        ClientMessage::Prompt {
-            agent,
-            text,
-            images,
-            model,
-            client_ref,
-        } => {
-            let handle = match agent {
-                Some(id) => runtime.resume_agent(&id)?,
-                None => runtime.spawn_agent(AgentSpec {
-                    model,
-                    ..Default::default()
-                })?,
-            };
-            let mut content: Vec<Block> = images
-                .into_iter()
-                .map(|i| Block::Image {
-                    media_type: i.media_type,
-                    data: i.data,
-                })
-                .collect();
-            content.push(Block::text(text));
-            handle.send(content);
-            json!({ "type": "ack", "client_ref": client_ref, "agent": handle.id })
-        }
-        ClientMessage::Resume {
-            session,
-            client_ref,
-        } => {
-            let handle = runtime.resume_agent(&session)?;
-            json!({ "type": "ack", "client_ref": client_ref, "agent": handle.id })
-        }
-        ClientMessage::Cancel { agent } => {
-            runtime.cancel_tree(&agent);
-            Value::Null
-        }
-        ClientMessage::Approve {
-            request_id,
-            decision,
-        } => {
-            state.approver.resolve(&request_id, decision);
-            Value::Null
-        }
-        ClientMessage::Mode { mode } => {
-            runtime.policy.set_mode(mode);
-            state.notify(json!({ "type": "mode", "mode": mode.as_str() }));
-            Value::Null
-        }
-        ClientMessage::Model { agent, model } => {
-            runtime
-                .agent(&agent)
-                .context("no such agent")?
-                .set_model(&model);
-            Value::Null
-        }
-        ClientMessage::Compact { agent } => {
-            runtime.agent(&agent).context("no such agent")?.compact();
-            Value::Null
-        }
-    })
-}
-
-/// Holds permission requests until a browser answers them.
-#[derive(Default)]
-pub struct WebApprover {
-    waiting: Mutex<HashMap<String, (PermissionRequest, oneshot::Sender<Decision>)>>,
-}
-
-impl WebApprover {
-    fn pending(&self) -> Vec<PermissionRequest> {
-        self.waiting
-            .lock()
-            .unwrap()
-            .values()
-            .map(|(r, _)| r.clone())
-            .collect()
-    }
-
-    fn resolve(&self, id: &str, decision: Decision) {
-        if let Some((_, tx)) = self.waiting.lock().unwrap().remove(id) {
-            let _ = tx.send(decision);
-        }
-    }
-}
-
-#[async_trait]
-impl Approver for WebApprover {
-    async fn approve(&self, request: &PermissionRequest) -> Decision {
-        let (tx, rx) = oneshot::channel();
-        self.waiting
-            .lock()
-            .unwrap()
-            .insert(request.id.clone(), (request.clone(), tx));
-        // Forget the request if another approver answers first.
-        struct Forget<'a>(&'a WebApprover, &'a str);
-        impl Drop for Forget<'_> {
-            fn drop(&mut self) {
-                self.0.waiting.lock().unwrap().remove(self.1);
-            }
-        }
-        let _forget = Forget(self, &request.id);
-        rx.await.unwrap_or(Decision::Deny)
-    }
+    // Let queued replies go out before the socket closes.
+    drop(reply_tx);
+    let abort = writer.abort_handle();
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), writer).await;
+    abort.abort();
 }
 
 fn open_browser(url: &str) {
@@ -703,7 +646,7 @@ fn open_browser(url: &str) {
 }
 
 /// 244 bits from the OS random number generator, hex-encoded.
-fn random_token() -> String {
+pub fn random_token() -> String {
     format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
