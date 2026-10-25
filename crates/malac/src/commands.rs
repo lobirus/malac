@@ -345,6 +345,74 @@ pub async fn memory(action: Option<MemoryAction>) -> Result<()> {
     Ok(())
 }
 
+pub async fn update(check_only: bool) -> Result<()> {
+    use malac_core::update::{self, Method};
+    let status = update::check(true).await?;
+    let Some(latest) = status.latest.clone() else {
+        println!(
+            "malac {} · no release has been published yet",
+            status.current
+        );
+        return Ok(());
+    };
+    if let Some(installed) = &status.installed {
+        if !status.available {
+            println!(
+                "malac {installed} is installed; restart malac to use it (running: {})",
+                status.current
+            );
+            return Ok(());
+        }
+    }
+    if !status.available {
+        println!("malac {} is up to date", status.current);
+        return Ok(());
+    }
+    println!("malac {latest} is available (running {})", status.current);
+    if check_only {
+        return Ok(());
+    }
+    if status.method != Method::SelfUpdate {
+        bail!(
+            status
+                .hint
+                .unwrap_or_else(|| "this installation cannot update itself".into())
+        );
+    }
+    println!("{}", "downloading and verifying...".dark_grey());
+    let version = update::install().await?;
+    println!(
+        "updated to malac {version}. Running sessions keep their version until you restart them."
+    );
+    Ok(())
+}
+
+pub async fn models() -> Result<()> {
+    let config = Config::load(&working_dir(None)?, None)?.config;
+    let default = config.model.clone().unwrap_or_default();
+    for provider in malac_core::provider::discover_models(&config).await {
+        let status = match &provider.error {
+            Some(err) => format!(" ({})", err.lines().next().unwrap_or_default()).dark_grey(),
+            None => String::new().reset(),
+        };
+        println!(
+            "{} {}{status}",
+            provider.provider.as_str().bold(),
+            provider.kind.dark_grey()
+        );
+        for model in provider.all() {
+            let spec = format!("{}/{model}", provider.provider);
+            let marker = if spec == default { "*" } else { " " };
+            println!("  {marker} {spec}");
+        }
+    }
+    println!(
+        "{}",
+        "* default · use with -m provider/model or /model in a session".dark_grey()
+    );
+    Ok(())
+}
+
 pub async fn mcp() -> Result<()> {
     let cwd = working_dir(None)?;
     let config = Config::load(&cwd, None)?.config;

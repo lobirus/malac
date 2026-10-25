@@ -2,6 +2,7 @@ mod approve;
 mod commands;
 mod render;
 mod repl;
+mod tui;
 mod web;
 
 use std::ffi::OsString;
@@ -11,8 +12,8 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use malac_core::permission::Mode;
 
-/// An autonomous coding agent. `malac <prompt>` starts working on the prompt
-/// right away; `malac` alone opens an interactive session.
+/// Multi-Agent Loop for Autonomous Coding. `malac <prompt>` starts working
+/// on the prompt right away; `malac` alone opens an interactive session.
 #[derive(Parser)]
 #[command(name = "malac", version, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -43,15 +44,27 @@ pub struct RunArgs {
     /// Stream events as JSON lines instead of rendering them.
     #[arg(long)]
     pub json: bool,
+    /// Use the line-based interface instead of the full-screen one.
+    #[arg(long)]
+    pub plain: bool,
     /// Continue the most recent session in this directory.
     #[arg(short = 'c', long = "continue")]
     pub continue_last: bool,
     /// Resume a session by id.
     #[arg(short, long)]
     pub resume: Option<String>,
-    /// Also serve the web UI for this session.
-    #[arg(long)]
+    /// Also serve the web UI for this session (default: `web.enabled`).
+    #[arg(long, overrides_with = "no_web")]
     pub web: bool,
+    /// Do not serve the web UI, even if `web.enabled` is set.
+    #[arg(long)]
+    pub no_web: bool,
+    /// Serve the web UI to other machines too (implies --web).
+    #[arg(long)]
+    pub web_remote: bool,
+    /// Port for the web UI (default: `web.port`, or any free port if taken).
+    #[arg(long)]
+    pub web_port: Option<u16>,
 }
 
 /// Options shared by the terminal and `malac web`.
@@ -104,6 +117,14 @@ enum Command {
         #[command(subcommand)]
         action: Option<commands::MemoryAction>,
     },
+    /// List the models every configured provider offers.
+    Models,
+    /// Update malac to the latest release.
+    Update {
+        /// Only check whether an update is available.
+        #[arg(long)]
+        check: bool,
+    },
     /// Show connected MCP servers and their tools.
     Mcp,
     /// Run the computer and browser control service (`malac-control`).
@@ -152,7 +173,7 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_env("MALAC_LOG")
                 .unwrap_or_else(|_| "warn".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(tui::log_writer)
         .init();
 
     let result: Result<i32> = match cli.command {
@@ -162,6 +183,8 @@ async fn main() {
         Some(Command::Provider { action }) => commands::provider(action).await.map(|_| 0),
         Some(Command::Config { action }) => commands::config(action).map(|_| 0),
         Some(Command::Memory { action }) => commands::memory(action).await.map(|_| 0),
+        Some(Command::Models) => commands::models().await.map(|_| 0),
+        Some(Command::Update { check }) => commands::update(check).await.map(|_| 0),
         Some(Command::Mcp) => commands::mcp().await.map(|_| 0),
         Some(Command::Control { args }) => commands::control(&args),
     };

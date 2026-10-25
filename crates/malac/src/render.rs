@@ -302,7 +302,7 @@ fn footer(view: &View, model: &str, status: TurnStatus) -> String {
     format!("─ {}", parts.join(" · "))
 }
 
-fn tokens(n: u64) -> String {
+pub(crate) fn tokens(n: u64) -> String {
     if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {

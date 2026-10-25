@@ -11,13 +11,14 @@ use tokio::sync::Semaphore;
 use crate::agent::{self, AgentHandle, AgentSnapshot};
 use crate::catalog::{self, AgentType, Instructions, Skill};
 use crate::config::{self, Config};
-use crate::event::{AgentId, EventBus};
+use crate::event::{AgentId, Event, EventBus};
 use crate::mcp::{self, ServerStatus};
 use crate::memory::Memory;
 use crate::permission::{Approver, DenyAll, Policy};
 use crate::provider::{self, Provider};
 use crate::session;
 use crate::tools::{self, Tool};
+use crate::update;
 
 pub struct Runtime {
     pub config: Config,
@@ -142,6 +143,51 @@ impl Runtime {
         let provider = build_provider(&self.config, name)?;
         cache.insert(name.to_owned(), provider.clone());
         Ok(provider)
+    }
+
+    /// Checks for a newer release in the background (at most once a day) and,
+    /// with `update.auto`, installs it. The outcome is published as an
+    /// [`Event::Update`](crate::event::Event::Update) with an empty agent id.
+    pub fn start_update_check(self: &Arc<Self>) {
+        if !self.config.update.check {
+            return;
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let Ok(mut status) = update::check(false).await else {
+                return;
+            };
+            if status.available
+                && runtime.config.update.auto
+                && status.method == update::Method::SelfUpdate
+            {
+                match update::install().await {
+                    Ok(_) => status = update::status(),
+                    Err(err) => tracing::warn!("automatic update failed: {err:#}"),
+                }
+            }
+            if status.available || status.installed.is_some() {
+                runtime.bus.emit("", Event::Update { status });
+            }
+        });
+    }
+
+    /// Installs the latest release now and announces it.
+    pub async fn install_update(&self) -> Result<update::Status> {
+        update::install().await?;
+        let status = update::status();
+        self.bus.emit(
+            "",
+            Event::Update {
+                status: status.clone(),
+            },
+        );
+        Ok(status)
+    }
+
+    /// Drops the cached client for `name`, e.g. after its API key changed.
+    pub fn forget_provider(&self, name: &str) {
+        self.providers.lock().unwrap().remove(name);
     }
 
     /// Registers a provider under `name`, replacing the configured one.

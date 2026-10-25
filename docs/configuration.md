@@ -147,6 +147,7 @@ The agent has two tools for its own configuration. `malac_settings` shows the co
 | Key | Default | Meaning |
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
+| `ui.tui` | `true` | Full-screen terminal UI; `false` uses the line-based interface (`--plain`) |
 | `web.enabled` | `false` | Serve the web UI with every interactive terminal session |
 | `web.remote` | `false` | Listen on all interfaces instead of `web.host` |
 | `web.host` | `127.0.0.1` | Bind address when not remote |

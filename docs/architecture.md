@@ -5,7 +5,7 @@ malac is a Cargo workspace with four crates:
 | Crate | Role |
 |---|---|
 | `malac-core` | The runtime: providers, tools, agent loop, permissions, memory, sessions, MCP client wiring. No UI. |
-| `malac` | The `malac` binary: CLI, terminal renderer, REPL, web server. |
+| `malac` | The `malac` binary: CLI, full-screen terminal UI (`tui/`), line-based REPL, web server. |
 | `malac-control` | Computer and browser control, served over MCP (stdio or WebSocket). Also a library. |
 | `malac-mcp` | A small Model Context Protocol implementation (client and server) shared by the others. |
 
@@ -74,3 +74,11 @@ Its tools are added without a server prefix (`browser_click`, `computer_screensh
 ## Web UI and editor
 
 `malac web` (or `--web` / `/web` in a terminal session) serves a single-page UI from the binary. The page authenticates with a random per-run token; API requests must name a loopback host when the server is bound to one, which blocks DNS rebinding. The VS Code extension starts `malac web --port 0 --json-ready` and embeds the page in a webview.
+
+## Self-update
+
+`update.rs` reads `SHA256SUMS` from the latest GitHub release, picks the archive for the running platform, verifies it, unpacks it next to the installed binaries and moves `malac-control`, then `malac`, into place with `rename`. Running processes keep the file they started from, so sessions and subagents are never disturbed; the new version is used from the next start. A lock file keeps concurrent updates apart. The runtime checks in the background at most once a day and publishes an `Update` event that the terminal UI and web UI display.
+
+## Self-configuration
+
+`tools/settings.rs` gives the agent `malac_settings` (read the config, the configuration reference, models and status; switch the session model) and `malac_configure` (edit one key with `toml_edit` so comments survive, validate the result, store API keys, install updates). Changes are written to the files and apply to new sessions; the web UI can rebuild its runtime to apply them immediately.

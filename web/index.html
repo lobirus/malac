@@ -3,77 +3,103 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light">
+  <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
-  <title>malac</title>
-  <link rel="icon" href="data:,">
+  <title>malac · Multi-Agent Loop for Autonomous Coding</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    // Apply the remembered theme before the first paint; "system" leaves it to prefers-color-scheme.
+    try {
+      const theme = localStorage.getItem("malac.theme");
+      if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+    } catch {}
+  </script>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#content">Skip to content</a>
   <div id="app" class="app">
-    <aside id="sidebar" class="sidebar" aria-label="Agents and sessions">
-      <header class="sidebar-head">
-        <div class="brand">
-          <span id="connection-dot" class="connection-dot" title="Connecting"></span>
+    <aside id="sidebar" class="sidebar" aria-label="Sessions and agents">
+      <div class="sidebar-head">
+        <a id="brand" class="brand" href="#" aria-label="malac home">
+          <span id="brand-logo" class="brand-logo"></span>
           <span class="brand-name">malac</span>
-          <span id="version" class="version"></span>
-        </div>
-        <div id="cwd" class="cwd"></div>
-      </header>
-      <div class="sidebar-controls">
-        <button id="new-session" class="button primary wide" type="button">New session</button>
-        <div id="mode" class="segmented" role="group" aria-label="Permission mode">
-          <button type="button" data-mode="ask" title="Confirm edits and commands">ask</button>
-          <button type="button" data-mode="edits" title="Edit files freely, confirm commands">edits</button>
-          <button type="button" data-mode="autopilot" title="Never ask; deny rules still apply">autopilot</button>
-        </div>
+        </a>
+        <span id="connection" class="connection" role="status"></span>
+        <button id="collapse-sidebar" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar ([)"></button>
       </div>
+      <div class="sidebar-actions">
+        <button id="new-session" class="button primary wide" type="button" title="New session (N)"></button>
+      </div>
+      <nav class="sidebar-nav" aria-label="Views">
+        <a class="nav-link" href="#" data-route="home"></a>
+        <a class="nav-link" href="#agents" data-route="agents"></a>
+        <a class="nav-link" href="#settings" data-route="settings"></a>
+      </nav>
       <div class="sidebar-scroll">
-        <section class="sidebar-section">
-          <h2>Agents</h2>
+        <section id="live-section" class="sidebar-section" aria-labelledby="live-title" hidden>
+          <h2 id="live-title" class="sidebar-title">Live agents</h2>
           <ul id="agent-tree" class="tree"></ul>
-          <p id="agents-empty" class="sidebar-empty">No live agents</p>
         </section>
-        <section class="sidebar-section">
-          <h2>Recent sessions</h2>
-          <ul id="sessions" class="sessions"></ul>
-          <p id="sessions-empty" class="sidebar-empty">No saved sessions</p>
+        <section class="sidebar-section" aria-labelledby="sessions-title">
+          <div class="sidebar-title-row">
+            <h2 id="sessions-title" class="sidebar-title">Sessions</h2>
+            <div id="session-scope" class="segmented tiny" role="group" aria-label="Which sessions">
+              <button type="button" data-scope="project">This project</button>
+              <button type="button" data-scope="all">All</button>
+            </div>
+          </div>
+          <div class="search-field">
+            <label class="sr-only" for="session-filter">Filter sessions</label>
+            <input id="session-filter" class="input small" type="search" placeholder="Filter sessions" autocomplete="off" spellcheck="false">
+          </div>
+          <div id="sessions" class="sessions"></div>
         </section>
       </div>
-      <footer id="servers" class="servers"></footer>
+      <footer class="sidebar-foot">
+        <span id="project" class="project"></span>
+        <span id="version" class="version"></span>
+      </footer>
     </aside>
     <div id="backdrop" class="backdrop"></div>
-    <main class="main">
+    <main id="main" class="main">
       <header class="topbar">
-        <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Toggle sidebar">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor"/>
-            <path d="M6 2.5v11" stroke="currentColor"/>
-          </svg>
-        </button>
-        <nav id="breadcrumb" class="breadcrumb" aria-label="Agent path"></nav>
-        <div id="actions" class="actions"></div>
-      </header>
-      <div id="status" class="statusline"></div>
-      <div id="offline" class="offline-banner" hidden>Disconnected from malac, reconnecting</div>
-      <section id="permissions" class="permissions" aria-label="Pending approvals" aria-live="polite"></section>
-      <div id="scroller" class="scroller">
-        <div id="transcript"></div>
-      </div>
-      <form id="composer" class="composer">
-        <div class="composer-box">
-          <div id="attachments" class="attachments" hidden></div>
-          <textarea id="input" rows="2" aria-label="Message"></textarea>
-          <div class="composer-bar">
-            <select id="model" class="select" aria-label="Model for the new session"></select>
-            <span class="hint">Enter to send, Shift+Enter for a new line</span>
-            <button class="button primary" type="submit">Send</button>
-          </div>
+        <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Show sidebar" title="Show sidebar ([)"></button>
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Location"></nav>
+        <div id="topbar-status" class="topbar-status"></div>
+        <div id="topbar-controls" class="topbar-controls"></div>
+        <div class="topbar-end">
+          <button id="update-button" class="update-chip" type="button" hidden aria-haspopup="dialog"></button>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch theme" title="Switch theme (T)"></button>
+          <button id="help-button" class="icon-button" type="button" aria-label="Keyboard shortcuts and about" title="Keyboard shortcuts (?)"></button>
+          <a id="settings-button" class="icon-button" href="#settings" aria-label="Settings" title="Settings (,)"></a>
         </div>
-      </form>
-      <div id="toasts" class="toasts"></div>
+      </header>
+      <div id="offline" class="offline-banner" role="status" hidden>Lost the connection to malac. Reconnecting…</div>
+      <section id="permissions" class="permissions" aria-label="Pending approvals" aria-live="polite"></section>
+      <div id="content" class="content" tabindex="-1"></div>
+      <div id="composer-dock" class="composer-dock">
+        <button id="jump" class="jump button" type="button" hidden>Jump to latest</button>
+        <form id="composer" class="composer" autocomplete="off">
+          <div class="composer-box">
+            <div id="attachments" class="attachments" hidden></div>
+            <label class="sr-only" for="input">Message</label>
+            <textarea id="input" rows="1"></textarea>
+            <div class="composer-bar">
+              <button id="attach" class="icon-button" type="button" aria-label="Attach images" title="Attach images"></button>
+              <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+              <span id="composer-model" class="composer-model"></span>
+              <span class="composer-hint"><kbd>Enter</kbd> to send, <kbd>Shift</kbd> <kbd>Enter</kbd> for a new line</span>
+              <button id="stop" class="button danger" type="button" hidden title="Stop (Esc)"></button>
+              <button id="send" class="button primary icon-only" type="submit" aria-label="Send" title="Send (Enter)"></button>
+            </div>
+          </div>
+        </form>
+      </div>
     </main>
   </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 </body>
 </html>

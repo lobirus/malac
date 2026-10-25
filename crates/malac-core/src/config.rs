@@ -36,6 +36,7 @@ pub struct Config {
     pub agents: AgentsConfig,
     pub ui: UiConfig,
     pub web: WebConfig,
+    pub update: UpdateConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,15 +208,31 @@ impl Default for AgentsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub show_thinking: bool,
+    /// Use the full-screen interface in a terminal; `false` keeps the line REPL.
+    pub tui: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            show_thinking: false,
+            tui: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
+    /// Serve the web UI alongside every interactive terminal session.
+    pub enabled: bool,
+    /// Listen on all interfaces so other machines can connect (token still required).
+    pub remote: bool,
+    /// Bind address when not remote.
     pub host: String,
     pub port: u16,
 }
@@ -223,8 +240,34 @@ pub struct WebConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
+            remote: false,
             host: "127.0.0.1".into(),
             port: 7700,
+        }
+    }
+}
+
+impl WebConfig {
+    pub fn bind_host(&self) -> &str {
+        if self.remote { "0.0.0.0" } else { &self.host }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Look for a newer release in the background, at most once a day.
+    pub check: bool,
+    /// Install it as well. Running sessions keep their version until restarted.
+    pub auto: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            auto: false,
         }
     }
 }
@@ -400,6 +443,30 @@ pub fn save_api_key(provider: &str, key: &str) -> Result<()> {
     entry.insert("api_key".into(), key.into());
     creds.insert(provider.into(), entry.into());
     write_private(&path, &toml::to_string(&creds)?)
+}
+
+pub fn remove_api_key(provider: &str) -> Result<()> {
+    let path = credentials_path();
+    let mut creds = read_table(&path)?.unwrap_or_default();
+    if creds.remove(provider).is_some() {
+        write_private(&path, &toml::to_string(&creds)?)?;
+    }
+    Ok(())
+}
+
+/// Reads a config file as a TOML table; `None` when it does not exist.
+pub fn read_config_file(path: &Path) -> Result<Option<toml::Table>> {
+    read_table(path)
+}
+
+/// Checks that `user` would produce a valid configuration on top of the
+/// built-in defaults.
+pub fn validate_user_table(user: &toml::Table) -> Result<Config> {
+    let mut merged = defaults();
+    merge(&mut merged, user.clone());
+    toml::Value::Table(merged)
+        .try_into()
+        .context("invalid configuration")
 }
 
 pub fn write_private(path: &Path, contents: &str) -> Result<()> {

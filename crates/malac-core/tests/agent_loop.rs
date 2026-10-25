@@ -229,3 +229,30 @@ async fn delegates_to_a_subagent() {
     let (report, _) = tool_result_text(&script.last_request(), "c1").unwrap();
     assert!(report.contains("one, two, three"));
 }
+
+#[tokio::test]
+async fn configures_malac_through_its_own_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Scripted::new(vec![
+        tool_call(
+            "c1",
+            "malac_configure",
+            json!({ "action": "set", "key": "ui.show_thinking", "value": true }),
+        ),
+        tool_call("c2", "malac_settings", json!({ "show": "config" })),
+        answer("Reasoning will now be shown."),
+    ]);
+    let runtime = runtime(Mode::Autopilot, script.clone(), dir.path());
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    agent
+        .prompt(vec![Block::text("show your reasoning from now on")])
+        .await
+        .unwrap();
+
+    let saved = std::fs::read_to_string(malac_core::config::user_config_path()).unwrap();
+    let table: toml::Table = saved.parse().unwrap();
+    assert_eq!(table["ui"]["show_thinking"].as_bool(), Some(true));
+    let (shown, _) = tool_result_text(&script.last_request(), "c2").unwrap();
+    assert!(shown.contains("show_thinking = true"));
+}

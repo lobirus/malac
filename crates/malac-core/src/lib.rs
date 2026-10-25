@@ -14,6 +14,7 @@ pub mod provider;
 pub mod runtime;
 pub mod session;
 pub mod tools;
+pub mod update;
 
 pub use agent::{AgentHandle, AgentSnapshot, AgentStatus};
 pub use config::Config;

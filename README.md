@@ -1,5 +1,10 @@
 # malac
 
+[![CI](https://github.com/lobirus/malac/actions/workflows/ci.yml/badge.svg)](https://github.com/lobirus/malac/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lobirus/malac?sort=semver&color=111111)](https://github.com/lobirus/malac/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-111111)](LICENSE)
+[![Rust 1.86+](https://img.shields.io/badge/rust-1.86%2B-111111)](https://www.rust-lang.org)
+
 **Multi-Agent Loop for Autonomous Coding.** An autonomous coding agent for the terminal, with a web UI, a VS Code extension, and a control service for the desktop and browser. Written in Rust. (*Malac* is also Hungarian for pig.)
 
 ```
@@ -67,6 +72,27 @@ malac web --open             # web UI only
 
 If a prompt starts with a subcommand name, malac still treats it as a prompt when it does not parse as that subcommand: `malac web scraper for the docs` is a prompt. `malac -- <prompt>` always is.
 
+## Terminal UI
+
+`malac` opens a full-screen terminal UI in the spirit of Midnight Commander and byobu. It works with the keyboard alone, and everything is also clickable.
+
+- **Header:** a menu bar (Session, Model, Mode, Agents, View, Web, Help; F9 opens it) and tabs, one per session.
+- **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, and subagents as live cards you can open, or pin as their own tab.
+- **Footer:** a status line (model, mode, context, tokens and cost, running agents, pending approvals, web UI, git branch, update, clock) above a function-key bar.
+- **Dialogs:** permission requests (Allow / Always / Deny), a model picker across all providers, sessions, and help.
+
+| Key | | Key | |
+|---|---|---|---|
+| F1 | Help | Ctrl-T / Ctrl-W | New / close tab |
+| F2, Ctrl-Y | Copy last answer | Alt-←/→, Alt-1…9 | Switch tab |
+| F3 | Agents view | Enter / Alt-Enter | Send / new line |
+| F4, Ctrl-P | Model picker | Esc, F8 | Stop the running turn |
+| F5, Shift-Tab | Cycle mode | Ctrl-G | Toggle sidebar |
+| F9, Ctrl-O | Menu bar | Ctrl-S | Mouse off, for selecting text |
+| F10 | Quit | Right-click | Context menu |
+
+`--plain` (or `ui.tui = false`) uses a line-based interface instead. `-p`, `--json` and piped input always do. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
+
 ## Command line
 
 | Flag | |
@@ -83,11 +109,13 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 | `--web-port <port>` | Web UI port (default: `web.port`, or any free port) |
 | `--no-control` | Do not connect the control service |
 | `-v, --verbose` | Show model reasoning |
+| `--plain` | Line-based interface instead of the full-screen UI |
 
 | Subcommand | |
 |---|---|
 | `malac web` | Web UI (`--port`, `--remote`, `--open`, `--json-ready`) |
 | `malac models` | Every model your providers offer |
+| `malac update [--check]` | Update to the latest release |
 | `malac sessions [list\|show <id>\|delete <id>]` | Saved transcripts, including subagents |
 | `malac provider add\|list\|models` | Providers and keys |
 | `malac config [path\|show]` | Configuration files and the merged result |

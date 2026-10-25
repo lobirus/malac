@@ -5,6 +5,7 @@ mod fs;
 mod mcp;
 mod memory;
 mod search;
+mod settings;
 mod shell;
 mod todo;
 mod web;
@@ -182,6 +183,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(agents::Wait),
         Arc::new(agents::Send),
         Arc::new(agents::List),
+        Arc::new(settings::Settings),
+        Arc::new(settings::Configure),
     ]
 }
 

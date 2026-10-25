@@ -1,0 +1,1425 @@
+//! What the transcript pane shows. Every agent gets an [`AgentView`] built
+//! from the event stream; its entries are rendered to lines once per width
+//! and cached until they change.
+
+use std::collections::HashMap;
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
+use malac_core::event::{AgentId, Envelope, Event, Level, Todo, TodoStatus, TurnStatus};
+use malac_core::message::{Message, Role, Usage};
+use malac_core::{AgentSnapshot, Block};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use serde_json::Value;
+
+use super::markdown;
+use super::text::{self, sanitize};
+use super::theme::theme;
+use crate::render::tokens;
+
+pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Where the agent tools put a session that was compacted.
+const COMPACTED_PREFIX: &str = "This conversation was compacted.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolState {
+    Asking,
+    Running,
+    Done,
+    Failed,
+    Denied,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub call_id: String,
+    pub request_id: Option<String>,
+    pub name: String,
+    pub summary: String,
+    pub input: Value,
+    pub state: ToolState,
+    pub output: String,
+    pub millis: u64,
+    pub started: Instant,
+    pub expanded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentCard {
+    pub id: AgentId,
+    pub label: String,
+    pub model: String,
+    pub started: Instant,
+    pub finished: Option<(TurnStatus, Duration)>,
+    pub report: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum Entry {
+    User(String),
+    Assistant(String),
+    Thinking {
+        text: String,
+        expanded: bool,
+    },
+    Tool(ToolCall),
+    Agent(AgentCard),
+    Todos(Vec<Todo>),
+    Notice(Level, String),
+    Compacted,
+    Footer(String),
+    /// Output of a slash command or menu action.
+    Info(Vec<Line<'static>>),
+}
+
+impl Entry {
+    /// Entries whose look changes with time, so they are drawn every frame.
+    fn is_live(&self) -> bool {
+        match self {
+            Entry::Tool(tool) => matches!(tool.state, ToolState::Asking | ToolState::Running),
+            Entry::Agent(card) => card.finished.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Tool calls shown in another form: spawning an agent appears as its
+    /// card, updating the todo list as the list itself.
+    fn is_hidden(&self) -> bool {
+        match self {
+            Entry::Tool(tool) => {
+                matches!(tool.name.as_str(), "agent_spawn" | "todo")
+                    && tool.state != ToolState::Failed
+            }
+            _ => false,
+        }
+    }
+
+    fn is_compact(&self) -> bool {
+        matches!(self, Entry::Tool(_) | Entry::Agent(_))
+    }
+
+    /// The text copied for this entry.
+    pub fn plain_text(&self) -> String {
+        match self {
+            Entry::User(text) | Entry::Assistant(text) | Entry::Footer(text) => text.clone(),
+            Entry::Thinking { text, .. } => text.clone(),
+            Entry::Tool(tool) => {
+                let mut out = format!("{} {}", tool.name, tool.summary);
+                if !tool.output.is_empty() {
+                    out.push_str("\n\n");
+                    out.push_str(&tool.output);
+                }
+                out
+            }
+            Entry::Agent(card) => format!("{}: {}", card.label, card.report),
+            Entry::Todos(items) => items
+                .iter()
+                .map(|t| {
+                    let mark = match t.status {
+                        TodoStatus::Completed => "[x]",
+                        TodoStatus::InProgress => "[~]",
+                        TodoStatus::Pending => "[ ]",
+                    };
+                    format!("{mark} {}", t.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Entry::Notice(_, message) => message.clone(),
+            Entry::Compacted => "conversation compacted".into(),
+            Entry::Info(lines) => lines
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+struct Rendered {
+    width: usize,
+    lines: Vec<Line<'static>>,
+    code: Vec<markdown::CodeBlock>,
+}
+
+pub struct Item {
+    pub entry: Entry,
+    rendered: Option<Rendered>,
+    gap: bool,
+}
+
+impl Item {
+    fn new(entry: Entry) -> Self {
+        Self {
+            entry,
+            rendered: None,
+            gap: false,
+        }
+    }
+
+    /// Rows this item takes, including the blank row above it.
+    pub fn height(&self) -> usize {
+        self.lines().len() + usize::from(self.gap)
+    }
+
+    pub fn gap(&self) -> bool {
+        self.gap
+    }
+
+    pub fn lines(&self) -> &[Line<'static>] {
+        self.rendered.as_ref().map_or(&[], |r| &r.lines)
+    }
+
+    /// The code block shown on `line` (relative to the item's first line),
+    /// or the item's last code block.
+    pub fn code_block(&self, line: Option<usize>) -> Option<&str> {
+        let code = &self.rendered.as_ref()?.code;
+        line.and_then(|l| code.iter().find(|c| c.lines.contains(&l)))
+            .or(code.last())
+            .map(|c| c.text.as_str())
+    }
+}
+
+/// What rendering needs besides the entry itself.
+pub struct Ctx<'a> {
+    pub width: usize,
+    pub now: Instant,
+    pub snapshots: &'a HashMap<AgentId, AgentSnapshot>,
+}
+
+impl Ctx<'_> {
+    fn spinner(&self) -> &'static str {
+        let tick = self.now.elapsed().as_millis() as usize;
+        SPINNER[(tick / 80) % SPINNER.len()]
+    }
+}
+
+#[derive(Default)]
+pub struct Transcript {
+    items: Vec<Item>,
+    /// `cwd/`, stripped from tool summaries.
+    cwd: String,
+    /// Deltas arrived since the last assistant message.
+    streamed: bool,
+}
+
+impl Transcript {
+    pub fn new(cwd: &str) -> Self {
+        Self {
+            cwd: format!("{}/", cwd.trim_end_matches('/')),
+            ..Default::default()
+        }
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn has_turns(&self) -> bool {
+        self.items.iter().any(|i| matches!(i.entry, Entry::User(_)))
+    }
+
+    pub fn push(&mut self, entry: Entry) {
+        self.items.push(Item::new(entry));
+    }
+
+    /// Mutable access to an entry; its cached lines are dropped.
+    pub fn entry_mut(&mut self, index: usize) -> Option<&mut Entry> {
+        let item = self.items.get_mut(index)?;
+        item.rendered = None;
+        Some(&mut item.entry)
+    }
+
+    fn last_mut(&mut self) -> Option<&mut Entry> {
+        let index = self.items.len().checked_sub(1)?;
+        self.entry_mut(index)
+    }
+
+    fn tool_mut(&mut self, call_id: &str) -> Option<&mut ToolCall> {
+        let index = self
+            .items
+            .iter()
+            .rposition(|i| matches!(&i.entry, Entry::Tool(t) if t.call_id == call_id))?;
+        match self.entry_mut(index) {
+            Some(Entry::Tool(tool)) => Some(tool),
+            _ => None,
+        }
+    }
+
+    fn agent_card_mut(&mut self, id: &str) -> Option<&mut AgentCard> {
+        let index = self
+            .items
+            .iter()
+            .rposition(|i| matches!(&i.entry, Entry::Agent(c) if c.id == id))?;
+        match self.entry_mut(index) {
+            Some(Entry::Agent(card)) => Some(card),
+            _ => None,
+        }
+    }
+
+    /// Expands or collapses a tool call or thinking block.
+    pub fn toggle(&mut self, index: usize) -> bool {
+        match self.entry_mut(index) {
+            Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Thinking { expanded, .. }) => *expanded = !*expanded,
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn set_thinking_expanded(&mut self, show: bool) {
+        for item in &mut self.items {
+            if let Entry::Thinking { expanded, .. } = &mut item.entry {
+                *expanded = show;
+                item.rendered = None;
+            }
+        }
+    }
+
+    /// The newest answer, for copying.
+    pub fn last_answer(&self) -> Option<&str> {
+        self.items.iter().rev().find_map(|i| match &i.entry {
+            Entry::Assistant(text) if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Renders entries that changed, or all of them after a resize.
+    pub fn prepare(&mut self, ctx: &Ctx<'_>) {
+        let mut previous_compact = None;
+        for item in &mut self.items {
+            let stale =
+                item.rendered.as_ref().is_none_or(|r| r.width != ctx.width) || item.entry.is_live();
+            if stale {
+                item.rendered = Some(render(&item.entry, &self.cwd, ctx));
+            }
+            let visible = !item.lines().is_empty();
+            let compact = item.entry.is_compact();
+            item.gap = visible && previous_compact.is_some_and(|p| !(p && compact));
+            if visible {
+                previous_compact = Some(compact);
+            }
+        }
+    }
+
+    /// Total rows after [`Transcript::prepare`].
+    pub fn height(&self) -> usize {
+        self.items.iter().map(Item::height).sum()
+    }
+
+    /// Entries overlapping rows `range`, as (index, first row of the entry).
+    pub fn visible(&self, range: Range<usize>) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut row = 0;
+        for (index, item) in self.items.iter().enumerate() {
+            let height = item.height();
+            if row + height > range.start && row < range.end && height > 0 {
+                out.push((index, row));
+            }
+            row += height;
+            if row >= range.end {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The first row of an entry, for scrolling it into view.
+    pub fn row_of(&self, index: usize) -> usize {
+        self.items[..index.min(self.items.len())]
+            .iter()
+            .map(Item::height)
+            .sum()
+    }
+
+    /// Fills a transcript from a saved session's messages.
+    pub fn load(&mut self, history: &[Message], summarize: impl Fn(&str, &Value) -> String) {
+        let mut calls: HashMap<String, usize> = HashMap::new();
+        for message in history {
+            for block in &message.content {
+                match (message.role, block) {
+                    (Role::User, Block::Text { text }) if text.starts_with(COMPACTED_PREFIX) => {
+                        self.push(Entry::Compacted);
+                    }
+                    (Role::User, Block::Text { text })
+                        if text.starts_with("<recalled-memories>") => {}
+                    (Role::User, Block::Text { text }) => self.push(Entry::User(text.clone())),
+                    (Role::Assistant, Block::Text { text }) if !text.trim().is_empty() => {
+                        self.push(Entry::Assistant(text.clone()));
+                    }
+                    (Role::Assistant, Block::Thinking { text, .. }) if !text.trim().is_empty() => {
+                        self.push(Entry::Thinking {
+                            text: text.clone(),
+                            expanded: false,
+                        });
+                    }
+                    (_, Block::ToolUse { id, name, input }) => {
+                        calls.insert(id.clone(), self.items.len());
+                        self.push(Entry::Tool(ToolCall {
+                            call_id: id.clone(),
+                            request_id: None,
+                            name: name.clone(),
+                            summary: summarize(name, input),
+                            input: input.clone(),
+                            state: ToolState::Done,
+                            output: String::new(),
+                            millis: 0,
+                            started: Instant::now(),
+                            expanded: false,
+                        }));
+                    }
+                    (
+                        _,
+                        Block::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        },
+                    ) => {
+                        let Some(&index) = calls.get(tool_use_id) else {
+                            continue;
+                        };
+                        if let Some(Entry::Tool(tool)) = self.entry_mut(index) {
+                            tool.output = content
+                                .iter()
+                                .map(|b| match b {
+                                    Block::Text { text } => text.as_str(),
+                                    _ => "[image]",
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if *is_error {
+                                tool.state = ToolState::Failed;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// One agent as the interface knows it.
+pub struct AgentView {
+    pub id: AgentId,
+    pub label: String,
+    pub parent: Option<AgentId>,
+    pub model: String,
+    pub transcript: Transcript,
+    pub running: bool,
+    pub last_status: Option<TurnStatus>,
+    pub turn_started: Option<Instant>,
+    pub turn_usage: Usage,
+    pub total: Usage,
+    pub context: u64,
+    pub todos: Vec<Todo>,
+    /// The tool call the model is writing right now.
+    pub writing: Option<String>,
+    started: Instant,
+}
+
+impl AgentView {
+    pub fn new(id: &str, label: &str, parent: Option<AgentId>, model: &str, cwd: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            parent,
+            model: model.to_owned(),
+            transcript: Transcript::new(cwd),
+            running: false,
+            last_status: None,
+            turn_started: None,
+            turn_usage: Usage::default(),
+            total: Usage::default(),
+            context: 0,
+            todos: Vec::new(),
+            writing: None,
+            started: Instant::now(),
+        }
+    }
+
+    fn apply(&mut self, event: &Event, show_thinking: bool) {
+        let t = &mut self.transcript;
+        match event {
+            Event::AgentStarted { .. } => {}
+            Event::ModelChanged { model } => {
+                self.model = model.clone();
+                t.push(Entry::Notice(Level::Info, format!("model: {model}")));
+            }
+            Event::UserMessage { text } => {
+                t.push(Entry::User(text.clone()));
+                t.streamed = false;
+                self.running = true;
+                self.turn_started = Some(Instant::now());
+                self.turn_usage = Usage::default();
+            }
+            Event::TextDelta { text: delta } => {
+                t.streamed = true;
+                match t.last_mut() {
+                    Some(Entry::Assistant(text)) => text.push_str(delta),
+                    _ => t.push(Entry::Assistant(delta.clone())),
+                }
+            }
+            Event::ThinkingDelta { text: delta } => {
+                t.streamed = true;
+                match t.last_mut() {
+                    Some(Entry::Thinking { text, .. }) => text.push_str(delta),
+                    _ => t.push(Entry::Thinking {
+                        text: delta.clone(),
+                        expanded: show_thinking,
+                    }),
+                }
+            }
+            Event::ToolCallStreaming { tool } => self.writing = Some(tool.clone()),
+            Event::AssistantMessage { message } => {
+                self.writing = None;
+                if !std::mem::take(&mut t.streamed) {
+                    for block in &message.content {
+                        match block {
+                            Block::Text { text } if !text.trim().is_empty() => {
+                                t.push(Entry::Assistant(text.clone()));
+                            }
+                            Block::Thinking { text, .. } if !text.trim().is_empty() => {
+                                t.push(Entry::Thinking {
+                                    text: text.clone(),
+                                    expanded: show_thinking,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Event::PermissionRequested {
+                request_id,
+                call_id,
+                tool,
+                summary,
+                input,
+            } => t.push(Entry::Tool(ToolCall {
+                call_id: call_id.clone(),
+                request_id: Some(request_id.clone()),
+                name: tool.clone(),
+                summary: summary.clone(),
+                input: input.clone(),
+                state: ToolState::Asking,
+                output: String::new(),
+                millis: 0,
+                started: Instant::now(),
+                expanded: false,
+            })),
+            Event::PermissionResolved {
+                request_id,
+                allowed,
+            } => {
+                let index = t.items.iter().rposition(|i| {
+                    matches!(&i.entry, Entry::Tool(c) if c.request_id.as_ref() == Some(request_id))
+                });
+                if let Some(Entry::Tool(tool)) = index.and_then(|i| t.entry_mut(i)) {
+                    tool.state = if *allowed {
+                        ToolState::Running
+                    } else {
+                        ToolState::Denied
+                    };
+                }
+            }
+            Event::ToolStarted {
+                call_id,
+                tool,
+                summary,
+                input,
+            } => match t.tool_mut(call_id) {
+                Some(existing) => {
+                    existing.state = ToolState::Running;
+                    existing.started = Instant::now();
+                }
+                None => t.push(Entry::Tool(ToolCall {
+                    call_id: call_id.clone(),
+                    request_id: None,
+                    name: tool.clone(),
+                    summary: summary.clone(),
+                    input: input.clone(),
+                    state: ToolState::Running,
+                    output: String::new(),
+                    millis: 0,
+                    started: Instant::now(),
+                    expanded: false,
+                })),
+            },
+            Event::ToolFinished {
+                call_id,
+                output,
+                is_error,
+                millis,
+                ..
+            } => {
+                if let Some(tool) = t.tool_mut(call_id) {
+                    tool.output = output.clone();
+                    tool.millis = *millis;
+                    tool.state = if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Done
+                    };
+                }
+            }
+            Event::Todos { items } => {
+                self.todos = items.clone();
+                match t.last_mut() {
+                    Some(Entry::Todos(list)) => *list = items.clone(),
+                    _ => t.push(Entry::Todos(items.clone())),
+                }
+            }
+            Event::Usage {
+                turn,
+                total,
+                context_tokens,
+            } => {
+                self.turn_usage.add(turn);
+                self.total = *total;
+                self.context = *context_tokens;
+            }
+            Event::Compacted { .. } => {
+                t.push(Entry::Compacted);
+                self.context = 0;
+            }
+            Event::Notice { level, message } => t.push(Entry::Notice(*level, message.clone())),
+            Event::TurnFinished { status, .. } => {
+                self.running = false;
+                self.writing = None;
+                self.last_status = Some(*status);
+                let footer = self.footer(*status);
+                self.transcript.push(Entry::Footer(footer));
+            }
+            Event::AgentFinished { .. } | Event::Update { .. } => {}
+        }
+    }
+
+    fn footer(&self, status: TurnStatus) -> String {
+        let mut parts = vec![self.model.clone()];
+        if self.context > 0 {
+            parts.push(format!("{} context", tokens(self.context)));
+        }
+        if self.turn_usage.output_tokens > 0 {
+            parts.push(format!("{} out", tokens(self.turn_usage.output_tokens)));
+        }
+        if self.turn_usage.cost > 0.0 {
+            parts.push(format!("${:.4}", self.turn_usage.cost));
+        }
+        if let Some(started) = self.turn_started {
+            parts.push(duration(started.elapsed()));
+        }
+        match status {
+            TurnStatus::Completed => {}
+            TurnStatus::Cancelled => parts.push("cancelled".into()),
+            TurnStatus::Failed => parts.push("failed".into()),
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Every agent seen on the bus, in the order they started.
+#[derive(Default)]
+pub struct Agents {
+    views: HashMap<AgentId, AgentView>,
+    order: Vec<AgentId>,
+    pub show_thinking: bool,
+}
+
+impl Agents {
+    pub fn get(&self, id: &str) -> Option<&AgentView> {
+        self.views.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut AgentView> {
+        self.views.get_mut(id)
+    }
+
+    pub fn insert(&mut self, view: AgentView) -> &mut AgentView {
+        let id = view.id.clone();
+        if !self.views.contains_key(&id) {
+            self.order.push(id.clone());
+        }
+        self.views.entry(id).or_insert(view)
+    }
+
+    /// Direct children of `id`, oldest first.
+    pub fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a AgentView> + 'a {
+        self.order
+            .iter()
+            .filter_map(|i| self.views.get(i))
+            .filter(move |v| v.parent.as_deref() == Some(id))
+    }
+
+    /// `id` and all its descendants, depth first, with their depth.
+    pub fn tree(&self, id: &str) -> Vec<(usize, &AgentView)> {
+        fn walk<'a>(
+            agents: &'a Agents,
+            id: &str,
+            depth: usize,
+            out: &mut Vec<(usize, &'a AgentView)>,
+        ) {
+            if let Some(view) = agents.get(id) {
+                out.push((depth, view));
+                for child in agents.children(id) {
+                    walk(agents, &child.id, depth + 1, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, id, 0, &mut out);
+        out
+    }
+
+    /// The top-level agent `id` belongs to.
+    pub fn root_of<'a>(&'a self, mut id: &'a str) -> &'a str {
+        while let Some(parent) = self.views.get(id).and_then(|v| v.parent.as_deref()) {
+            id = parent;
+        }
+        id
+    }
+
+    pub fn apply(&mut self, envelope: &Envelope) {
+        let id = &envelope.agent;
+        if let Event::AgentStarted {
+            label,
+            parent,
+            model,
+            cwd,
+        } = &envelope.event
+        {
+            let known = self.views.contains_key(id);
+            let view = self.insert(AgentView::new(id, label, parent.clone(), model, cwd));
+            view.model = model.clone();
+            if let (false, Some(parent)) = (known, parent) {
+                let card = AgentCard {
+                    id: id.clone(),
+                    label: label.clone(),
+                    model: model.clone(),
+                    started: Instant::now(),
+                    finished: None,
+                    report: String::new(),
+                };
+                if let Some(parent) = self.views.get_mut(parent) {
+                    parent.transcript.push(Entry::Agent(card));
+                }
+            }
+            return;
+        }
+        let show_thinking = self.show_thinking;
+        let Some(view) = self.views.get_mut(id) else {
+            return;
+        };
+        view.apply(&envelope.event, show_thinking);
+        let parent = view.parent.clone();
+        let elapsed = view.started.elapsed();
+        let model = view.model.clone();
+        let Some(parent) = parent.and_then(|p| self.views.get_mut(&p)) else {
+            return;
+        };
+        match &envelope.event {
+            Event::AgentFinished { status, report } => {
+                if let Some(card) = parent.transcript.agent_card_mut(id) {
+                    card.finished = Some((*status, elapsed));
+                    card.report = text::first_line(report).to_owned();
+                }
+            }
+            Event::UserMessage { .. } => {
+                if let Some(card) = parent.transcript.agent_card_mut(id) {
+                    card.finished = None;
+                }
+            }
+            Event::ModelChanged { .. } => {
+                if let Some(card) = parent.transcript.agent_card_mut(id) {
+                    card.model = model;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `1.2s`, `42s`, `3m 05s`.
+pub fn duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 10.0 {
+        format!("{secs:.1}s")
+    } else if secs < 60.0 {
+        format!("{secs:.0}s")
+    } else {
+        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
+    }
+}
+
+fn render(entry: &Entry, cwd: &str, ctx: &Ctx<'_>) -> Rendered {
+    let t = theme();
+    let width = ctx.width.max(10);
+    let body = width - 2;
+    let mut code = Vec::new();
+    let lines = match entry {
+        _ if entry.is_hidden() => Vec::new(),
+        Entry::User(text) => {
+            let band = Style::new().bg(t.code_bg);
+            let mut lines = Vec::new();
+            for source in sanitize(text).trim_end().split('\n') {
+                for row in text::wrap(&[Span::raw(source.to_owned())], body.saturating_sub(1)) {
+                    let marker = if lines.is_empty() { "› " } else { "  " };
+                    let mut spans = vec![Span::styled(
+                        marker,
+                        band.fg(t.dim).add_modifier(Modifier::BOLD),
+                    )];
+                    spans.extend(row);
+                    lines.push(pad(Line::from(spans).style(band), width));
+                }
+            }
+            lines
+        }
+        Entry::Assistant(text) => {
+            let rendered = markdown::render(text, body);
+            code = rendered.code;
+            indent(rendered.lines, "  ")
+        }
+        Entry::Thinking { text, expanded } => {
+            let style = t.dim().add_modifier(Modifier::ITALIC);
+            let mut head = vec![Span::styled("∴ Thinking", style)];
+            if *expanded {
+                let mut lines = vec![Line::from(head)];
+                for source in sanitize(text).trim().split('\n') {
+                    for row in text::wrap(&[Span::styled(source.to_owned(), style)], body) {
+                        lines.push(Line::from(row));
+                    }
+                }
+                indent_rest(lines)
+            } else {
+                let preview = text::first_line(text);
+                if !preview.is_empty() {
+                    let room = body.saturating_sub(12);
+                    head.push(Span::styled(
+                        format!("  {}", text::truncate(&sanitize(preview), room)),
+                        t.faint(),
+                    ));
+                }
+                vec![Line::from(head)]
+            }
+        }
+        Entry::Tool(tool) => render_tool(tool, cwd, width, ctx),
+        Entry::Agent(card) => render_card(card, width, ctx),
+        Entry::Todos(items) => items
+            .iter()
+            .map(|item| {
+                let (mark, mark_style, text_style) = match item.status {
+                    TodoStatus::Completed => (
+                        "✓",
+                        t.fg(t.accent),
+                        t.dim().add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    TodoStatus::InProgress => ("▸", t.bold(), t.bold()),
+                    TodoStatus::Pending => ("○", t.dim(), Style::new()),
+                };
+                let content =
+                    text::truncate(&sanitize(&item.content), body.saturating_sub(2)).into_owned();
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("{mark} "), mark_style),
+                    Span::styled(content, text_style),
+                ])
+            })
+            .collect(),
+        Entry::Notice(level, message) => {
+            let (mark, style) = match level {
+                Level::Info => ("  ", t.dim()),
+                Level::Warning => ("! ", t.fg(t.warning)),
+                Level::Error => ("✗ ", t.fg(t.error)),
+            };
+            let rows = text::wrap(&[Span::styled(sanitize(message).into_owned(), style)], body);
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let mut spans = vec![Span::styled(if i == 0 { mark } else { "  " }, style)];
+                    spans.extend(row);
+                    Line::from(spans)
+                })
+                .collect()
+        }
+        Entry::Compacted => {
+            let label = " conversation compacted ";
+            let side = width.saturating_sub(text::width(label)) / 2;
+            vec![Line::styled(
+                format!("{}{label}{}", "─".repeat(side), "─".repeat(side)),
+                t.faint(),
+            )]
+        }
+        Entry::Footer(footer) => vec![Line::styled(
+            text::truncate(&format!("  ─ {footer}"), width).into_owned(),
+            t.faint(),
+        )],
+        Entry::Info(lines) => lines
+            .iter()
+            .map(|l| text::truncate_line(l.clone(), width))
+            .collect(),
+    };
+    Rendered {
+        width: ctx.width,
+        lines,
+        code,
+    }
+}
+
+fn indent(lines: Vec<Line<'static>>, prefix: &'static str) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.spans.insert(0, Span::raw(prefix));
+            line
+        })
+        .collect()
+}
+
+fn indent_rest(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    for line in lines.iter_mut().skip(1) {
+        line.spans.insert(0, Span::raw("  "));
+    }
+    lines
+}
+
+/// Extends a line with spaces so its background spans the full width.
+fn pad(mut line: Line<'static>, width: usize) -> Line<'static> {
+    let used = line.width();
+    if used < width {
+        line.spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
+/// `left` and `right` on one row, `left` truncated to make room.
+fn header(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let right_width: usize = right.iter().map(|s| text::width(&s.content)).sum();
+    let left = text::truncate_line(Line::from(left), width.saturating_sub(right_width + 1));
+    let gap = width.saturating_sub(left.width() + right_width);
+    let mut spans = left.spans;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(right);
+    Line::from(spans)
+}
+
+fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>) -> Vec<Line<'static>> {
+    let t = theme();
+    let (mark, mark_style) = match tool.state {
+        ToolState::Asking => ("?", t.fg(t.warning).add_modifier(Modifier::BOLD)),
+        ToolState::Running => (ctx.spinner(), t.dim()),
+        ToolState::Done => ("●", t.fg(t.accent)),
+        ToolState::Failed | ToolState::Denied => ("●", t.fg(t.error)),
+    };
+    let output_lines = tool.output.lines().filter(|l| !l.trim().is_empty()).count();
+    let mut meta = Vec::new();
+    match tool.state {
+        ToolState::Asking => meta.push(Span::styled("awaiting approval", t.fg(t.warning))),
+        ToolState::Denied => meta.push(Span::styled("denied", t.fg(t.error))),
+        ToolState::Running => meta.push(Span::styled(duration(tool.started.elapsed()), t.dim())),
+        ToolState::Done | ToolState::Failed => {
+            if output_lines > 1 {
+                meta.push(Span::styled(format!("{output_lines} lines  "), t.faint()));
+            }
+            if tool.millis > 0 {
+                meta.push(Span::styled(
+                    duration(Duration::from_millis(tool.millis)),
+                    t.dim(),
+                ));
+            }
+        }
+    }
+    let expandable = !tool.output.is_empty() || !tool.input.is_null();
+    if expandable {
+        meta.push(Span::styled(
+            if tool.expanded { " ▾" } else { " ▸" },
+            t.faint(),
+        ));
+    }
+    let summary = sanitize(&tool.summary).replace(cwd, "");
+    let head = header(
+        vec![
+            Span::styled(format!("{mark} "), mark_style),
+            Span::styled(tool.name.clone(), t.bold()),
+            Span::raw(" "),
+            Span::raw(summary),
+        ],
+        meta,
+        width,
+    );
+    let mut lines = vec![head];
+    let body = width.saturating_sub(4).max(4);
+    let bar = Span::styled("  │ ", t.faint());
+    if !tool.expanded {
+        if tool.state == ToolState::Failed {
+            let first = text::first_line(&tool.output);
+            lines.push(Line::from(vec![
+                Span::styled("  └ ", t.faint()),
+                Span::styled(
+                    text::truncate(&sanitize(first), body).into_owned(),
+                    t.fg(t.error),
+                ),
+            ]));
+        }
+        return lines;
+    }
+    for row in input_lines(tool, body) {
+        let mut spans = vec![bar.clone()];
+        spans.extend(row.spans);
+        lines.push(Line::from(spans));
+    }
+    if !tool.output.is_empty() {
+        lines.push(Line::from(bar.clone()));
+        let style = if tool.state == ToolState::Failed {
+            t.fg(t.error)
+        } else {
+            t.dim()
+        };
+        for source in sanitize(&tool.output).trim_end().split('\n') {
+            for row in text::hard_wrap(source, body) {
+                lines.push(Line::from(vec![bar.clone(), Span::styled(row, style)]));
+            }
+        }
+    }
+    lines
+}
+
+/// The tool's input, shaped for the common tools and as `key: value` otherwise.
+fn input_lines(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
+    const MAX: usize = 60;
+    let t = theme();
+    let mut lines = Vec::new();
+    let block = |text: &str, prefix: &'static str, style: Style, lines: &mut Vec<Line<'static>>| {
+        for source in sanitize(text).split('\n') {
+            for row in text::hard_wrap(source, width.saturating_sub(prefix.len())) {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(row, style),
+                ]));
+            }
+        }
+    };
+    let input = &tool.input;
+    match (tool.name.as_str(), input.as_object()) {
+        ("bash", Some(map)) if map.contains_key("command") => {
+            let command = map["command"].as_str().unwrap_or_default();
+            block(command, "$ ", Style::new(), &mut lines);
+        }
+        ("edit", Some(map)) => {
+            let path = map.get("path").and_then(Value::as_str).unwrap_or_default();
+            lines.push(Line::styled(path.to_owned(), t.bold()));
+            let old = map
+                .get("old_string")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let new = map
+                .get("new_string")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            block(old, "- ", t.fg(t.error), &mut lines);
+            block(new, "+ ", t.fg(t.accent), &mut lines);
+        }
+        (_, Some(map)) => {
+            for (key, value) in map {
+                match value.as_str() {
+                    Some(text) if text.contains('\n') => {
+                        lines.push(Line::styled(format!("{key}:"), t.dim()));
+                        block(text, "  ", Style::new(), &mut lines);
+                    }
+                    Some(text) => block(&format!("{key}: {text}"), "", Style::new(), &mut lines),
+                    None => block(&format!("{key}: {value}"), "", Style::new(), &mut lines),
+                }
+            }
+        }
+        (_, None) if !input.is_null() => block(&input.to_string(), "", Style::new(), &mut lines),
+        _ => {}
+    }
+    if lines.len() > MAX {
+        let more = lines.len() - MAX;
+        lines.truncate(MAX);
+        lines.push(Line::styled(format!("… {more} more lines"), t.faint()));
+    }
+    lines
+}
+
+fn render_card(card: &AgentCard, width: usize, ctx: &Ctx<'_>) -> Vec<Line<'static>> {
+    let t = theme();
+    let snapshot = ctx.snapshots.get(&card.id);
+    let (mark, mark_style, status) = match card.finished {
+        None => (
+            ctx.spinner(),
+            t.dim(),
+            Span::styled(duration(card.started.elapsed()), t.dim()),
+        ),
+        Some((TurnStatus::Completed, took)) => (
+            "◆",
+            t.fg(t.accent),
+            Span::styled(format!("done · {}", duration(took)), t.dim()),
+        ),
+        Some((TurnStatus::Failed, _)) => {
+            ("◆", t.fg(t.error), Span::styled("failed", t.fg(t.error)))
+        }
+        Some((TurnStatus::Cancelled, _)) => (
+            "◆",
+            t.fg(t.warning),
+            Span::styled("cancelled", t.fg(t.warning)),
+        ),
+    };
+    let head = header(
+        vec![
+            Span::styled(format!("{mark} "), mark_style),
+            Span::styled(card.label.clone(), t.bold()),
+            Span::styled(format!("  {}", card.model), t.faint()),
+        ],
+        vec![status, Span::styled(" ›", t.faint())],
+        width,
+    );
+    let detail = match (card.finished, snapshot) {
+        (None, Some(snap)) if !snap.activity.is_empty() => snap.activity.clone(),
+        (None, _) => "starting".to_owned(),
+        (Some(_), _) => card.report.clone(),
+    };
+    let mut lines = vec![head];
+    let room = width.saturating_sub(4);
+    let detail = markdown::render(text::first_line(&detail), room)
+        .lines
+        .into_iter()
+        .next();
+    if let Some(detail) = detail {
+        let mut spans = vec![Span::styled("  └ ", t.faint())];
+        for span in detail.spans {
+            let style = t.dim().patch(span.style);
+            spans.push(span.style(style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use malac_core::event::Envelope;
+    use serde_json::json;
+
+    fn envelope(agent: &str, event: Event) -> Envelope {
+        Envelope {
+            agent: agent.into(),
+            seq: 0,
+            at: chrono::Utc::now(),
+            event,
+        }
+    }
+
+    fn started(agent: &str, parent: Option<&str>) -> Envelope {
+        envelope(
+            agent,
+            Event::AgentStarted {
+                label: if parent.is_some() { "helper" } else { "main" }.into(),
+                parent: parent.map(str::to_owned),
+                model: "lora/smart".into(),
+                cwd: "/work".into(),
+            },
+        )
+    }
+
+    fn kinds(agents: &Agents, id: &str) -> Vec<&'static str> {
+        agents
+            .get(id)
+            .unwrap()
+            .transcript
+            .items()
+            .iter()
+            .map(|i| match &i.entry {
+                Entry::User(_) => "user",
+                Entry::Assistant(_) => "assistant",
+                Entry::Thinking { .. } => "thinking",
+                Entry::Tool(_) => "tool",
+                Entry::Agent(_) => "agent",
+                Entry::Todos(_) => "todos",
+                Entry::Notice(..) => "notice",
+                Entry::Compacted => "compacted",
+                Entry::Footer(_) => "footer",
+                Entry::Info(_) => "info",
+            })
+            .collect()
+    }
+
+    fn rendered(agents: &mut Agents, id: &str, width: usize) -> Vec<String> {
+        let snapshots = HashMap::new();
+        let ctx = Ctx {
+            width,
+            now: Instant::now(),
+            snapshots: &snapshots,
+        };
+        let transcript = &mut agents.get_mut(id).unwrap().transcript;
+        transcript.prepare(&ctx);
+        transcript
+            .items()
+            .iter()
+            .flat_map(|i| {
+                let gap = i.gap().then(String::new);
+                gap.into_iter().chain(
+                    i.lines()
+                        .iter()
+                        .map(|l| l.to_string().trim_end().to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn folds_a_turn_into_entries() {
+        let mut agents = Agents::default();
+        let events = [
+            started("m", None),
+            envelope(
+                "m",
+                Event::UserMessage {
+                    text: "run the tests".into(),
+                },
+            ),
+            envelope(
+                "m",
+                Event::ThinkingDelta {
+                    text: "Let me ".into(),
+                },
+            ),
+            envelope(
+                "m",
+                Event::ThinkingDelta {
+                    text: "check.".into(),
+                },
+            ),
+            envelope(
+                "m",
+                Event::TextDelta {
+                    text: "Running ".into(),
+                },
+            ),
+            envelope(
+                "m",
+                Event::TextDelta {
+                    text: "**now**.".into(),
+                },
+            ),
+            envelope(
+                "m",
+                Event::ToolStarted {
+                    call_id: "c1".into(),
+                    tool: "bash".into(),
+                    summary: "cargo test".into(),
+                    input: json!({"command": "cargo test"}),
+                },
+            ),
+            envelope(
+                "m",
+                Event::ToolFinished {
+                    call_id: "c1".into(),
+                    tool: "bash".into(),
+                    output: "ok\n2 passed".into(),
+                    is_error: false,
+                    millis: 1200,
+                },
+            ),
+            envelope(
+                "m",
+                Event::TurnFinished {
+                    status: TurnStatus::Completed,
+                    text: "Running now.".into(),
+                },
+            ),
+        ];
+        for e in &events {
+            agents.apply(e);
+        }
+        assert_eq!(
+            kinds(&agents, "m"),
+            vec!["user", "thinking", "assistant", "tool", "footer"]
+        );
+        let view = agents.get("m").unwrap();
+        assert!(!view.running);
+        assert_eq!(view.transcript.last_answer(), Some("Running **now**."));
+        let lines = rendered(&mut agents, "m", 50);
+        assert_eq!(lines[0], "› run the tests");
+        assert_eq!(lines[2], "∴ Thinking  Let me check.");
+        assert_eq!(lines[4], "  Running now.");
+        assert_eq!(
+            lines[6],
+            "● bash cargo test                  2 lines  1.2s ▸"
+        );
+        assert!(lines[8].starts_with("  ─ lora/smart"));
+    }
+
+    #[test]
+    fn permission_requests_become_the_tool_card() {
+        let mut agents = Agents::default();
+        agents.apply(&started("m", None));
+        agents.apply(&envelope(
+            "m",
+            Event::PermissionRequested {
+                request_id: "r1".into(),
+                call_id: "c1".into(),
+                tool: "bash".into(),
+                summary: "rm -rf build".into(),
+                input: json!({"command": "rm -rf build"}),
+            },
+        ));
+        let lines = rendered(&mut agents, "m", 50);
+        assert!(lines[0].starts_with("? bash rm -rf build"));
+        assert!(lines[0].contains("awaiting approval"));
+        agents.apply(&envelope(
+            "m",
+            Event::PermissionResolved {
+                request_id: "r1".into(),
+                allowed: false,
+            },
+        ));
+        let lines = rendered(&mut agents, "m", 50);
+        assert!(lines[0].contains("denied"));
+        assert_eq!(kinds(&agents, "m"), vec!["tool"]);
+    }
+
+    #[test]
+    fn expanding_a_tool_shows_input_and_output() {
+        let mut agents = Agents::default();
+        agents.apply(&started("m", None));
+        agents.apply(&envelope(
+            "m",
+            Event::ToolStarted {
+                call_id: "c1".into(),
+                tool: "bash".into(),
+                summary: "ls /work/src".into(),
+                input: json!({"command": "ls /work/src"}),
+            },
+        ));
+        agents.apply(&envelope(
+            "m",
+            Event::ToolFinished {
+                call_id: "c1".into(),
+                tool: "bash".into(),
+                output: "main.rs\nlib.rs".into(),
+                is_error: false,
+                millis: 5,
+            },
+        ));
+        let lines = rendered(&mut agents, "m", 40);
+        assert!(lines[0].starts_with("● bash ls src"));
+        assert!(agents.get_mut("m").unwrap().transcript.toggle(0));
+        let lines = rendered(&mut agents, "m", 40);
+        assert_eq!(
+            &lines[1..],
+            ["  │ $ ls /work/src", "  │", "  │ main.rs", "  │ lib.rs"]
+        );
+    }
+
+    #[test]
+    fn subagents_get_cards_in_their_parent() {
+        let mut agents = Agents::default();
+        agents.apply(&started("m", None));
+        agents.apply(&envelope(
+            "m",
+            Event::ToolStarted {
+                call_id: "c1".into(),
+                tool: "agent_spawn".into(),
+                summary: "helper: look around".into(),
+                input: json!({"task": "look around"}),
+            },
+        ));
+        agents.apply(&started("s", Some("m")));
+        agents.apply(&envelope(
+            "s",
+            Event::UserMessage {
+                text: "look around".into(),
+            },
+        ));
+        assert_eq!(kinds(&agents, "m"), vec!["tool", "agent"]);
+        assert_eq!(agents.root_of("s"), "m");
+        assert_eq!(agents.tree("m").len(), 2);
+        agents.apply(&envelope(
+            "s",
+            Event::AgentFinished {
+                status: TurnStatus::Completed,
+                report: "Found it.\nDetails".into(),
+            },
+        ));
+        let lines = rendered(&mut agents, "m", 50);
+        assert_eq!(lines.len(), 2, "the agent_spawn call is shown as the card");
+        assert!(lines[0].starts_with("◆ helper  lora/smart"));
+        assert!(lines[0].contains("done ·"));
+        assert_eq!(lines[1], "  └ Found it.");
+    }
+
+    #[test]
+    fn unstreamed_messages_are_shown_whole() {
+        let mut agents = Agents::default();
+        agents.apply(&started("m", None));
+        agents.apply(&envelope(
+            "m",
+            Event::AssistantMessage {
+                message: Message::assistant(vec![Block::text("All done.")]),
+            },
+        ));
+        assert_eq!(kinds(&agents, "m"), vec!["assistant"]);
+    }
+
+    #[test]
+    fn loads_saved_history() {
+        let history = vec![
+            Message::user_text("fix it"),
+            Message::assistant(vec![
+                Block::text("Looking."),
+                Block::ToolUse {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input: json!({"path": "a.rs"}),
+                },
+            ]),
+            Message::user(vec![Block::ToolResult {
+                tool_use_id: "t1".into(),
+                content: vec![Block::text("no such file")],
+                is_error: true,
+            }]),
+            Message::user_text(format!("{COMPACTED_PREFIX} Summary of everything")),
+        ];
+        let mut transcript = Transcript::new("/work");
+        transcript.load(&history, |name, input| format!("{name}:{}", input["path"]));
+        let entries: Vec<String> = transcript
+            .items()
+            .iter()
+            .map(|i| i.entry.plain_text())
+            .collect();
+        assert_eq!(entries[0], "fix it");
+        assert_eq!(entries[1], "Looking.");
+        assert_eq!(entries[2], "read read:\"a.rs\"\n\nno such file");
+        assert!(
+            matches!(&transcript.items()[2].entry, Entry::Tool(t) if t.state == ToolState::Failed)
+        );
+        assert!(matches!(transcript.items()[3].entry, Entry::Compacted));
+    }
+
+    #[test]
+    fn visible_ranges_and_rows() {
+        let mut agents = Agents::default();
+        agents.apply(&started("m", None));
+        for i in 0..5 {
+            agents.apply(&envelope(
+                "m",
+                Event::Notice {
+                    level: Level::Info,
+                    message: format!("n{i}"),
+                },
+            ));
+        }
+        rendered(&mut agents, "m", 40);
+        let t = &agents.get("m").unwrap().transcript;
+        assert_eq!(t.height(), 9);
+        assert_eq!(t.row_of(2), 3);
+        assert_eq!(t.visible(3..6), vec![(2, 3), (3, 5)]);
+    }
+}

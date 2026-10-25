@@ -9,23 +9,32 @@ use anyhow::{Context, Result, bail};
 use crossterm::style::Stylize;
 use malac_core::config::{self, Config};
 use malac_core::permission::{Approver, DenyAll, Mode};
-use malac_core::{AgentHandle, AgentSpec, Block, Runtime, session};
+use malac_core::{AgentHandle, AgentSpec, Block, Runtime, session, update};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approve::{FirstAnswer, TerminalApprover, TerminalLock};
 use crate::render::{self, Renderer};
-use crate::web;
-use crate::{RunArgs, SessionOptions};
+use crate::{RunArgs, SessionOptions, tui, web};
 
-struct Session {
-    runtime: Arc<Runtime>,
-    handle: AgentHandle,
-    main: Arc<RwLock<String>>,
+/// What the line REPL and the TUI share: the runtime, the agent being
+/// talked to and the web UI serving it.
+pub struct Session {
+    pub runtime: Arc<Runtime>,
+    pub handle: AgentHandle,
+    pub main: Arc<RwLock<String>>,
+    /// Asks in this terminal; raced against the web UI once that serves.
+    pub approver: Option<Arc<dyn Approver>>,
+    pub web_urls: Vec<String>,
+}
+
+/// The line REPL's own state.
+struct Repl {
+    session: Session,
     turn_done: mpsc::UnboundedReceiver<()>,
-    terminal_approver: Option<Arc<dyn Approver>>,
-    web_url: Option<String>,
+    /// The last `/model` listing, so `/model 3` can pick from it.
+    model_choices: Vec<String>,
 }
 
 pub fn load_config(args: &SessionOptions, cwd: &std::path::Path) -> Result<Config> {
@@ -69,6 +78,10 @@ pub async fn run(args: RunArgs) -> Result<i32> {
 
     let stdin_tty = std::io::stdin().is_terminal();
     let interactive = stdin_tty && std::io::stdout().is_terminal() && !args.print && !args.json;
+    let use_tui = interactive
+        && !args.plain
+        && config.ui.tui
+        && std::env::var("TERM").is_ok_and(|term| term != "dumb");
     let mut prompt = args.prompt.join(" ");
     if !stdin_tty {
         let piped = read_piped_stdin(!prompt.trim().is_empty());
@@ -81,26 +94,36 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     }
 
     let runtime = Runtime::new(config, cwd.clone())?;
-    for server in runtime.connect_mcp().await {
-        if let Some(err) = server.error {
-            let first = err.lines().next().unwrap_or_default();
-            eprintln!(
-                "{}",
-                format!("! MCP server `{}` unavailable: {first}", server.name).yellow()
-            );
+    if interactive {
+        runtime.start_update_check();
+    }
+    let servers = runtime.connect_mcp().await;
+    // The TUI lists unavailable servers itself.
+    if !use_tui {
+        for server in servers {
+            if let Some(err) = server.error {
+                let first = err.lines().next().unwrap_or_default();
+                eprintln!(
+                    "{}",
+                    format!("! MCP server `{}` unavailable: {first}", server.name).yellow()
+                );
+            }
         }
     }
 
     let lock: TerminalLock = Arc::new(Mutex::new(()));
     let main = Arc::new(RwLock::new(String::new()));
-    let terminal_approver: Option<Arc<dyn Approver>> = stdin_tty
-        .then(|| Arc::new(TerminalApprover::new(lock.clone(), main.clone())) as Arc<dyn Approver>);
-    runtime.set_approver(
-        terminal_approver
-            .clone()
-            .unwrap_or_else(|| Arc::new(DenyAll)),
-    );
-    if terminal_approver.is_none() && mode != Mode::Autopilot {
+    let (approver, approvals) = if use_tui {
+        let (approver, approvals) = tui::approver();
+        (Some(approver), Some(approvals))
+    } else {
+        let terminal = stdin_tty.then(|| {
+            Arc::new(TerminalApprover::new(lock.clone(), main.clone())) as Arc<dyn Approver>
+        });
+        (terminal, None)
+    };
+    runtime.set_approver(approver.clone().unwrap_or_else(|| Arc::new(DenyAll)));
+    if approver.is_none() && mode != Mode::Autopilot {
         eprintln!(
             "{}",
             "! no terminal to ask for permission: calls that need approval will be denied (use -y)"
@@ -108,10 +131,12 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         );
     }
 
+    // Subscribed before the agent starts, so the TUI sees it start.
+    let events = use_tui.then(|| runtime.bus.subscribe());
     let (done_tx, turn_done) = mpsc::unbounded_channel();
     if args.json {
         render::spawn_json(runtime.bus.subscribe(), main.clone(), done_tx);
-    } else {
+    } else if !use_tui {
         Renderer {
             lock: lock.clone(),
             main: main.clone(),
@@ -124,30 +149,43 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     let handle = open_agent(&runtime, &args, &cwd)?;
     *main.write().unwrap() = handle.id.clone();
     let mut session = Session {
-        runtime,
+        runtime: runtime.clone(),
         handle,
         main,
-        turn_done,
-        terminal_approver,
-        web_url: None,
+        approver,
+        web_urls: Vec::new(),
     };
-    if args.web {
-        session.start_web().await?;
+    let web = &runtime.config.web;
+    if (args.web || args.web_remote || web.enabled) && !args.no_web {
+        session
+            .serve_web(args.web_remote || web.remote, args.web_port)
+            .await?;
     }
 
+    if let (Some(events), Some(approvals)) = (events, approvals) {
+        let result = tui::run(session, events, approvals, prompt).await;
+        runtime.shutdown().await;
+        return result.map(|_| 0);
+    }
+
+    let mut repl = Repl {
+        session,
+        turn_done,
+        model_choices: Vec::new(),
+    };
     if interactive {
-        print_banner(&session);
+        print_banner(&repl.session);
     }
     let mut ok = true;
     if !prompt.trim().is_empty() {
-        ok = session.turn(prompt).await;
+        ok = repl.turn(prompt).await;
     }
     if !interactive {
-        session.runtime.shutdown().await;
+        runtime.shutdown().await;
         return Ok(if ok { 0 } else { 1 });
     }
-    let result = session.repl().await;
-    session.runtime.shutdown().await;
+    let result = repl.repl().await;
+    runtime.shutdown().await;
     result.map(|_| 0)
 }
 
@@ -183,22 +221,159 @@ fn open_agent(
     runtime.spawn_agent(AgentSpec::default())
 }
 
+/// What the name stands for.
+pub const TAGLINE: &str = "Multi-Agent Loop for Autonomous Coding";
+
+/// Shown when an interactive session starts.
+pub const PIG: [&str; 5] = [
+    r"   ^    ^    ",
+    r"  / \__/ \   ",
+    r" (  o  o  )  ",
+    r" (  (oo)  )  ",
+    r"  \______/~  ",
+];
+
 fn print_banner(session: &Session) {
     let snap = session.handle.snapshot();
-    let line = format!(
-        "malac {} · {} · {} mode · {}",
-        env!("CARGO_PKG_VERSION"),
-        snap.model,
-        session.runtime.policy.mode().as_str(),
-        snap.info.cwd.display()
-    );
-    println!("{}", line.dark_grey());
-    println!(
-        "{}",
-        "/help for commands · Ctrl-C interrupts · Ctrl-D exits".dark_grey()
-    );
-    if let Some(url) = &session.web_url {
-        println!("{}", format!("web UI: {url}").dark_grey());
+    let info = [
+        format!("malac {} · {TAGLINE}", env!("CARGO_PKG_VERSION")).bold(),
+        format!(
+            "{} · {} mode",
+            snap.model,
+            session.runtime.policy.mode().as_str()
+        )
+        .reset(),
+        snap.info.cwd.display().to_string().dark_grey(),
+        "/help for commands · Ctrl-C interrupts · Ctrl-D exits"
+            .to_owned()
+            .dark_grey(),
+        session
+            .web_urls
+            .first()
+            .map(|url| format!("web UI: {url}"))
+            .unwrap_or_default()
+            .dark_grey(),
+    ];
+    for (art, text) in PIG.iter().zip(info) {
+        println!("{}{text}", art.bold());
+    }
+    let indent = " ".repeat(PIG[0].len());
+    for url in session.web_urls.iter().skip(1) {
+        println!("{indent}{}", format!("remote: {url}").dark_grey());
+    }
+    if let Some(notice) = update_notice(&update::status()) {
+        println!("{indent}{}", notice.green());
+    }
+    println!();
+}
+
+/// One line about a newer malac, if there is one.
+pub fn update_notice(status: &update::Status) -> Option<String> {
+    if let Some(version) = &status.installed {
+        return Some(format!("malac {version} installed · restart to use it"));
+    }
+    match (&status.latest, status.available) {
+        (Some(version), true) => Some(format!("malac {version} is available · run `malac update`")),
+        _ => None,
+    }
+}
+
+/// A slash command, parsed the same way by the line REPL and the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slash<'a> {
+    Exit,
+    Help,
+    Model(&'a str),
+    Mode(&'a str),
+    Agents,
+    Compact,
+    Clear,
+    Resume(&'a str),
+    Sessions,
+    Cost,
+    Mcp,
+    Memory,
+    Web(&'a str),
+}
+
+/// Every slash command: name, arguments and what it does.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("model", "[provider/model]", "show or switch the model"),
+    (
+        "mode",
+        "[ask|edits|autopilot]",
+        "show or change the permission mode",
+    ),
+    ("agents", "", "show subagents and what they are doing"),
+    ("compact", "", "summarize the conversation to free context"),
+    ("clear", "", "start a new session"),
+    ("resume", "[id]", "list sessions or resume one"),
+    ("sessions", "", "list recent sessions"),
+    ("cost", "", "token usage and cost of this session"),
+    ("mcp", "", "connected tool servers"),
+    ("memory", "", "saved memories"),
+    ("web", "[remote]", "serve the web UI for this session"),
+    ("help", "", "list commands"),
+    ("exit", "", "quit"),
+];
+
+impl<'a> Slash<'a> {
+    /// Parses a command line without its leading `/`.
+    pub fn parse(input: &'a str) -> Result<Self> {
+        let (name, arg) = input
+            .trim()
+            .split_once(' ')
+            .map_or((input.trim(), ""), |(n, a)| (n, a.trim()));
+        Ok(match name {
+            "exit" | "quit" | "q" => Slash::Exit,
+            "help" | "?" => Slash::Help,
+            "model" => Slash::Model(arg),
+            "mode" => Slash::Mode(arg),
+            "agents" => Slash::Agents,
+            "compact" => Slash::Compact,
+            "clear" | "new" => Slash::Clear,
+            "resume" => Slash::Resume(arg),
+            "sessions" => Slash::Sessions,
+            "cost" | "usage" => Slash::Cost,
+            "mcp" => Slash::Mcp,
+            "memory" => Slash::Memory,
+            "web" => Slash::Web(arg),
+            other => bail!("unknown command /{other} (try /help)"),
+        })
+    }
+}
+
+impl Session {
+    pub fn switch_to(&mut self, handle: AgentHandle) {
+        *self.main.write().unwrap() = handle.id.clone();
+        self.handle = handle;
+    }
+
+    async fn start_web(&mut self, host: &str, port: u16) -> Result<()> {
+        if !self.web_urls.is_empty() {
+            return Ok(());
+        }
+        let (urls, web_approver) = web::spawn_for(self.runtime.clone(), host, port).await?;
+        let approver: Arc<dyn Approver> = match &self.approver {
+            Some(terminal) => Arc::new(FirstAnswer(vec![terminal.clone(), web_approver])),
+            None => web_approver,
+        };
+        self.runtime.set_approver(approver);
+        self.web_urls = urls;
+        Ok(())
+    }
+
+    /// Serves the web UI on the configured host, or on every interface when
+    /// `remote`; does nothing if it already serves.
+    pub async fn serve_web(&mut self, remote: bool, port: Option<u16>) -> Result<()> {
+        let web = &self.runtime.config.web;
+        let host = if remote {
+            "0.0.0.0".to_owned()
+        } else {
+            web.host.clone()
+        };
+        let port = port.unwrap_or(web.port);
+        self.start_web(&host, port).await
     }
 }
 
@@ -207,17 +382,17 @@ enum Flow {
     Exit,
 }
 
-impl Session {
+impl Repl {
     /// Runs one prompt; Ctrl-C cancels it and every subagent it started.
     async fn turn(&mut self, text: String) -> bool {
-        let runtime = self.runtime.clone();
-        let id = self.handle.id.clone();
+        let runtime = self.session.runtime.clone();
+        let id = self.session.handle.id.clone();
         let watcher = tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
                 runtime.cancel_tree(&id);
             }
         });
-        let result = self.handle.prompt(vec![Block::text(text)]).await;
+        let result = self.session.handle.prompt(vec![Block::text(text)]).await;
         watcher.abort();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.turn_done.recv()).await;
         result.is_ok()
@@ -261,73 +436,74 @@ impl Session {
         Ok(())
     }
 
-    fn switch_to(&mut self, handle: AgentHandle) {
-        *self.main.write().unwrap() = handle.id.clone();
-        self.handle = handle;
-    }
-
-    async fn start_web(&mut self) -> Result<()> {
-        if self.web_url.is_some() {
-            return Ok(());
+    /// Lists every model the providers offer, numbered for `/model <n>`.
+    async fn list_models(&mut self) {
+        let current = self.session.handle.snapshot().model;
+        self.model_choices.clear();
+        for provider in malac_core::provider::discover_models(&self.session.runtime.config).await {
+            let models = provider.all();
+            if models.is_empty() {
+                continue;
+            }
+            println!("{}", provider.provider.as_str().bold());
+            for model in models {
+                let spec = format!("{}/{model}", provider.provider);
+                self.model_choices.push(spec.clone());
+                let marker = if spec == current { "*" } else { " " };
+                println!("  {marker} {:>3}  {spec}", self.model_choices.len());
+            }
         }
-        let (url, web_approver) = web::spawn_for(self.runtime.clone(), None).await?;
-        let approver: Arc<dyn Approver> = match &self.terminal_approver {
-            Some(terminal) => Arc::new(FirstAnswer(vec![terminal.clone(), web_approver])),
-            None => web_approver,
-        };
-        self.runtime.set_approver(approver);
-        self.web_url = Some(url);
-        Ok(())
+        println!(
+            "{}",
+            "/model <number> or /model provider/model to switch".dark_grey()
+        );
     }
 
     async fn command(&mut self, input: &str) -> Result<Flow> {
-        let (name, arg) = input
-            .split_once(' ')
-            .map_or((input, ""), |(n, a)| (n, a.trim()));
-        match name {
-            "exit" | "quit" | "q" => return Ok(Flow::Exit),
-            "help" | "?" => print_help(),
-            "model" if arg.is_empty() => {
-                println!("current: {}", self.handle.snapshot().model);
-                for (name, provider) in &self.runtime.config.providers {
-                    if !provider.models.is_empty() {
-                        println!("  {name}: {}", provider.models.join(", "));
-                    }
-                }
-            }
-            "model" => self.handle.set_model(arg),
-            "mode" if arg.is_empty() => println!("mode: {}", self.runtime.policy.mode().as_str()),
-            "mode" => {
+        let session = &mut self.session;
+        match Slash::parse(input)? {
+            Slash::Exit => return Ok(Flow::Exit),
+            Slash::Help => print_help(),
+            Slash::Model("") => self.list_models().await,
+            Slash::Model(arg) => match arg.parse::<usize>() {
+                Ok(n) => match self.model_choices.get(n.wrapping_sub(1)) {
+                    Some(spec) => session.handle.set_model(&spec.clone()),
+                    None => bail!("no model #{n}; run /model to list them"),
+                },
+                Err(_) => session.handle.set_model(arg),
+            },
+            Slash::Mode("") => println!("mode: {}", session.runtime.policy.mode().as_str()),
+            Slash::Mode(arg) => {
                 let mode: Mode = arg.parse()?;
-                self.runtime.policy.set_mode(mode);
+                session.runtime.policy.set_mode(mode);
                 println!("mode: {}", mode.as_str());
             }
-            "compact" => {
-                self.handle.compact();
-                self.handle.wait_idle().await;
+            Slash::Compact => {
+                session.handle.compact();
+                session.handle.wait_idle().await;
             }
-            "clear" | "new" => {
-                let handle = self.runtime.spawn_agent(AgentSpec::default())?;
-                self.switch_to(handle);
+            Slash::Clear => {
+                let handle = session.runtime.spawn_agent(AgentSpec::default())?;
+                session.switch_to(handle);
                 println!("{}", "started a new session".dark_grey());
             }
-            "resume" if arg.is_empty() => print_sessions(10)?,
-            "resume" => {
-                let handle = self.runtime.resume_agent(arg)?;
-                self.switch_to(handle);
-                println!("{}", format!("resumed {arg}").dark_grey());
+            Slash::Resume("") => print_sessions(10)?,
+            Slash::Resume(id) => {
+                let handle = session.runtime.resume_agent(id)?;
+                session.switch_to(handle);
+                println!("{}", format!("resumed {id}").dark_grey());
             }
-            "sessions" => print_sessions(20)?,
-            "agents" => print_agents(&self.runtime, &self.handle.id),
-            "cost" | "usage" => {
-                let usage = self.handle.snapshot().usage;
+            Slash::Sessions => print_sessions(20)?,
+            Slash::Agents => print_agents(&session.runtime, &session.handle.id),
+            Slash::Cost => {
+                let usage = session.handle.snapshot().usage;
                 println!(
                     "input {} · cached {} · output {} · ${:.4}",
                     usage.input_tokens, usage.cache_read_tokens, usage.output_tokens, usage.cost
                 );
             }
-            "mcp" => {
-                for server in self.runtime.servers() {
+            Slash::Mcp => {
+                for server in session.runtime.servers() {
                     match server.error {
                         Some(err) => println!(
                             "{} {}: {}",
@@ -339,42 +515,27 @@ impl Session {
                     }
                 }
             }
-            "memory" => {
-                for entry in self.runtime.memory.list() {
+            Slash::Memory => {
+                for entry in session.runtime.memory.list() {
                     println!("[{:?}] {}: {}", entry.scope, entry.name, entry.description);
                 }
             }
-            "web" => {
-                self.start_web().await?;
-                if let Some(url) = &self.web_url {
+            Slash::Web(arg) => {
+                let remote = arg == "remote" || session.runtime.config.web.remote;
+                session.serve_web(remote, None).await?;
+                for url in &session.web_urls {
                     println!("web UI: {url}");
                 }
             }
-            other => bail!("unknown command /{other} (try /help)"),
         }
         Ok(Flow::Continue)
     }
 }
 
 fn print_help() {
-    let rows = [
-        ("/model [provider/model]", "show or switch the model"),
-        (
-            "/mode [ask|edits|autopilot]",
-            "show or change the permission mode",
-        ),
-        ("/agents", "show subagents and what they are doing"),
-        ("/compact", "summarize the conversation to free context"),
-        ("/clear", "start a new session"),
-        ("/resume [id]", "list sessions or resume one"),
-        ("/cost", "token usage and cost of this session"),
-        ("/mcp", "connected tool servers"),
-        ("/memory", "saved memories"),
-        ("/web", "open the web UI for this session"),
-        ("/exit", "quit"),
-    ];
-    for (command, help) in rows {
-        println!("  {:<30} {}", command.bold(), help);
+    for (name, args, help) in COMMANDS {
+        let command = format!("/{name} {args}");
+        println!("  {:<30} {}", command.trim_end().bold(), help);
     }
 }
 

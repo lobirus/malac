@@ -96,6 +96,10 @@ pub enum Event {
         status: TurnStatus,
         report: String,
     },
+    /// Published with an empty agent id when a newer malac is available or installed.
+    Update {
+        status: crate::update::Status,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

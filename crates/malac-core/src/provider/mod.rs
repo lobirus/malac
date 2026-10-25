@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::config::{ProviderConfig, ProviderKind};
+use crate::config::{self, Config, ProviderConfig, ProviderKind};
 use crate::message::{Message, StopReason, Usage};
 
 pub use anthropic::Anthropic;
@@ -99,6 +99,66 @@ pub async fn list_models(config: &ProviderConfig, api_key: Option<&str>) -> Resu
         .flatten()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
         .collect())
+}
+
+/// What one provider offers, for model pickers.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModels {
+    pub provider: String,
+    pub kind: &'static str,
+    pub has_key: bool,
+    /// Models listed in the configuration.
+    pub configured: Vec<String>,
+    /// Models the provider reported from its `/models` endpoint.
+    pub available: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl ProviderModels {
+    /// Configured models first, then the rest of what the provider reports.
+    pub fn all(&self) -> Vec<String> {
+        let mut models = self.configured.clone();
+        for model in &self.available {
+            if !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        models
+    }
+}
+
+/// Asks every usable provider for its models, in parallel. Providers with
+/// no key are skipped unless they run locally.
+pub async fn discover_models(config: &Config) -> Vec<ProviderModels> {
+    let lookups = config.providers.iter().map(|(name, provider)| async move {
+        let key = config::api_key(name, provider);
+        let local = provider.base_url.contains("://localhost")
+            || provider.base_url.contains("://127.0.0.1");
+        let mut entry = ProviderModels {
+            provider: name.clone(),
+            kind: provider.kind.as_str(),
+            has_key: key.is_some(),
+            configured: provider.models.clone(),
+            available: Vec::new(),
+            error: None,
+        };
+        if key.is_none() && !local {
+            entry.error = Some("no API key".into());
+            return entry;
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            list_models(provider, key.as_deref()),
+        )
+        .await
+        {
+            Ok(Ok(models)) => entry.available = models,
+            Ok(Err(err)) => entry.error = Some(format!("{err:#}")),
+            Err(_) => entry.error = Some("timed out".into()),
+        }
+        entry
+    });
+    futures::future::join_all(lookups).await
 }
 
 pub fn http_client() -> reqwest::Client {
