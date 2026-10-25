@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>malac</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <aside id="sidebar" class="sidebar" aria-label="Agents and sessions">
+      <header class="sidebar-head">
+        <div class="brand">
+          <span id="connection-dot" class="connection-dot" title="Connecting"></span>
+          <span class="brand-name">malac</span>
+          <span id="version" class="version"></span>
+        </div>
+        <div id="cwd" class="cwd"></div>
+      </header>
+      <div class="sidebar-controls">
+        <button id="new-session" class="button primary wide" type="button">New session</button>
+        <div id="mode" class="segmented" role="group" aria-label="Permission mode">
+          <button type="button" data-mode="ask" title="Confirm edits and commands">ask</button>
+          <button type="button" data-mode="edits" title="Edit files freely, confirm commands">edits</button>
+          <button type="button" data-mode="autopilot" title="Never ask; deny rules still apply">autopilot</button>
+        </div>
+      </div>
+      <div class="sidebar-scroll">
+        <section class="sidebar-section">
+          <h2>Agents</h2>
+          <ul id="agent-tree" class="tree"></ul>
+          <p id="agents-empty" class="sidebar-empty">No live agents</p>
+        </section>
+        <section class="sidebar-section">
+          <h2>Recent sessions</h2>
+          <ul id="sessions" class="sessions"></ul>
+          <p id="sessions-empty" class="sidebar-empty">No saved sessions</p>
+        </section>
+      </div>
+      <footer id="servers" class="servers"></footer>
+    </aside>
+    <div id="backdrop" class="backdrop"></div>
+    <main class="main">
+      <header class="topbar">
+        <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Toggle sidebar">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor"/>
+            <path d="M6 2.5v11" stroke="currentColor"/>
+          </svg>
+        </button>
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Agent path"></nav>
+        <div id="actions" class="actions"></div>
+      </header>
+      <div id="status" class="statusline"></div>
+      <div id="offline" class="offline-banner" hidden>Disconnected from malac, reconnecting</div>
+      <section id="permissions" class="permissions" aria-label="Pending approvals" aria-live="polite"></section>
+      <div id="scroller" class="scroller">
+        <div id="transcript"></div>
+      </div>
+      <form id="composer" class="composer">
+        <div class="composer-box">
+          <div id="attachments" class="attachments" hidden></div>
+          <textarea id="input" rows="2" aria-label="Message"></textarea>
+          <div class="composer-bar">
+            <select id="model" class="select" aria-label="Model for the new session"></select>
+            <span class="hint">Enter to send, Shift+Enter for a new line</span>
+            <button class="button primary" type="submit">Send</button>
+          </div>
+        </div>
+      </form>
+      <div id="toasts" class="toasts"></div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,138 @@
+# Configuration
+
+Configuration is TOML, merged in this order (later wins, tables merge key by key):
+
+1. built-in defaults (`anthropic` and `openai` providers reading `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`)
+2. `~/.malac/config.toml`
+3. `<project root>/.malac/config.toml`, where the project root is the nearest directory with `.git`
+4. `[profiles.<name>]` when started with `--profile <name>`
+5. command-line flags
+
+`MALAC_HOME` moves `~/.malac` elsewhere. `malac config show` prints the merged result; `malac config path` prints the file locations.
+
+A project file cannot set `mode`, `providers`, `mcp`, `control` or `permissions`, because cloning a repository should never be enough to run commands or widen permissions. Set `trust_project_config = true` in your user config to lift this.
+
+See [`examples/config.toml`](../examples/config.toml) for a complete example.
+
+## Top level
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | first provider with a key | Main model, `provider/model` |
+| `small_model` | `model` | Used for compaction summaries |
+| `vision_model` | none | Describes images for models with `vision = false` |
+| `mode` | `"ask"` | `ask`, `edits` or `autopilot` |
+| `max_steps` | `200` | Tool-call rounds per prompt before the agent is stopped |
+| `trust_project_config` | `false` | Let project config set every key |
+
+## `[providers.<name>]`
+
+| Key | Meaning |
+|---|---|
+| `kind` | `"openai"` (chat completions) or `"anthropic"` (messages API) |
+| `base_url` | e.g. `https://api.openai.com/v1`, `http://localhost:11434/v1`, `https://api.anthropic.com` |
+| `api_key_env` | Environment variable holding the key |
+| `headers` | Extra HTTP headers |
+| `models` | Model ids offered by `/model` and the web UI |
+
+Keys are looked up in `api_key_env` first, then in `~/.malac/credentials.toml` (written by `malac provider add --api-key-stdin`, mode 0600).
+
+## `[models."provider/model"]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `context_window` | `200000` | Compaction starts at 80% of this |
+| `max_output_tokens` | `16384` | `max_tokens` sent with each request |
+| `vision` | assumed `true` | Set `false` to route images through `vision_model` |
+| `thinking_budget` | none | Anthropic extended thinking budget |
+| `temperature` | provider default | |
+
+## `[permissions]`
+
+```toml
+allow = ["bash(cargo *)", "bash(git status*)", "browser_*", "web_fetch(*.rust-lang.org)"]
+deny = ["bash(rm -rf /*)", "bash(git push --force*)"]
+```
+
+A rule is a tool-name glob, optionally followed by a glob in parentheses matched against the tool's key: the command for `bash` (each segment separately), the path for `write`/`edit`, the host for `web_fetch`. Deny rules always win and apply in autopilot too.
+
+## `[mcp.<name>]`
+
+```toml
+[mcp.github]
+url = "https://api.githubcopilot.com/mcp/"          # http(s) = streamable HTTP, ws(s) = WebSocket
+headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
+
+[mcp.files]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/notes"]
+env = { DEBUG = "0" }
+prefix = true   # expose tools as files__<tool> (default)
+enabled = true
+```
+
+`${VAR}` is expanded in `command`, `args`, `env` and `headers`. `token_env` names a variable sent as a bearer token.
+
+## `[control]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Connect the computer and browser control service |
+| `command` | `malac-control` next to `malac`, else on `PATH` | Binary to spawn |
+| `url` | none | Connect to a running service, e.g. `ws://127.0.0.1:7878` |
+| `token_env` | none | Variable holding that service's token |
+
+The service itself reads `~/.malac/control.toml` (browser profiles, screenshot size); see `malac-control --help`.
+
+## `[memory]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Memory tools and the index in the system prompt |
+| `auto_recall` | `true` | Attach vector matches to each prompt |
+| `recall_limit` | `5` | Matches considered per prompt |
+
+```toml
+[memory.vector]
+url = "http://localhost:19530"   # or a Zilliz Cloud endpoint
+token_env = "MILVUS_TOKEN"       # "user:password" or an API key
+database = "default"
+collection = "malac_memory"
+
+[memory.embeddings]
+provider = "lora"                # an OpenAI-compatible provider with /embeddings
+model = "embed"
+```
+
+## `[agents]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_depth` | `2` | How deep subagents may nest |
+| `max_concurrent` | `4` | Subagents running at the same time |
+
+Agent types live in `~/.malac/agents/*.md` and `<project>/.malac/agents/*.md`:
+
+```markdown
+---
+name: reviewer
+description: Reviews a diff for bugs and missing tests
+model: lora/smart
+tools: read, grep, glob, bash
+---
+You review code changes. Report concrete problems with file:line references...
+```
+
+## Instructions and skills
+
+`AGENTS.md`, `MALAC.md` or `CLAUDE.md` (first found per directory) are read from `~/.malac/` and from every directory between the project root and the working directory.
+
+Skills are `SKILL.md` files in `~/.malac/skills/<name>/`, `~/.claude/skills/<name>/`, `<project>/.malac/skills/<name>/` or `<project>/.claude/skills/<name>/`, with `name` and `description` frontmatter. Their descriptions are listed in the system prompt and the agent reads the file when a skill applies.
+
+## `[ui]` and `[web]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
+| `web.host` | `127.0.0.1` | `malac web` bind address |
+| `web.port` | `7700` | `malac web` port |

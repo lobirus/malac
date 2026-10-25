@@ -1,0 +1,5 @@
+/target
+node_modules/
+*.vsix
+editors/vscode/out/
+.DS_Store

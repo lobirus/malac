@@ -1,0 +1,72 @@
+{
+  "name": "malac",
+  "displayName": "malac",
+  "description": "Watch and steer malac coding agents from VS Code.",
+  "version": "0.1.0",
+  "publisher": "malac",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/malac-io/malac",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "malac.open",
+        "title": "Malac: Open"
+      },
+      {
+        "command": "malac.askAboutSelection",
+        "title": "Malac: Ask About Selection"
+      },
+      {
+        "command": "malac.runInTerminal",
+        "title": "Malac: Run in Terminal"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "malac.askAboutSelection",
+          "when": "editorHasSelection",
+          "group": "malac"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Malac",
+      "properties": {
+        "malac.path": {
+          "type": "string",
+          "default": "malac",
+          "description": "Path to the malac binary."
+        },
+        "malac.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments for `malac web`, for example [\"-y\"]."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.90.0",
+    "typescript": "^5.6.0"
+  }
+}

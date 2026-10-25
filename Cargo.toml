@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/malac-mcp", "crates/malac-control", "crates/malac-core", "crates/malac"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+license = "MIT"
+repository = "https://github.com/malac-io/malac"
+homepage = "https://malac.io"
+
+[workspace.dependencies]
+malac-core = { path = "crates/malac-core" }
+malac-control = { path = "crates/malac-control" }
+malac-mcp = { path = "crates/malac-mcp" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "6"
+eventsource-stream = "0.2"
+futures = "0.3"
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+tokio-util = "0.7"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+strip = true

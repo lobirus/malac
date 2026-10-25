@@ -1,0 +1,69 @@
+# ~/.malac/config.toml
+#
+# Project settings go in <repo>/.malac/config.toml. For safety a project file
+# cannot set mode, providers, mcp, control or permissions unless you set
+# `trust_project_config = true` here.
+
+model = "lora/default"
+small_model = "lora/fast"
+vision_model = "lora/vision"
+
+# ask      - confirm edits and commands
+# edits    - edit files freely, confirm commands
+# autopilot - never ask; deny rules still apply
+mode = "ask"
+
+[providers.lora]
+kind = "openai"
+base_url = "https://lora.example.com/v1"
+api_key_env = "LORA_API_KEY"
+models = ["default", "smart", "fast", "vision", "deepseek-v4.1-flash", "glm-5.3-flash"]
+
+# The same gateway speaks the Anthropic Messages API too.
+[providers.lora-anthropic]
+kind = "anthropic"
+base_url = "https://lora.example.com"
+api_key_env = "LORA_API_KEY"
+models = ["smart"]
+
+[providers.local]
+kind = "openai"
+base_url = "http://localhost:11434/v1"
+
+[models."lora/default"]
+context_window = 200000
+vision = false
+
+[models."lora/vision"]
+vision = true
+
+[permissions]
+allow = ["bash(git status*)", "bash(git diff*)", "bash(cargo test*)"]
+deny = ["bash(rm -rf /*)", "bash(git push --force*)"]
+
+[memory]
+auto_recall = true
+
+[memory.vector]
+url = "http://localhost:19530"
+# token_env = "MILVUS_TOKEN"
+collection = "malac_memory"
+
+[memory.embeddings]
+provider = "local"
+model = "nomic-embed-text"
+
+[agents]
+max_depth = 2
+max_concurrent = 4
+
+[mcp.github]
+url = "https://api.githubcopilot.com/mcp/"
+headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
+enabled = false
+
+[profiles.fast]
+model = "lora/fast"
+
+[profiles.yolo]
+mode = "autopilot"
