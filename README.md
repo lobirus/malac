@@ -7,18 +7,7 @@
 
 **Multi-Agent Loop for Autonomous Coding.** An autonomous coding agent for the terminal, with a web UI, a VS Code extension, and a control service for the desktop and browser. Written in Rust. (*Malac* is also Hungarian for pig.)
 
-```
-$ malac -y calc.py has a bug in add, fix it and verify with a python one-liner
-● read calc.py
-  ⎿ 1	def add(a, b): (+1 lines)
-● edit calc.py
-  ⎿ Edited calc.py: (+2 lines)
-● bash python3 -c "import calc; assert calc.add(2,3)==5; assert calc.add(-1,1)==0; print('ok')"
-  ⎿ ok
-Fixed `calc.py:2`: `add` returned `a - b`, now returns `a + b`. Verified with
-`python3 -c "..."` → `ok`.
-─ lora/default · 3.3k context · 366 out · $0.0024 · 2.2s
-```
+![malac fixing a failing test in the terminal UI](docs/images/demo.gif)
 
 - **CLI first.** `malac <prompt>` starts working immediately. `malac` alone opens an interactive session.
 - **Any provider.** OpenAI-compatible and Anthropic-compatible APIs, several providers at once, per-model settings, profiles. Works with gateways such as LiteLLM, OpenRouter or Together, and with local models through Ollama or vLLM.
@@ -27,6 +16,21 @@ Fixed `calc.py:2`: `add` returned `a - b`, now returns `a + b`. Verified with
 - **Memory.** Markdown memory files, optionally indexed in Milvus (self-hosted or remote) for semantic recall.
 - **Computer and browser control.** `malac-control` is a separate MCP service for screenshots, mouse and keyboard, and Chrome automation with isolated profiles. malac starts it automatically.
 - **MCP.** Connect any MCP server over stdio, streamable HTTP or WebSocket.
+
+## Screenshots
+
+| Terminal UI | Web UI |
+|---|---|
+| ![Welcome screen with the malac pig](docs/images/tui-welcome.png) | ![Web UI home, light theme](docs/images/web-home-light.png) |
+| ![A session with tool cards and a running subagent](docs/images/tui-session.png) | ![A web session with an edit diff and a subagent report](docs/images/web-session.png) |
+| ![Model picker across providers](docs/images/tui-model-picker.png) | ![Settings](docs/images/web-settings.png) |
+
+<details>
+<summary>Web UI in dark mode</summary>
+
+![Web UI home, dark theme](docs/images/web-home-dark.png)
+
+</details>
 
 ## Install
 
