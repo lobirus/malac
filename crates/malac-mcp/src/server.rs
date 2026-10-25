@@ -124,6 +124,8 @@ async fn serve_connection(
     stream: TcpStream,
     token: &Option<String>,
 ) -> Result<()> {
+    // The handshake callback's signature is fixed by tungstenite.
+    #[allow(clippy::result_large_err)]
     let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
         if !origin_allowed(req) {
             return Err(reject(StatusCode::FORBIDDEN, "origin not allowed"));

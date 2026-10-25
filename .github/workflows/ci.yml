@@ -18,7 +18,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Lints and tests run on the minimum supported Rust, so results match
+      # local development; the stable job below catches newer-compiler breaks.
+      - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: clippy, rustfmt
       - name: Install Linux libraries
@@ -28,6 +30,15 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxrandr-dev libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
 
   vscode:
     runs-on: ubuntu-latest
