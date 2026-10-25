@@ -247,4 +247,4 @@ See [docs/architecture.md](docs/architecture.md) for how the pieces fit together
 
 ## License
 
-MIT
+malac is created by [lobirus](https://github.com/lobirus) and released under the MIT license.
