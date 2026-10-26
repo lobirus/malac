@@ -3,6 +3,7 @@
 
 import * as vscode from "vscode";
 import type { DaemonClient } from "../connection/client";
+import { describeApproval } from "../model/approval";
 import type { DaemonStore } from "../model/store";
 import type { PendingApproval } from "../protocol";
 
@@ -11,6 +12,7 @@ const CHOICES: { label: string; decision: "allow" | "allow_session" | "deny" }[]
   { label: "Always", decision: "allow_session" },
   { label: "Deny", decision: "deny" },
 ];
+const DETAILS = "Show details";
 
 export class ApprovalNotifier {
   private shown = new Set<string>();
@@ -37,8 +39,16 @@ export class ApprovalNotifier {
   private async show(request: PendingApproval): Promise<void> {
     const tab = this.store.tab(request.tab)?.tab.name;
     const where = tab ? ` in ${tab}` : "";
-    const what = request.summary ? `${request.tool}: ${request.summary}` : request.tool;
-    const choice = await vscode.window.showWarningMessage(`malac: ${request.agent_label}${where} wants to use ${truncate(what, 200)}`, ...CHOICES.map((c) => c.label));
+    const { title, details, plugin } = describeApproval(request.tool, request.summary, request.input);
+    const text = plugin
+      ? `malac: ${request.agent_label}${where} asks to ${title.charAt(0).toLowerCase()}${title.slice(1)}. It runs code on the daemon's machine.`
+      : `malac: ${request.agent_label}${where} wants to use ${truncate(request.summary ? `${request.tool}: ${request.summary}` : request.tool, 200)}`;
+    const labels = CHOICES.map((c) => c.label);
+    let choice = await vscode.window.showWarningMessage(text, ...labels, ...(details ? [DETAILS] : []));
+    if (choice === DETAILS && details) {
+      // A modal dialog shows the whole content (a plugin's hooks, MCP servers and scripts).
+      choice = await vscode.window.showWarningMessage(text, { modal: true, detail: details }, ...labels);
+    }
     const picked = CHOICES.find((c) => c.label === choice);
     if (!picked) return;
     if (!this.store.pending.has(request.id)) return;

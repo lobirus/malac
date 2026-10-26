@@ -3,13 +3,14 @@ import { test } from "node:test";
 import { ChatController, ChatHost } from "../src/chat/controller";
 import type { ToWebview } from "../src/chat/messages";
 import type { ConnectionStatus, DaemonClient } from "../src/connection/client";
+import type { FileAccess } from "../src/model/attachments";
 import { Emitter } from "../src/model/emitter";
 import { DaemonStore } from "../src/model/store";
-import type { ServerMessage } from "../src/protocol";
+import type { ProjectSummary, ServerMessage } from "../src/protocol";
 
 const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost: 0 };
 
-function setup() {
+function setup({ project, address, files }: { project?: ProjectSummary; address?: { url: string; token: string; source: string }; files?: FileAccess } = {}) {
   const store = new DaemonStore();
   const sent: Record<string, unknown>[] = [];
   const replies: ((command: Record<string, unknown>) => ServerMessage)[] = [];
@@ -17,6 +18,7 @@ function setup() {
   const client = {
     connection: status,
     online: true,
+    address: address ?? { url: "http://127.0.0.1:7700", token: "t", source: "daemon.json" },
     onStatus: new Emitter<ConnectionStatus>(),
     send(command: Record<string, unknown>) {
       sent.push(command);
@@ -48,7 +50,7 @@ function setup() {
     clientVersion: () => "1.0.1",
     dropHint: "",
   };
-  const chat = new ChatController(store, client, host);
+  const chat = new ChatController(store, client, host, { files });
   store.apply({
     type: "snapshot",
     daemon: { version: "1.0.1", pid: 1, started: "", version_mismatch: false, clients: 1, attached: false, remote: false },
@@ -70,6 +72,7 @@ function setup() {
           options: { model: "lora/smart" },
           loaded: true,
           snapshots: [{ id: "a1", label: "main", parent: null, depth: 0, cwd: "/src/app", created: "", model: "lora/fast", status: "idle", activity: "", usage, report: null, live: true }],
+          project,
         },
       ],
     },
@@ -174,4 +177,115 @@ test("live events of the shown agent stream to the webview", async () => {
   const events = posted.filter((m) => m.type === "events");
   assert.equal(events.length, 1, "batched");
   assert.ok(events[0].type === "events" && events[0].agent === "a1" && events[0].events.map((e) => e.text).join("") === "Hello");
+});
+
+const lastState = (posted: ToWebview[]) => {
+  const state = [...posted].reverse().find((m) => m.type === "state");
+  assert.ok(state && state.type === "state");
+  return state.state;
+};
+
+test("the composer gets the built-in and the tab's custom slash commands", async () => {
+  const { chat, posted } = setup({ project: { root: "/src/app", commands: [{ name: "review", description: "Review the diff", argument_hint: "[pr]", source: "project" }] } });
+  chat.receive({ type: "ready" });
+  await tick();
+  const commands = lastState(posted).commands;
+  assert.equal(commands[0].name, "model");
+  assert.deepEqual(commands.at(-1), { name: "review", description: "Review the diff", hint: "[pr]", source: "project" });
+});
+
+test("built-in commands run in the chat; custom ones go to the agent as typed", async () => {
+  const { chat, sent, posted } = setup();
+  chat.receive({ type: "ready" });
+  chat.receive({ type: "submit", text: "/mode edits", attachments: [], images: [] });
+  chat.receive({ type: "submit", text: "/model smart", attachments: [], images: [] });
+  chat.receive({ type: "submit", text: "/compact", attachments: [], images: [] });
+  chat.receive({ type: "submit", text: "/review 42", attachments: [], images: [] });
+  await tick();
+  assert.deepEqual(
+    sent.filter((c) => c.type !== "tab_activate").map((c) => [c.type, c.mode ?? c.model ?? c.text ?? c.agent]),
+    [
+      ["mode", "edits"],
+      ["model", "lora/smart"],
+      ["compact", "a1"],
+      ["prompt", "/review 42"],
+    ],
+  );
+  assert.equal(posted.filter((m) => m.type === "sent" && m.ok).length, 4);
+  chat.receive({ type: "submit", text: "/clear", attachments: [], images: [] });
+  await tick();
+  assert.equal(chat.currentAgent, null, "/clear starts a new agent");
+});
+
+test("a tab inside a larger repository shows a hint that opens the root", async () => {
+  const { chat, posted, replies, sent, store } = setup({ project: { root: "/src", subdir: "app", suggest_root: "/src" } });
+  chat.receive({ type: "ready" });
+  await tick();
+  const hint = lastState(posted).banners.find((b) => b.id === "root-hint");
+  assert.ok(hint, "the hint is shown");
+  assert.match(hint.text, /app is one part of the repository src/);
+  const open = hint.actions[0];
+  store.apply({ type: "tab_created", workspace: "w1", index: 1, tab: { id: "t2", name: "src", cwd: "/src", agents: [], active_agent: null, mode: "ask", options: {}, loaded: false, snapshots: [] } });
+  replies.push(() => ({ type: "ack", tab: "t2", workspace: "w1" }));
+  chat.receive({ type: "command", command: open.command, args: open.args });
+  await tick();
+  assert.deepEqual(sent.find((c) => c.type === "tab_create"), { type: "tab_create", cwd: "/src", reuse: true });
+  assert.equal(chat.currentTab, "t2", "the chat switches to the root's tab");
+  chat.selectTab("t1");
+  const dismiss = hint.actions[1];
+  chat.receive({ type: "command", command: dismiss.command, args: dismiss.args });
+  await tick();
+  assert.equal(lastState(posted).banners.find((b) => b.id === "root-hint"), undefined, "Not now hides it for the tab");
+});
+
+test("plugin approvals carry their contents for Show details", async () => {
+  const { chat, store, posted } = setup();
+  chat.receive({ type: "ready" });
+  store.apply({
+    type: "event",
+    tab: "t1",
+    envelope: { agent: "a1", seq: 9, at: "", type: "permission_requested", request_id: "p1", call_id: "", tool: "malac_configure", summary: "enable plugin deploy, which runs hooks", input: { plugin: "deploy", contents: "hooks (run commands): PostToolUse: ./lint.sh" } },
+  });
+  await tick();
+  const request = lastState(posted).pending.find((p) => p.id === "p1")!;
+  assert.equal(request.plugin, "deploy");
+  assert.equal(request.title, "Enable plugin deploy, which runs hooks");
+  assert.equal(request.details, "hooks (run commands): PostToolUse: ./lint.sh");
+});
+
+test("a remote daemon gets dropped files and the current file as data; local ones get paths", async () => {
+  const table: Record<string, string> = { "/home/me/notes.txt": "remember", "/home/me/app/a.ts": "export {}" };
+  const files: FileAccess = {
+    stat: async (p) => ({ size: Buffer.byteLength(table[p] ?? ""), isDirectory: () => false }),
+    read: async (p) => Buffer.from(table[p]),
+  };
+  const editor = { path: "/home/me/app/a.ts", displayPath: "a.ts", languageId: "typescript", selection: null, selectedText: "", dirty: false, text: () => "" };
+  for (const remote of [true, false]) {
+    const { chat, sent, setEditor } = setup({ files, address: remote ? { url: "https://studio.example.com", token: "d", source: "remote" } : undefined });
+    chat.receive({ type: "ready" });
+    setEditor(editor);
+    chat.receive({ type: "submit", text: "look", attachments: [{ path: "/home/me/notes.txt" }], images: [] });
+    await tick();
+    const prompt = sent.find((c) => c.type === "prompt")!;
+    assert.deepEqual(
+      prompt.attachments,
+      remote
+        ? [
+            { path: "notes.txt", data: Buffer.from("remember").toString("base64") },
+            { path: "a.ts", data: Buffer.from("export {}").toString("base64") },
+          ]
+        : [{ path: "/home/me/notes.txt" }, { path: "/home/me/app/a.ts" }],
+    );
+  }
+});
+
+test("an attachment a remote daemon cannot take stops the prompt", async () => {
+  const files: FileAccess = { stat: async () => ({ size: 0, isDirectory: () => true }), read: async () => Buffer.alloc(0) };
+  const { chat, sent, posted } = setup({ files, address: { url: "http://10.0.0.5:7700", token: "t", source: "daemon.json" } });
+  chat.receive({ type: "ready" });
+  chat.receive({ type: "submit", text: "look", attachments: [{ path: "/home/me/src" }], images: [] });
+  await tick();
+  assert.equal(sent.find((c) => c.type === "prompt"), undefined);
+  const result = posted.find((m) => m.type === "sent");
+  assert.ok(result && result.type === "sent" && !result.ok && /src is a folder/.test(result.error ?? ""));
 });

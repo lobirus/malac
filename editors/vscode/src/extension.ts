@@ -11,6 +11,7 @@ import { ChatView } from "./chat/view";
 import { DaemonClient } from "./connection/client";
 import { EndpointProvider, LocalEndpoints, malacHome, parseConnectionSetting, SavedEndpoints } from "./connection/endpoint";
 import { Launcher, MissingBinaryError, parseVersion, runMalac } from "./connection/launcher";
+import { isRemoteEndpoint } from "./model/attachments";
 import { Change, DaemonStore } from "./model/store";
 import type { NodeRef } from "./model/tree";
 import type { WorkspaceView } from "./protocol";
@@ -46,7 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const local = new LocalEndpoints(home, launcher);
   const provider = (): EndpointProvider => {
     const setting = parseConnectionSetting(config().get("connection"));
-    return setting.kind === "local" ? local : new SavedEndpoints(setting.name);
+    return setting.kind === "local" ? local : new SavedEndpoints(setting.name, home);
   };
   const client = new DaemonClient({ provider, version, log });
 
@@ -274,12 +275,17 @@ export function activate(context: vscode.ExtensionContext): void {
     const endpoint = client.address;
     if (!endpoint) throw new Error("malac is not connected");
     panel ??= new MalacPanel(() => (panel = undefined));
-    await panel.show({ url: endpoint.url, token: endpoint.token });
+    // A daemon elsewhere pairs the browser on its own; its device token stays out of URLs.
+    await panel.show({ url: endpoint.url, token: endpoint.source === "remote" ? "" : endpoint.token });
   };
   register("malac.openFullUi", openFullUi);
   register("malac.open", openFullUi);
 
   register("malac.restartDaemon", async () => {
+    if (isRemoteEndpoint(client.address)) {
+      void vscode.window.showInformationMessage(`malac: the daemon at ${client.address?.url} runs on another machine; restart it there with \`malac daemon restart\`.`);
+      return;
+    }
     let force = false;
     if (client.online) {
       const info = await client.get<{ agents_running: number; jobs_running: number }>("/api/daemon").catch(() => null);

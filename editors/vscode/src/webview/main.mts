@@ -172,21 +172,15 @@ function renderApprovals(): void {
         h("button", { class: "button", type: "button", onclick: choose("deny") }, "Deny"),
       );
       const agent = state!.agents.find((a) => a.id === request.agent);
+      const who = h("strong", {}, agent?.name ?? request.agentLabel);
+      const what = request.plugin
+        ? h("span", {}, who, " asks to ", h("strong", {}, request.title.charAt(0).toLowerCase() + request.title.slice(1)), h("span", { class: "muted" }, ". It runs code on the daemon's machine."))
+        : h("span", {}, who, ` wants to use ${request.tool}`, request.summary ? h("span", { class: "muted" }, `: ${truncate(request.summary, 160)}`) : null);
       return h(
         "div",
-        { class: "approval", role: "group", "aria-label": `Approval for ${request.agentLabel}` },
-        h(
-          "div",
-          { class: "approval-text" },
-          icon("shield", 14),
-          h(
-            "span",
-            {},
-            h("strong", {}, agent?.name ?? request.agentLabel),
-            ` wants to use ${request.tool}`,
-            request.summary ? h("span", { class: "muted" }, `: ${truncate(request.summary, 160)}`) : null,
-          ),
-        ),
+        { class: `approval${request.plugin ? " plugin" : ""}`, role: "group", "aria-label": `Approval for ${request.agentLabel}` },
+        h("div", { class: "approval-text" }, icon("shield", 14), what),
+        request.details ? detailsNode(request.id, request.details) : null,
         h("div", { class: "approval-row" }, buttons, agent && agent.id !== state!.agent?.id ? h("button", { class: "link", type: "button", onclick: () => post({ type: "openAgent", agent: agent.id }) }, "Show") : null),
       );
     }),
@@ -194,10 +188,24 @@ function renderApprovals(): void {
   approvals.hidden = loose.length === 0;
 }
 
+/** Requests whose details the user opened, so re-rendering keeps them open. */
+const openDetails = new Set<string>();
+
+function detailsNode(id: string, details: string): HTMLElement {
+  const summary = h("summary", {}, openDetails.has(id) ? "Hide details" : "Show details");
+  const node = h("details", { class: "approval-details", open: openDetails.has(id) }, summary, h("pre", { class: "output" }, details));
+  node.addEventListener("toggle", () => {
+    if (node.open) openDetails.add(id);
+    else openDetails.delete(id);
+    summary.textContent = node.open ? "Hide details" : "Show details";
+  });
+  return node;
+}
+
 function emptyState(): HTMLElement {
   const tab = state?.tab;
   const tips = [
-    ["at", "Type @ to add workspace files"],
+    ["at", "Type @ to add workspace files, / for commands"],
     ["paperclip", state?.dropHint ?? "Drop files or images here"],
     ["image", "Paste screenshots"],
     ["eye", "The open file goes along; click its chip to leave it out"],

@@ -9,7 +9,8 @@
 //
 // Environment: HARNESS_PORT (7811), HARNESS_CWD (the project the fake editor
 // and "@" search use), HARNESS_FALLBACK_WS=1 (use the built-in WebSocket
-// client instead of the runtime's).
+// client instead of the runtime's), HARNESS_CONNECTION (a saved connection in
+// connections.json, which makes the daemon count as remote).
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -19,7 +20,7 @@ import { ChatController, ChatHost } from "../src/chat/controller";
 import { chatHtml } from "../src/chat/html";
 import type { FromWebview, ToWebview } from "../src/chat/messages";
 import { DaemonClient } from "../src/connection/client";
-import { LocalEndpoints, malacHome } from "../src/connection/endpoint";
+import { LocalEndpoints, malacHome, SavedEndpoints } from "../src/connection/endpoint";
 import { Launcher, parseVersion, runMalac } from "../src/connection/launcher";
 import type { EditorSnapshot } from "../src/model/context";
 import { FileHit, rankFiles } from "../src/model/files";
@@ -42,7 +43,8 @@ const launcher = new Launcher(() => ({ command: BIN, extraArgs: [], cwd: CWD, ho
 });
 let version: string | undefined;
 const client = new DaemonClient({
-  provider: () => new LocalEndpoints(() => HOME, launcher),
+  // HARNESS_CONNECTION names a saved connection (connections.json), as malac.connection does.
+  provider: () => (process.env.HARNESS_CONNECTION ? new SavedEndpoints(process.env.HARNESS_CONNECTION, () => HOME) : new LocalEndpoints(() => HOME, launcher)),
   version: () => version,
   log: (line) => console.log(`[client] ${line}`),
   forceFallbackSocket: process.env.HARNESS_FALLBACK_WS === "1",
@@ -436,6 +438,10 @@ const server = http.createServer(async (request, response) => {
     } else if (request.method === "POST" && url.pathname === "/harness/editor") {
       editor = JSON.parse(await readBody(request));
       chat.editorChanged();
+      response.writeHead(204).end();
+    } else if (request.method === "POST" && url.pathname === "/harness/message") {
+      // A daemon message, as if broadcast (e.g. an approval request to look at).
+      store.apply(JSON.parse(await readBody(request)));
       response.writeHead(204).end();
     } else if (request.method === "POST" && url.pathname === "/harness/attach") {
       const { paths } = JSON.parse(await readBody(request)) as { paths: string[] };

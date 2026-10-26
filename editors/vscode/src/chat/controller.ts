@@ -5,11 +5,15 @@
 
 import type { DaemonClient } from "../connection/client";
 import { HttpError } from "../connection/client";
+import { describeApproval } from "../model/approval";
+import { attachmentInputs, FileAccess, isRemoteEndpoint } from "../model/attachments";
 import { ContextChip, chipFor, contextPayload, EditorSnapshot, withContext } from "../model/context";
 import { Disposable, Emitter } from "../model/emitter";
 import type { FileHit } from "../model/files";
+import { formatCost, formatTokens } from "../model/format";
+import { builtinAction, slashCommands } from "../model/slash";
 import { AgentState, Change, DaemonStore, displayName } from "../model/store";
-import type { AttachmentReport, Envelope, ImageInput, Message, Mode } from "../protocol";
+import { type AttachmentReport, type Envelope, type ImageInput, type Message, type Mode, totalTokens } from "../protocol";
 import type { AgentSummary, Banner, ChatState, FromWebview, ToWebview } from "./messages";
 import { RecordedFilter, replayEvents } from "./replay";
 
@@ -35,6 +39,9 @@ const STATE_DEBOUNCE_MS = 40;
 const EVENT_FLUSH_MS = 30;
 /** Commands the webview may run through banner buttons. */
 const ALLOWED_COMMANDS = /^(malac\.[\w.]+|workbench\.action\.openSettings)$/;
+/** Banner actions the chat handles itself. */
+const OPEN_TAB = "malac.chat.openTab";
+const DISMISS_ROOT = "malac.chat.dismissRootHint";
 
 export class ChatController implements Disposable {
   private tabId: string | null = null;
@@ -59,12 +66,15 @@ export class ChatController implements Disposable {
 
   readonly onSelection = new Emitter<{ tab: string | null; agent: string | null }>();
 
+  private readonly files: FileAccess | undefined;
+
   constructor(
     private readonly store: DaemonStore,
     private readonly client: DaemonClient,
     private readonly host: ChatHost,
-    { includeCurrentFile = true }: { includeCurrentFile?: boolean } = {},
+    { includeCurrentFile = true, files }: { includeCurrentFile?: boolean; files?: FileAccess } = {},
   ) {
+    this.files = files;
     this.contextEnabled = host.recall<boolean>("chat.context") ?? includeCurrentFile;
     this.tabId = host.recall<string>("chat.tab") ?? null;
     this.disposables.push(
@@ -217,7 +227,9 @@ export class ChatController implements Disposable {
         this.selectAgent(message.agent);
         return;
       case "command":
-        if (ALLOWED_COMMANDS.test(message.command)) this.host.runCommand(message.command, message.args ?? []);
+        if (message.command === OPEN_TAB && typeof message.args?.[0] === "string") void this.openTab(message.args[0]);
+        else if (message.command === DISMISS_ROOT && typeof message.args?.[0] === "string") this.dismissRootHint(message.args[0]);
+        else if (ALLOWED_COMMANDS.test(message.command)) this.host.runCommand(message.command, message.args ?? []);
         return;
     }
   }
@@ -248,8 +260,74 @@ export class ChatController implements Disposable {
     this.scheduleState();
   }
 
+  /** Opens (or reuses) a tab for `cwd` on the daemon and shows it. */
+  async openTab(cwd: string): Promise<void> {
+    try {
+      const reply = await this.client.request({ type: "tab_create", cwd, reuse: true });
+      if (typeof reply.tab === "string") this.selectTab(reply.tab, undefined);
+    } catch (error) {
+      this.toast("error", `Cannot open a tab for ${cwd}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private dismissRootHint(tab: string): void {
+    const dismissed = new Set(this.host.recall<string[]>("chat.rootHintDismissed") ?? []);
+    dismissed.add(tab);
+    this.host.remember("chat.rootHintDismissed", [...dismissed].slice(-200));
+    this.scheduleState();
+  }
+
+  /** Whether the daemon runs on another machine, so files go as uploads. */
+  get remote(): boolean {
+    return isRemoteEndpoint(this.client.address);
+  }
+
+  /** Runs a built-in slash command; false when the text is not one. */
+  private runBuiltin(text: string): boolean {
+    const action = builtinAction(text, this.store.models);
+    if (!action) return false;
+    const agent = this.currentAgent ? this.store.agents.get(this.currentAgent) : undefined;
+    switch (action.kind) {
+      case "error":
+        this.host.post({ type: "sent", ok: false, error: action.message });
+        return true;
+      case "model":
+        this.setModel(action.model);
+        this.toast("info", agent ? `${agent.label} now uses ${action.model}` : `New agents use ${action.model}`);
+        break;
+      case "mode":
+        this.setMode(action.mode);
+        break;
+      case "compact":
+        if (!agent?.live) {
+          this.host.post({ type: "sent", ok: false, error: "There is no running conversation to compact." });
+          return true;
+        }
+        this.client.send({ type: "compact", agent: agent.id });
+        this.toast("info", `Compacting the conversation of ${agent.label}`);
+        break;
+      case "clear":
+        this.newAgent();
+        break;
+      case "cost": {
+        const usage = agent?.usage;
+        const tokens = totalTokens(usage);
+        this.toast(
+          "info",
+          usage && tokens
+            ? `${formatTokens(tokens)} tokens (input ${formatTokens(usage.input_tokens)}, output ${formatTokens(usage.output_tokens)}, cache read ${formatTokens(usage.cache_read_tokens)})${usage.cost ? `, ${formatCost(usage.cost)}` : ""}`
+            : "No usage yet.",
+        );
+        break;
+      }
+    }
+    this.host.post({ type: "sent", ok: true });
+    return true;
+  }
+
   async submit(text: string, attachments: { path: string }[], images: ImageInput[]): Promise<void> {
     try {
+      if (!attachments.length && !images.length && this.runBuiltin(text)) return;
       const tab = this.currentTab;
       if (!tab) throw new Error("Open a malac tab for this folder first.");
       const editor = this.host.editor();
@@ -259,7 +337,9 @@ export class ChatController implements Disposable {
       const prompt = withContext(text.trim(), payload.inline);
       if (!prompt && !paths.length && !images.length) return;
       const agent = this.currentAgent;
-      const command: Record<string, unknown> = { type: "prompt", text: prompt, images, attachments: paths.map((path) => ({ path })) };
+      // A daemon elsewhere cannot read this machine's files: send them along.
+      const inputs = await attachmentInputs(paths, this.remote, this.files);
+      const command: Record<string, unknown> = { type: "prompt", text: prompt, images, attachments: inputs };
       if (agent) command.agent = agent;
       else {
         command.tab = tab;
@@ -426,7 +506,7 @@ export class ChatController implements Disposable {
     const tabAgents = new Set(agents.map((a) => a.id));
     const pending = [...store.pending.values()]
       .filter((r) => (entry && r.tab === entry.tab.id) || tabAgents.has(r.agent))
-      .map((r) => ({ id: r.id, callId: r.call_id, agent: r.agent, agentLabel: r.agent_label, tool: r.tool, summary: r.summary, input: r.input }));
+      .map((r) => ({ id: r.id, callId: r.call_id, agent: r.agent, agentLabel: r.agent_label, tool: r.tool, summary: r.summary, input: r.input, ...describeApproval(r.tool, r.summary, r.input) }));
     return {
       connection: { state: this.client.connection.state, detail: this.client.connection.detail },
       banners: this.banners(),
@@ -448,7 +528,9 @@ export class ChatController implements Disposable {
       pending,
       context: this.chip(),
       home: store.daemon?.user_home ?? null,
-      dropHint: this.host.dropHint,
+      dropHint: this.remote ? `Drop files here; they are uploaded to the daemon at ${this.client.address?.url}` : this.host.dropHint,
+      commands: slashCommands(entry?.tab.project).map(({ name, description, hint, source }) => ({ name, description, hint, source })),
+      remote: this.remote ? (this.client.address?.url ?? null) : null,
     };
   }
 
@@ -510,6 +592,20 @@ export class ChatController implements Disposable {
         level: "warning",
         text: `The daemon runs malac ${daemon.version}${mine ? `, but this malac is ${mine}` : ""}. Restart it to switch.`,
         actions: [{ label: "Restart daemon", command: "malac.restartDaemon" }],
+      });
+    }
+    const tab = this.store.tab(this.currentTab)?.tab;
+    const root = tab?.project?.suggest_root;
+    if (tab && root && connection.state === "online" && !(this.host.recall<string[]>("chat.rootHintDismissed") ?? []).includes(tab.id)) {
+      const name = root.split(/[\\/]/).filter(Boolean).at(-1) ?? root;
+      banners.push({
+        id: "root-hint",
+        level: "info",
+        text: `${tab.name} is one part of the repository ${name}. A tab at its root lets agents work across all of it.`,
+        actions: [
+          { label: `Open ${name}`, command: OPEN_TAB, args: [root], primary: true },
+          { label: "Not now", command: DISMISS_ROOT, args: [tab.id] },
+        ],
       });
     }
     for (const list of this.externalBanners.values()) banners.push(...list);

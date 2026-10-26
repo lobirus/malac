@@ -6,6 +6,7 @@ import type { ChatState, FromWebview } from "../chat/messages.js";
 import type { ImageInput, Mode } from "../protocol.js";
 import { baseName, h, icon, relativeTo, setChildren, truncate } from "./dom.mjs";
 import { closeMenu, MenuItem, menuButton } from "./menu.mjs";
+import { matchCommands, slashQuery, sourceLabel, type Completion } from "./slash.mjs";
 import { acceptsDrag, codeDragToUriList, convertTransfer, IMAGE_TYPES, MAX_IMAGE_BYTES, pastedImageName, toBase64 } from "./transfer.mjs";
 
 export const MODES: { mode: Mode; label: string; icon: string; help: string }[] = [
@@ -50,6 +51,7 @@ export class Composer {
   private sent: string[] = [];
   private recall = -1;
   private mention: { start: number; query: string; id: number; results: { path: string; relative: string }[]; active: number } | null = null;
+  private slash: { query: string; results: Completion[]; active: number } | null = null;
   private searchId = 0;
 
   constructor(
@@ -155,7 +157,7 @@ export class Composer {
     this.input.placeholder = !state.tab
       ? "Open a tab to start"
       : !agent
-        ? `Ask malac to do something in ${tabName}, @ to add files`
+        ? `Ask malac to do something in ${tabName}; @ adds files, / runs commands`
         : agent.parent
           ? `Message ${agent.label}`
           : agent.live
@@ -328,18 +330,82 @@ export class Composer {
   private updateMention(): void {
     const caret = this.input.selectionStart;
     const before = this.input.value.slice(0, caret);
+    const query = slashQuery(before);
+    if (query !== null && this.updateSlash(query)) return;
+    this.slash = null;
     const match = /(^|\s)@([^\s@]*)$/.exec(before);
     if (!match) {
       this.closeMention();
       return;
     }
     const start = caret - match[2].length - 1;
-    const query = match[2];
-    if (this.mention && this.mention.start === start && this.mention.query === query) return;
+    const fileQuery = match[2];
+    if (this.mention && this.mention.start === start && this.mention.query === fileQuery) return;
     const id = ++this.searchId;
-    this.mention = { start, query, id, results: this.mention?.results ?? [], active: 0 };
-    this.host.post({ type: "searchFiles", id, query });
+    this.mention = { start, query: fileQuery, id, results: this.mention?.results ?? [], active: 0 };
+    this.host.post({ type: "searchFiles", id, query: fileQuery });
     this.renderMention();
+  }
+
+  /** Shows the commands matching `/query`; false when none match. */
+  private updateSlash(query: string): boolean {
+    const results = matchCommands(this.host.state()?.commands ?? [], query);
+    if (!results.length) {
+      this.closeMention();
+      return true;
+    }
+    const keep = this.slash?.results[this.slash.active]?.name;
+    const active = Math.max(0, results.findIndex((c) => c.name === keep));
+    this.mention = null;
+    this.slash = { query, results, active };
+    this.renderSlash();
+    return true;
+  }
+
+  private renderSlash(): void {
+    const slash = this.slash;
+    if (!slash) return;
+    this.picker.hidden = false;
+    this.picker.setAttribute("aria-label", "Commands");
+    this.input.setAttribute("aria-expanded", "true");
+    setChildren(
+      this.picker,
+      slash.results.map((command, index) =>
+        h(
+          "div",
+          {
+            id: `mention-${index}`,
+            class: `mention-item command${index === slash.active ? " active" : ""}`,
+            role: "option",
+            "aria-selected": String(index === slash.active),
+            title: command.description,
+            onmousedown: (event: MouseEvent) => {
+              event.preventDefault();
+              this.pickCommand(index);
+            },
+          },
+          h("span", { class: "mention-name" }, `/${command.name}`),
+          command.hint ? h("span", { class: "command-hint" }, command.hint) : null,
+          h("span", { class: "mention-dir" }, command.description),
+          sourceLabel(command.source) ? h("span", { class: "command-source" }, sourceLabel(command.source)) : null,
+        ),
+      ),
+    );
+    this.input.setAttribute("aria-activedescendant", `mention-${slash.active}`);
+    this.picker.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Puts `/name ` in the prompt, ready for its arguments. */
+  private pickCommand(index: number): void {
+    const command = this.slash?.results[index];
+    if (!command) return;
+    const caret = this.input.selectionStart;
+    const start = this.input.value.indexOf("/");
+    this.input.setRangeText(`/${command.name} `, start, caret, "end");
+    this.closeMention();
+    this.autosize();
+    this.persist();
+    this.input.focus();
   }
 
   files(id: number, files: { path: string; relative: string }[]): void {
@@ -399,7 +465,9 @@ export class Composer {
 
   private closeMention(): void {
     this.mention = null;
+    this.slash = null;
     this.picker.hidden = true;
+    this.picker.setAttribute("aria-label", "Files");
     this.input.setAttribute("aria-expanded", "false");
     this.input.removeAttribute("aria-activedescendant");
   }
@@ -485,6 +553,33 @@ export class Composer {
 
   private onKey(event: KeyboardEvent): void {
     if (event.isComposing) return;
+    const slash = this.slash;
+    if (slash && !this.picker.hidden) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        slash.active = (slash.active + delta + slash.results.length) % slash.results.length;
+        this.renderSlash();
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault();
+        const command = slash.results[slash.active];
+        // A fully typed command without arguments runs right away.
+        if (event.key === "Enter" && command?.name === slash.query && !command.hint) {
+          this.closeMention();
+          this.submit();
+        } else {
+          this.pickCommand(slash.active);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeMention();
+        return;
+      }
+    }
     const mention = this.mention;
     if (mention && !this.picker.hidden && mention.results.length) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {

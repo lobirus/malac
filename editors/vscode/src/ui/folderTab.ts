@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import type { ChatController } from "../chat/controller";
 import type { DaemonClient } from "../connection/client";
+import { isRemoteEndpoint } from "../model/attachments";
 import { findGitRoot, FolderChoice, FolderSetting, largerRoot, planFolder } from "../model/folder";
 import type { DaemonStore } from "../model/store";
 
@@ -52,7 +53,8 @@ export class FolderTabs {
   /** Runs after each snapshot; acts once per window unless the chat lost its tab. */
   async onSnapshot(): Promise<void> {
     const folder = this.folder();
-    if (!folder || this.store.daemon?.attached) return;
+    // A daemon on another machine has its own folders; this one's paths mean nothing there.
+    if (!folder || this.store.daemon?.attached || isRemoteEndpoint(this.client.address)) return;
     const chatHasTab = Boolean(this.chat.currentTab);
     if (this.checked && chatHasTab) return;
     this.checked = true;
@@ -74,7 +76,9 @@ export class FolderTabs {
         return;
       case "suggestRoot":
         this.chat.selectTab(plan.tab);
-        await this.suggestRoot(plan.tab, plan.root, folder);
+        // Once the tab is loaded the daemon reports `suggest_root` itself and
+        // the chat shows the hint; ask here only for a tab it has not loaded.
+        if (!this.store.tab(plan.tab)?.tab.project) await this.suggestRoot(plan.tab, plan.root, folder);
         return;
       case "offer":
         this.offer(plan.folder, plan.root);

@@ -234,7 +234,7 @@ export class DaemonClient {
         this.setStatus("failed", message);
         return;
       }
-      if (/not supported by this version/.test(message)) {
+      if (/no saved connection/.test(message)) {
         this.setStatus("failed", message);
         return;
       }
@@ -258,7 +258,8 @@ export class DaemonClient {
 
   private retry(detail: string): void {
     this.failures += 1;
-    if (this.shutdownReason || !this.autoStart) {
+    const canStart = this.options.provider().canStart;
+    if (canStart && (this.shutdownReason || !this.autoStart)) {
       // Stopped on purpose, or not started yet: wait for a daemon to appear
       // without starting one.
       this.setStatus("stopped", this.shutdownReason ? detail : "not running");

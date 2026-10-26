@@ -553,7 +553,7 @@
         "malac.connection": {
           "type": "string",
           "default": "local",
-          "markdownDescription": "Which daemon to use. `local` (this machine) reads `daemon.json` in the malac home and starts the daemon with `malac web` when none runs. The name of a saved connection (as with `malac --connect <name>`) will select a paired daemon on another machine once the extension supports it; until then such names report that they are unavailable."
+          "markdownDescription": "Which daemon to use. `local` (this machine) reads `daemon.json` in the malac home and starts the daemon with `malac web` when none runs. The name of a saved connection in `connections.json` (made with `malac remote add`, as `malac --connect <name>` uses) connects to a daemon on another machine, which must already run; files are then uploaded instead of sent as paths."
         },
         "malac.home": {
           "type": "string",

@@ -1229,6 +1229,30 @@ button {
   font-size: 12px;
 }
 
+.approval .approval-text {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+
+.approval .approval-text .icon {
+  margin-top: 2px;
+}
+
+.approval-details summary {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+  font-size: 11px;
+}
+
+.approval-details pre {
+  margin: 4px 0 0;
+  max-height: 220px;
+}
+
+.approval.plugin {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorWarning-foreground));
+}
+
 .approval-row {
   display: flex;
   align-items: center;
@@ -1489,6 +1513,33 @@ button {
 .mention-item.active .mention-dir {
   color: inherit;
   opacity: 0.8;
+}
+
+.mention-item.command .mention-name {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.command-hint {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.command-source {
+  flex: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--code-bg);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.mention-item.active .command-hint,
+.mention-item.active .command-source {
+  color: inherit;
 }
 
 .mention-empty {

@@ -61,7 +61,7 @@ export class MalacPanel implements vscode.Disposable {
 async function frameHtml(address: ServerAddress): Promise<string> {
   const base = await vscode.env.asExternalUri(vscode.Uri.parse(address.url));
   const origin = `${base.scheme}://${base.authority}`;
-  const src = base.with({ path: "/", query: `token=${address.token}&embed=1` }).toString(true);
+  const src = base.with({ path: "/", query: address.token ? `token=${address.token}&embed=1` : "embed=1" }).toString(true);
   const nonce = randomBytes(16).toString("base64");
   return `<!doctype html>
 <html lang="en">

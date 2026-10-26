@@ -26,6 +26,19 @@ export interface PendingView {
   tool: string;
   summary: string;
   input: unknown;
+  /** One line for the request, e.g. "Enable plugin x, which runs hooks". */
+  title: string;
+  /** Shown behind "Show details": a plugin's contents, a long command, the input. */
+  details: string | null;
+  /** Set for enabling a plugin that runs code. */
+  plugin: string | null;
+}
+
+export interface SlashCompletion {
+  name: string;
+  description: string;
+  hint: string;
+  source: string;
 }
 
 export interface Banner {
@@ -61,6 +74,10 @@ export interface ChatState {
   home: string | null;
   /** Where to drop files: VS Code needs Shift held to drop into a webview. */
   dropHint: string;
+  /** Slash commands: built-ins, then the tab's custom commands. */
+  commands: SlashCompletion[];
+  /** The daemon's address when it runs on another machine: files are uploaded to it. */
+  remote: string | null;
 }
 
 export type ToWebview =

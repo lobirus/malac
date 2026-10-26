@@ -1,7 +1,6 @@
 // Where the daemon is. `local` (the default) reads `daemon.json` from the
-// malac home and otherwise starts the daemon through `malac web`. The
-// `malac.connection` setting is the seam for other daemons: saved remote
-// connections will plug in here as further providers.
+// malac home and otherwise starts the daemon through `malac web`. Any other
+// `malac.connection` names a saved connection to a daemon elsewhere.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -25,6 +24,8 @@ export interface ResolveOptions {
 /** Finds (and possibly starts) the daemon to talk to. */
 export interface EndpointProvider {
   readonly description: string;
+  /** Whether this provider can start the daemon (only this machine's). */
+  readonly canStart: boolean;
   resolve(options: ResolveOptions): Promise<Endpoint>;
 }
 
@@ -106,6 +107,8 @@ export interface Starter {
 }
 
 export class LocalEndpoints implements EndpointProvider {
+  readonly canStart = true;
+
   constructor(
     private readonly home: () => string,
     private readonly starter: Starter,
@@ -125,22 +128,54 @@ export class LocalEndpoints implements EndpointProvider {
   }
 }
 
+export interface SavedConnection {
+  name: string;
+  url: string;
+  token: string;
+  device?: string | null;
+  added?: string;
+}
+
+/** `connections.json` in the malac home: the daemons this machine paired with. */
+export function readConnections(home: string): SavedConnection[] {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(home, "connections.json"), "utf8")) as { connections?: unknown };
+    return (Array.isArray(value.connections) ? value.connections : []).filter(
+      (c): c is SavedConnection => typeof c?.name === "string" && typeof c?.url === "string" && typeof c?.token === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
 /**
- * The seam for daemons on other machines. Saved connections (from pairing,
- * `malac --connect <name>`) live in `~/.malac/connections.json` as
- * `{name, url, token, device, added}`; resolving one is reading that entry
- * into an Endpoint with `source: "remote"`. Not implemented in this version.
+ * A daemon on another machine, from a saved connection (made by pairing,
+ * `malac remote add`, and used by `malac --connect <name>`). That daemon
+ * must already run; the extension never starts it.
  */
 export class SavedEndpoints implements EndpointProvider {
-  constructor(private readonly name: string) {}
+  readonly canStart = false;
+
+  constructor(
+    private readonly name: string,
+    private readonly home: () => string,
+  ) {}
 
   get description(): string {
     return `saved connection "${this.name}"`;
   }
 
   async resolve(): Promise<Endpoint> {
-    throw new Error(
-      `malac.connection is "${this.name}", but saved remote connections are not supported by this version of the extension yet. Set it to "local".`,
-    );
+    const saved = readConnections(this.home());
+    const connection = saved.find((c) => c.name === this.name);
+    if (!connection) {
+      const names = saved.map((c) => c.name);
+      throw new Error(
+        names.length
+          ? `no saved connection "${this.name}"; there are: ${names.join(", ")}. Set malac.connection to one of them, or to "local".`
+          : `no saved connection "${this.name}"; add one with \`malac remote add ${this.name} <url> --pair <code>\`, or set malac.connection to "local".`,
+      );
+    }
+    return { url: connection.url.replace(/\/+$/, ""), token: connection.token, source: "remote" };
   }
 }

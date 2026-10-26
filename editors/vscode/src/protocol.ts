@@ -51,6 +51,25 @@ export interface AgentView {
   title?: string;
 }
 
+/** A custom slash command: user, project, plugin (`plugin:name`) or skill. */
+export interface CommandInfo {
+  name: string;
+  description: string;
+  argument_hint?: string | null;
+  /** `user`, `project`, `plugin <id>` or `skill`. */
+  source: string;
+}
+
+/** Where a tab sits in its repository (`Layout`, flattened) and its custom commands. */
+export interface ProjectSummary {
+  root: string;
+  subdir?: string | null;
+  siblings?: string[];
+  /** Set when the tab is one part of a larger repository. */
+  suggest_root?: string | null;
+  commands?: CommandInfo[];
+}
+
 export interface TabView {
   id: string;
   name: string;
@@ -61,6 +80,8 @@ export interface TabView {
   options: { model?: string; mode?: Mode; profile?: string; no_control?: boolean };
   loaded: boolean;
   snapshots: AgentView[];
+  /** Once the tab's runtime is loaded. */
+  project?: ProjectSummary | null;
 }
 
 export interface WorkspaceView {
@@ -148,6 +169,16 @@ export interface AttachmentReport {
   kind: "text" | "image" | "directory" | "binary";
   size: number;
   note: string | null;
+}
+
+/**
+ * A prompt attachment: a path the daemon reads, or (for a daemon on another
+ * machine) the file itself, with `path` only its name.
+ */
+export interface AttachmentInput {
+  path: string;
+  /** Base64; the daemon saves it on its own machine (20 MB at most). */
+  data?: string;
 }
 
 export interface ImageInput {
