@@ -4,10 +4,10 @@
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Subcommand};
-use crossterm::style::Stylize;
 use malac_core::config::{Config, Tunnel};
 use serde_json::{Value, json};
 

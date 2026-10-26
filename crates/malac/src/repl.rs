@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
-use crossterm::style::Stylize;
 use malac_core::config::{self, Config};
 use malac_core::permission::{Approver, DenyAll, Mode};
 use malac_core::{AgentHandle, AgentSpec, Block, Runtime, session, update};

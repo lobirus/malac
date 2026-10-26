@@ -7,8 +7,8 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
-use crossterm::style::Stylize;
 use malac_core::config;
 use malac_core::event::{AgentId, Envelope, Event};
 use malac_core::permission::{Approver, Mode, PermissionRequest};

@@ -6,7 +6,7 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crossterm::style::Stylize;
+use crate::style::Paint;
 use malac_core::event::{AgentId, Envelope, Event, Level, TodoStatus, TurnStatus};
 use malac_core::message::Usage;
 use malac_core::tools::truncate_chars;

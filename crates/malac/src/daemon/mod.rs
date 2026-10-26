@@ -20,10 +20,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Subcommand};
-use crossterm::style::Stylize;
 use malac_core::config::{self, Config};
 use malac_core::update;
 use serde_json::json;

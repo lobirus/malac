@@ -17,6 +17,7 @@ mod remote;
 mod remotes;
 mod render;
 mod repl;
+mod style;
 mod tui;
 mod web;
 

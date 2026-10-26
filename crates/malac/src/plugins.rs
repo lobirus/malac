@@ -2,9 +2,9 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use crossterm::style::Stylize;
 use malac_core::config::{self, Config};
 use malac_core::plugins::{Manager, NeedsApproval, PluginInfo, Scope};
 

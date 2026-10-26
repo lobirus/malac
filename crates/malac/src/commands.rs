@@ -2,9 +2,9 @@
 
 use std::io::Read;
 
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use crossterm::style::Stylize;
 use malac_core::config::{self, Config, ProviderKind};
 use malac_core::message::Role;
 use malac_core::{Block, Runtime, session};

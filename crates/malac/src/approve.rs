@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::style::Paint;
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::Stylize;
 use crossterm::terminal;
 use futures::future::select_all;
 use malac_core::permission::{Approver, Decision, PermissionRequest};

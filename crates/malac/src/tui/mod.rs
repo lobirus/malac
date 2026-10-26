@@ -30,9 +30,9 @@ mod tests;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::style::Paint;
 use anyhow::{Context, Result};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEventKind, MouseEventKind};
-use crossterm::style::Stylize;
 use futures::{FutureExt, StreamExt};
 use malac_core::config::Config;
 use tokio::sync::mpsc;
