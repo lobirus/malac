@@ -32,7 +32,19 @@ To run it on your phone, turn on USB debugging (Settings → About phone → tap
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The debug build is signed with the SDK's debug key, which is all a phone of your own needs. In Android Studio, open this directory and run the `app` configuration.
+The debug build is signed with the SDK's debug key, which is all a phone of your own needs. It installs as `io.malac.app.debug`, labelled "malac debug", so it sits next to the released app instead of replacing it. In Android Studio, open this directory and run the `app` configuration.
+
+### Released APKs
+
+Every release has `malac-<version>-android.apk`, a release build signed with the project's key, so a newer one installs over an older one and keeps the app's data. The [mobile workflow](../../.github/workflows/mobile.yml) also keeps a debug APK for each change to `apps/` (artifact `malac-android-debug`); CI creates a new debug key for every run, so uninstall the previous debug build before installing the next.
+
+To sign a release build yourself, point the build at a PKCS12 keystore:
+
+```bash
+MALAC_KEYSTORE=/path/to/release.p12 MALAC_KEYSTORE_PASSWORD=... ./gradlew :app:assembleRelease
+```
+
+`MALAC_KEY_ALIAS` defaults to `malac`. Without `MALAC_KEYSTORE` the release APK comes out unsigned.
 
 ## Tests
 

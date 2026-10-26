@@ -18,10 +18,29 @@ android {
         versionName = "1.1.0"
     }
 
+    // Release builds are signed when the environment names a keystore, as
+    // the release workflow does from the repository's secrets.
+    val keystore = providers.environmentVariable("MALAC_KEYSTORE").orNull
+    if (keystore != null) {
+        signingConfigs.create("release") {
+            storeFile = file(keystore)
+            storeType = "PKCS12"
+            storePassword = providers.environmentVariable("MALAC_KEYSTORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("MALAC_KEY_ALIAS").orNull ?: "malac"
+            keyPassword = storePassword
+        }
+    }
+
     buildTypes {
+        debug {
+            // Installs next to the release app instead of clashing with it.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release")
+            // R8 stays off until a shrunk build has been tried on devices.
+            isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }

@@ -7,9 +7,12 @@
    - `malac-<version>-macos.pkg`, a universal installer that puts both binaries in `/usr/local/bin`
    - `malac-<version>-x86_64-unknown-linux-gnu.tar.gz`
    - `malac-vscode-<version>.vsix`, the VS Code extension
+   - `malac-<version>-android.apk`, the Android app signed with the release key
    - `SHA256SUMS`
 
    It then publishes them as a GitHub release with generated notes.
+
+Bump `versionCode` and `versionName` in `apps/android/app/build.gradle.kts` and `MARKETING_VERSION` in `apps/ios/project.yml` with the rest, or Android refuses the new APK as an update.
 
 `install.sh` picks up the latest release automatically and verifies the checksum, falling back to a source build when no archive matches the machine.
 
@@ -30,6 +33,14 @@ Unsigned packages trigger Gatekeeper on download: users have to right-click and 
 xcrun notarytool submit dist/malac-<version>-macos.pkg --keychain-profile <profile> --wait
 xcrun stapler staple dist/malac-<version>-macos.pkg
 ```
+
+## Signing the Android app
+
+The release workflow signs the APK with a PKCS12 keystore from two repository secrets: `ANDROID_KEYSTORE_BASE64` (the keystore, base64) and `ANDROID_KEYSTORE_PASSWORD`. The key alias is `malac`. The workflow checks the APK's certificate against the project's (SHA-256 `25:B7:1D:D6:94:F0:CC:57:4B:52:57:74:FA:5F:2F:33:5B:86:B2:09:EB:79:A2:40:D2:F1:27:83:B8:F1:BA:BA`), so a release can't go out signed with another key by mistake.
+
+Keep the keystore and its password outside the repository and backed up. GitHub cannot give a secret back, and an APK signed with a new key cannot update the installed app: users would have to uninstall it and pair again.
+
+To attach an APK to a release that has none, run the workflow by hand: `gh workflow run release.yml -f tag=v1.1.0`. It builds the APK from the default branch, adds it to that release and updates `SHA256SUMS`, leaving the other files as they are.
 
 ## Homebrew
 

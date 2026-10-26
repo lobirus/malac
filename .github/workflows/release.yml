@@ -3,6 +3,12 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Attaches an APK built from the chosen branch to an existing release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, e.g. v1.1.0
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,6 +16,7 @@ env:
 
 jobs:
   macos:
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +30,7 @@ jobs:
           path: dist/malac-*
 
   linux:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +43,7 @@ jobs:
           path: dist/malac-*
 
   vscode:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,8 +59,40 @@ jobs:
           name: vscode
           path: dist/malac-*
 
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Signed APK
+        working-directory: apps/android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          MALAC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          export MALAC_KEYSTORE="$RUNNER_TEMP/malac.p12"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$MALAC_KEYSTORE"
+          ./gradlew --no-daemon :app:assembleRelease
+          rm -f "$MALAC_KEYSTORE"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -n1)"
+          mkdir -p ../../dist
+          # Without the secrets the APK is app-release-unsigned.apk and this fails.
+          cp app/build/outputs/apk/release/app-release.apk "../../dist/malac-$version-android.apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)/apksigner"
+          "$apksigner" verify --print-certs "../../dist/malac-$version-android.apk" | tee certs.txt
+          grep -qi "SHA-256 digest: 25b71dd694f0cc574b525774fa5f2f335b86b209eb79a240d2f12783b8f1baba" certs.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/malac-*
+
   publish:
-    needs: [macos, linux, vscode]
+    needs: [macos, linux, vscode, android]
+    # On a tag push every build must pass; a manual run only has the APK.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,13 +101,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum malac-* > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-        # A release created by hand first only gets the missing files added.
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # An existing release keeps its other files, and SHA256SUMS keeps
+        # their lines: self-update checks downloads against it.
+        working-directory: dist
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          sha256sum malac-* > new.sums
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS -O old.sums || : > old.sums
+            awk 'NR == FNR { new[$2] = 1; next } !($2 in new)' new.sums old.sums > SHA256SUMS
+            cat new.sums >> SHA256SUMS
+            rm new.sums old.sums
+            gh release upload "$TAG" malac-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "malac ${GITHUB_REF_NAME#v}" --generate-notes
+            mv new.sums SHA256SUMS
+            gh release create "$TAG" malac-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "malac ${TAG#v}" --generate-notes
           fi
