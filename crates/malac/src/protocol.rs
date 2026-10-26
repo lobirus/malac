@@ -449,6 +449,9 @@ pub struct DaemonStatus {
     pub attached: bool,
     /// Whether the server also listens on other interfaces.
     pub remote: bool,
+    /// The user's home directory, so clients can show paths as `~/…`.
+    #[serde(default)]
+    pub user_home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -157,6 +157,7 @@ fn snapshot() -> Snapshot {
             clients: 1,
             attached: false,
             remote: false,
+            user_home: None,
         },
         workspaces: vec![summary(WORKSPACE, "default"), summary("w2", "release")],
         workspace: None,

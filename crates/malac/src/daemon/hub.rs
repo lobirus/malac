@@ -288,6 +288,7 @@ impl Hub {
             clients: self.clients.load(Ordering::SeqCst),
             attached: self.is_attached(),
             remote: self.options.remote,
+            user_home: dirs::home_dir().map(|h| h.display().to_string()),
         }
     }
 

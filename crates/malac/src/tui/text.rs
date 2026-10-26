@@ -284,6 +284,19 @@ pub fn first_line(text: &str) -> &str {
         .unwrap_or_default()
 }
 
+/// A URL for display, with the value of a `token` query parameter replaced
+/// by `…`, so screenshots and shared screens do not leak it.
+pub fn hide_token(url: &str) -> String {
+    match url.find("token=") {
+        Some(start) => {
+            let value = start + "token=".len();
+            let end = url[value..].find('&').map_or(url.len(), |i| value + i);
+            format!("{}…{}", &url[..value], &url[end..])
+        }
+        None => url.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +378,18 @@ mod tests {
         assert_eq!(truncate("short", 8), "short");
         let line = truncate_line(Line::from(vec![Span::raw("abc"), Span::raw("defgh")]), 6);
         assert_eq!(line.to_string(), "abcde…");
+    }
+
+    #[test]
+    fn hides_tokens() {
+        assert_eq!(
+            hide_token("http://127.0.0.1:7700/?token=abc123"),
+            "http://127.0.0.1:7700/?token=…"
+        );
+        assert_eq!(
+            hide_token("http://h/?token=abc&embed=1"),
+            "http://h/?token=…&embed=1"
+        );
+        assert_eq!(hide_token("http://h/"), "http://h/");
     }
 }

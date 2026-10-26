@@ -3,7 +3,7 @@
 // agent events) keep it up to date. Also cached REST resources and a
 // per-frame render scheduler.
 
-import { emptyUsage, firstLine, sessionStore, toast, truncate } from "./dom.js";
+import { emptyUsage, firstLine, sessionStore, setUserHome, toast, truncate } from "./dom.js";
 
 const TOKEN_KEY = "malac.token";
 const RECONNECT_MIN_MS = 500;
@@ -293,6 +293,7 @@ export function setResyncHandler(fn) {
 
 function applySnapshot(snapshot) {
   state.daemon = snapshot.daemon;
+  setUserHome(snapshot.daemon.user_home);
   state.version = snapshot.daemon.version;
   state.pageVersion ??= snapshot.daemon.version;
   state.web = { remote: snapshot.daemon.remote, reloadable: !snapshot.daemon.attached };

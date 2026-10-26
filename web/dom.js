@@ -49,8 +49,24 @@ export function baseName(path) {
   return parts.at(-1) ?? String(path ?? "");
 }
 
-export function shortPath(path, keep = 2) {
+let userHome = null;
+
+/** Set from the daemon snapshot so paths under the user's home read as `~/…`. */
+export function setUserHome(home) {
+  userHome = home ? String(home).replace(/\/+$/, "") : null;
+}
+
+/** A path with the user's home replaced by `~`. */
+export function displayPath(path) {
   const value = String(path ?? "");
+  if (userHome && (value === userHome || value.startsWith(`${userHome}/`))) {
+    return `~${value.slice(userHome.length)}`;
+  }
+  return value;
+}
+
+export function shortPath(path, keep = 2) {
+  const value = displayPath(path);
   const parts = value.split("/").filter(Boolean);
   return parts.length > keep ? `…/${parts.slice(-keep).join("/")}` : value;
 }

@@ -428,7 +428,7 @@ fn welcome_text(app: &App) -> Vec<(Line<'static>, Option<Action>)> {
         lines.push((
             field(
                 "web",
-                url,
+                text::hide_token(&url),
                 t.fg(t.accent).add_modifier(Modifier::UNDERLINED),
             ),
             Some(Action::CopyWebUrl),
@@ -659,7 +659,10 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push((Line::default(), None));
         lines.push(heading("Web UI"));
         lines.push((
-            Line::styled(text::truncate(url, width).into_owned(), t.fg(t.accent)),
+            Line::styled(
+                text::truncate(&text::hide_token(url), width).into_owned(),
+                t.fg(t.accent),
+            ),
             Some(Action::CopyWebUrl),
         ));
     }

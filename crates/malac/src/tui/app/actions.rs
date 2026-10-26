@@ -173,7 +173,9 @@ impl App {
                 ];
                 if let Some(url) = urls.first() {
                     items.push(Item::separator());
-                    items.push(Item::note(text::truncate(url, 48).into_owned()));
+                    items.push(Item::note(
+                        text::truncate(&text::hide_token(url), 48).into_owned(),
+                    ));
                 }
                 items
             }
@@ -585,7 +587,7 @@ impl App {
             .map(|url| {
                 Line::from(vec![
                     Span::styled("  web UI  ", t.dim()),
-                    Span::styled(url, t.fg(t.accent)),
+                    Span::styled(text::hide_token(&url), t.fg(t.accent)),
                 ])
             })
             .collect()

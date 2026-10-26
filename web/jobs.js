@@ -1,7 +1,7 @@
 // Background jobs: processes agents started with `bash` in the background.
 // A table of every job, and the selected job's log tail.
 
-import { confirmDialog, formatDuration, fullTime, h, plural, relativeTime, setChildren, toast } from "./dom.js";
+import { confirmDialog, displayPath, formatDuration, fullTime, h, plural, relativeTime, setChildren, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import { displayName, jobOutput, killJob, openAgent, renderKeyed, state, tabById } from "./store.js";
 import { statusDot } from "./widgets.js";
@@ -100,9 +100,9 @@ export function jobsView() {
         "dl",
         { class: "kv job-facts" },
         h("dt", {}, "Folder"),
-        h("dd", { class: "path" }, job.cwd),
+        h("dd", { class: "path", title: job.cwd }, displayPath(job.cwd)),
         h("dt", {}, "Log"),
-        h("dd", { class: "path" }, job.log),
+        h("dd", { class: "path", title: job.log }, displayPath(job.log)),
         output?.truncated ? [h("dt", {}, "Shown"), h("dd", {}, `Last ${TAIL_LINES} lines of ${Math.round((output.size ?? 0) / 1024)} KB`)] : null,
       ),
       pre,
@@ -186,7 +186,7 @@ function jobsTable(jobs, selected, select) {
             "td",
             { class: "cell-main" },
             h("button", { class: "row-link", type: "button", "aria-pressed": String(job.id === selected), title: job.command, onclick: () => select(job.id) }, job.command),
-            h("div", { class: "agent-activity ellipsis", title: job.cwd }, tab ? tab.name : job.cwd),
+            h("div", { class: "agent-activity ellipsis", title: displayPath(job.cwd) }, tab ? tab.name : displayPath(job.cwd)),
           ),
           h("td", { class: "cell-status" }, h("span", { class: "status" }, statusDot(status.dot), status.text)),
           h(

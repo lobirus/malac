@@ -7,7 +7,7 @@
 
 **Multi-Agent Loop for Autonomous Coding.** An autonomous coding agent for the terminal, with a web UI, a VS Code extension, and a control service for the desktop and browser. Written in Rust. (*Malac* is also Hungarian for pig.)
 
-![malac fixing a failing test in the terminal UI](docs/images/demo.gif)
+![malac fixing a failing test, delegating a review to a subagent and showing the agent map](docs/images/demo.gif)
 
 - **CLI first.** `malac <prompt>` starts working immediately. `malac` alone opens an interactive session.
 - **Workspaces that outlive the terminal.** A per-user daemon holds your workspaces: sets of tabs, one per project, each with its own agents. Close the terminal and the agents keep working; open the web UI or another terminal and pick up where they are.
@@ -30,8 +30,9 @@ The name: *malac* is Hungarian for pig, which explains the mascot, and it is qui
 
 | Terminal UI | Web UI |
 |---|---|
-| ![Welcome screen with the malac pig](docs/images/tui-welcome.png) | ![Web UI home, light theme](docs/images/web-home-light.png) |
-| ![A session with tool cards and a running subagent](docs/images/tui-session.png) | ![A web session with an edit diff and a subagent report](docs/images/web-session.png) |
+| ![Welcome screen with the malac pig, two tabs in the header](docs/images/tui-welcome.png) | ![Web UI tab home with the workspace switcher and tab bar](docs/images/web-home-light.png) |
+| ![A session: tool cards, a subagent, the final answer marked in green](docs/images/tui-session.png) | ![A web session with an edit diff and a subagent report](docs/images/web-session.png) |
+| ![The agent map: agents and subagents across tabs](docs/images/tui-agent-map.png) | ![The Jobs page with a background job and its log](docs/images/web-jobs.png) |
 | ![Model picker across providers](docs/images/tui-model-picker.png) | ![Settings](docs/images/web-settings.png) |
 
 <details>
