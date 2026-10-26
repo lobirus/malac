@@ -103,7 +103,8 @@ fun ConnectionBanner(status: DaemonConnection.Status, shutdownReason: String?, o
             Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                 Text(text, style = MaterialTheme.typography.bodySmall, color = if (bad) MaterialTheme.malac.red else MaterialTheme.malac.amber)
                 if (status is DaemonConnection.Status.Offline && shutdownReason == null) {
-                    Text(status.reason, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.malac.text2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    // Room for what to do, e.g. turning on Tailscale for a tailnet address.
+                    Text(status.reason, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.malac.text2, maxLines = 4, overflow = TextOverflow.Ellipsis)
                 }
             }
             if (status is DaemonConnection.Status.Offline) {

@@ -164,7 +164,7 @@ internal suspend fun Call.await(): Response = suspendCancellableCoroutine { cont
             }
 
             override fun onFailure(call: Call, e: IOException) {
-                continuation.resumeWithException(if (e is DaemonException) e else DaemonException(0, e.message ?: "cannot reach the daemon"))
+                continuation.resumeWithException(if (e is DaemonException) e else DaemonException(0, unreachable(call.request().url.host, e)))
             }
         },
     )

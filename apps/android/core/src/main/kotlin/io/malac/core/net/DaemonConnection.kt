@@ -187,7 +187,8 @@ class DaemonConnection(
         // A 403 says why, e.g. that remote access is off; that can change, so it is retried.
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             val refusal = response?.use { it.body.string().take(300).trim() }.orEmpty()
-            closed.complete(Close(refusal.ifEmpty { t.message ?: "Cannot reach malac" }, unauthorized = response?.code == 401))
+            val reason = refusal.ifEmpty { unreachable(webSocket.request().url.host, t) }
+            closed.complete(Close(reason, unauthorized = response?.code == 401))
         }
     }
 }
