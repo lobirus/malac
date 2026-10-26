@@ -10,6 +10,7 @@
 pub mod access;
 pub mod awake;
 pub mod hub;
+pub mod restart;
 pub mod store;
 pub mod tunnel;
 pub(crate) mod uploads;
@@ -54,8 +55,10 @@ pub enum DaemonAction {
         #[arg(long)]
         json: bool,
     },
-    /// Stop and start again, e.g. to use an updated malac. Refused while
-    /// agents or jobs run, unless --force.
+    /// Stop and start again, e.g. to use an updated malac. It keeps the
+    /// address, remote access and a running tunnel; flags override them,
+    /// and `stop` then `start` applies the configuration afresh. Refused
+    /// while agents or jobs run, unless --force.
     Restart {
         #[arg(long)]
         force: bool,
@@ -107,13 +110,21 @@ impl Daemon {
         let lock = publish.then(acquire_lock).transpose()?;
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let base = Config::load_user()?;
-        let remote = args.remote || base.web.remote;
-        let host = match (&args.host, &base.web.host) {
-            (Some(host), _) | (None, Some(host)) => host.clone(),
-            (None, None) if remote => "0.0.0.0".into(),
-            (None, None) => "127.0.0.1".into(),
+        // After a restart the daemon keeps its address, remote access and
+        // tunnel; flags given now still win.
+        let restart = publish.then(restart::Restart::take).flatten();
+        let remote = args.remote || base.web.remote || restart.as_ref().is_some_and(|r| r.remote);
+        let host = match (&args.host, &restart, &base.web.host) {
+            (Some(host), _, _) => host.clone(),
+            (None, Some(restart), _) => restart.listen.ip().to_string(),
+            (None, None, Some(host)) => host.clone(),
+            (None, None, None) if remote => "0.0.0.0".into(),
+            (None, None, None) => "127.0.0.1".into(),
         };
-        let port = args.port.unwrap_or(base.web.port);
+        let port = args
+            .port
+            .or(restart.as_ref().map(|r| r.listen.port()))
+            .unwrap_or(base.web.port);
         let token = match &args.token {
             Some(token) => token.clone(),
             None => saved_token()?,
@@ -136,7 +147,11 @@ impl Daemon {
                 server.addr()
             );
         }
-        if let Some(provider) = base.remote.tunnel {
+        let tunnel = base
+            .remote
+            .tunnel
+            .or(restart.as_ref().and_then(|r| r.tunnel));
+        if let Some(provider) = tunnel {
             match remote {
                 true => {
                     if let Err(err) = hub.start_tunnel(provider).await {
@@ -382,7 +397,7 @@ pub async fn command(action: Option<DaemonAction>) -> Result<i32> {
                 Ok(0)
             }
             Some(file) => {
-                stop(&file, force).await?;
+                stop(&file, force, false).await?;
                 println!("malac daemon stopped");
                 Ok(0)
             }
@@ -390,7 +405,7 @@ pub async fn command(action: Option<DaemonAction>) -> Result<i32> {
         DaemonAction::Status { json } => status(json).await,
         DaemonAction::Restart { force, serve } => {
             if let Some(file) = client::running().await {
-                stop(&file, force).await?;
+                stop(&file, force, true).await?;
             }
             let file = client::ensure_daemon(&serve).await?;
             println!(
@@ -506,7 +521,8 @@ async fn status(json: bool) -> Result<i32> {
 }
 
 /// Asks the daemon to stop and waits for its process to exit.
-async fn stop(file: &DaemonFile, force: bool) -> Result<()> {
+/// Stops the daemon; with `restart`, it leaves how it runs for the next one.
+async fn stop(file: &DaemonFile, force: bool, restart: bool) -> Result<()> {
     let info: DaemonInfo = client::get(file, "/api/daemon").await?;
     if info.busy() && !force {
         bail!(
@@ -516,7 +532,8 @@ async fn stop(file: &DaemonFile, force: bool) -> Result<()> {
             info.jobs_running
         );
     }
-    let _: serde_json::Value = client::post(file, "/api/daemon/stop", &json!({ "force": force }))
+    let body = json!({ "force": force, "restart": restart });
+    let _: serde_json::Value = client::post(file, "/api/daemon/stop", &body)
         .await
         .context("cannot ask the daemon to stop")?;
     let deadline = Instant::now() + STOP_TIMEOUT;

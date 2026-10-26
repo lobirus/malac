@@ -22,6 +22,8 @@ Remote access is off by default. Then the daemon serves only requests that come 
 
 `web.remote = true`, or `malac daemon start --remote` (also `restart` and `run`), lets paired devices in. The daemon then listens on every interface unless `web.host` or `--host` names an address; `--host 127.0.0.1` keeps it off the network, for SSH and tunnels only. Settings → Remote access in the web UI and `malac remote` show whether it is on, where the daemon listens and how to reach it.
 
+`malac daemon restart`, and the terminal UI's restart after an update, keep remote access, the address and a running tunnel, so paired phones carry on. To change them, pass flags to `restart`, or `malac daemon stop` and then `start`, which applies the configuration afresh.
+
 ## Pairing and devices
 
 The master token in `~/.malac/daemon.json` belongs to the daemon's machine: it is accepted only on local requests, never through the network or a tunnel. Every other client gets a device token of its own by pairing:
@@ -71,7 +73,7 @@ Open the daemon's address. Without a token the web UI shows the pairing form; th
 
 ## Tunnels
 
-`malac tunnel <provider>` asks the daemon to run the tool as its child, waits for the public address and prints it with what to know about it. The daemon stops the tunnel when it stops, or with `malac tunnel stop`; `malac tunnel status` shows it. `[remote] tunnel = "cloudflare"` starts one with the daemon. If the daemon is not running, `malac tunnel` starts it for tunnels only: remote access on, listening on loopback.
+`malac tunnel <provider>` asks the daemon to run the tool as its child, waits for the public address and prints it with what to know about it. The daemon stops the tunnel when it stops, or with `malac tunnel stop`, and starts it again after a restart; `malac tunnel status` shows it. A tool that waits for you, such as `tailscale serve` on a tailnet where Serve is off, shows what it asks for, with its link, until it is done. `[remote] tunnel = "cloudflare"` starts one with the daemon. If the daemon is not running, `malac tunnel` starts it for tunnels only: remote access on, listening on loopback.
 
 | Provider | Runs |
 |---|---|

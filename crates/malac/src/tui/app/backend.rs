@@ -373,11 +373,12 @@ impl Backend {
         self.post("/api/update/install", json!({}), Rest::UpdateInstalled);
     }
 
-    /// Asks the daemon to stop; it refuses while agents or jobs run.
+    /// Asks the daemon to stop for a restart, keeping its address, remote
+    /// access and tunnel; it refuses while agents or jobs run.
     pub fn stop_daemon(&self) {
         self.post(
             "/api/daemon/stop",
-            json!({ "force": false }),
+            json!({ "force": false, "restart": true }),
             Rest::DaemonStopped,
         );
     }

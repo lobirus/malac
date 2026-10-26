@@ -520,10 +520,14 @@ async fn api_daemon(State(state): Shared) -> Json<Value> {
 struct StopBody {
     #[serde(default)]
     force: bool,
+    /// Leave how the daemon runs for the next one, which starts right after.
+    #[serde(default)]
+    restart: bool,
 }
 
 async fn api_daemon_stop(State(state): Shared, body: Option<Json<StopBody>>) -> Response {
-    let force = body.is_some_and(|b| b.force);
+    let force = body.as_ref().is_some_and(|b| b.force);
+    let restart = body.as_ref().is_some_and(|b| b.restart);
     let hub = state.hub.clone();
     if hub.is_attached() {
         let error = json!({ "error": "this server belongs to a terminal session" });
@@ -538,6 +542,12 @@ async fn api_daemon_stop(State(state): Shared, body: Option<Json<StopBody>>) -> 
             )
         });
         return (StatusCode::CONFLICT, Json(error)).into_response();
+    }
+    if restart {
+        let saved = crate::daemon::restart::Restart::of(&hub).map(|r| r.save());
+        if let Some(Err(err)) = saved {
+            tracing::warn!("the next daemon starts afresh: {err:#}");
+        }
     }
     // Stop after the response is on its way.
     tokio::spawn(async move {
