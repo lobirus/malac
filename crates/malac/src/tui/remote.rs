@@ -164,6 +164,20 @@ impl RemoteDialog {
                 Span::styled(state, style),
                 Span::styled(detail, t.dim()),
             ]));
+            // What the tool waits for, such as a link to turn on Tailscale Serve.
+            if tunnel.state == TunnelState::Starting {
+                for said in tunnel.waiting.iter().flat_map(|w| w.lines()) {
+                    let style = if said.starts_with("https://") {
+                        t.fg(t.accent)
+                    } else {
+                        t.fg(t.warning)
+                    };
+                    lines.push(Line::from(vec![
+                        label(""),
+                        Span::styled(said.to_owned(), style),
+                    ]));
+                }
+            }
         }
         let awake = shown.awake;
         lines.push(Line::from(vec![

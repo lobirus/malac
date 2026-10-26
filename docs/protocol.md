@@ -264,7 +264,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 
 **RemoteStatus** `{enabled, listen, urls: [{kind, url}], tunnel: TunnelStatus | null, devices}`. `enabled` is whether remote access is on; `listen` the bound address (`0.0.0.0:7700`); `urls` the addresses other devices can use, best first, `kind` being `tunnel`, `public` (`remote.public_url`), `lan` (this machine's network address) or `local` (loopback, for SSH tunnels); `devices` the number of paired devices.
 
-**TunnelStatus** `{provider, state, url, error, notes, started}`: `provider` is `cloudflare`, `ngrok`, `tailscale` or `tailscale-funnel`; `state` is `starting`, `running` (with `url`), `failed` (with `error`, the tool's last lines) or `stopped`; `notes` are what to know about that kind of tunnel.
+**TunnelStatus** `{provider, state, url, error, waiting, notes, started}`: `provider` is `cloudflare`, `ngrok`, `tailscale` or `tailscale-funnel`; `state` is `starting`, `running` (with `url`), `failed` (with `error`, the tool's last lines) or `stopped`; `waiting`, while starting, is what the tool printed so far, such as `tailscale serve` asking to turn on Serve for the tailnet at a link it then waits for; `notes` are what to know about that kind of tunnel.
 
 **AwakeStatus** `{mode, awake, reason, method, error, since}`: `mode` is `busy`, `always` or `off`; `awake` whether a power assertion is held; `reason` why, for people (`2 agents running`, `nothing is running`, `idle only: …`); `method` `caffeinate` or `systemd-inhibit` (null where neither exists); `error` why taking it failed; `since` when `awake` last changed.
 

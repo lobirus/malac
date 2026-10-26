@@ -5837,6 +5837,25 @@ td .badge {
   white-space: pre-wrap;
 }
 
+.remote-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 8px;
+  padding: 8px;
+  border: 1px solid var(--amber-border);
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.remote-waiting-title {
+  margin: 0 0 2px;
+  color: var(--amber);
+  font-weight: 500;
+}
+
 .pair-box {
   display: flex;
   flex-wrap: wrap;

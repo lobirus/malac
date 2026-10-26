@@ -237,6 +237,7 @@ impl Running {
             state: TunnelState::Starting,
             url: None,
             error: None,
+            waiting: None,
             notes: notes(provider),
             started: Utc::now(),
         }));
@@ -271,12 +272,20 @@ impl Running {
                                 update(&|s| {
                                     s.state = TunnelState::Running;
                                     s.url = Some(url.clone());
+                                    s.waiting = None;
                                 });
                             }
                         } else if let Some(text) = readable(provider, &line) {
                             recent.push(text);
                             if recent.len() > KEEP_LINES {
                                 recent.remove(0);
+                            }
+                            // A tool that waits for the user, such as
+                            // `tailscale serve` on a tailnet without Serve,
+                            // says so here and nowhere else.
+                            if shared.lock().unwrap().state == TunnelState::Starting {
+                                let said = recent.join("\n");
+                                update(&|s| s.waiting = Some(said.clone()));
                             }
                         }
                     }
@@ -295,6 +304,7 @@ impl Running {
                         terminate(&mut child).await;
                         update(&|s| {
                             s.state = TunnelState::Stopped;
+                            s.waiting = None;
                         });
                         return;
                     }
@@ -311,6 +321,7 @@ impl Running {
             update(&|s| {
                 s.state = TunnelState::Failed;
                 s.error = Some(why.clone());
+                s.waiting = None;
             });
         });
         Ok(Self {
@@ -478,8 +489,63 @@ mod tests {
             let _ = tx.send(s);
         })
         .unwrap();
-        let failed = rx.recv().await.unwrap();
+        // What it printed shows as `waiting` first, then as the error.
+        let failed = loop {
+            let status = rx.recv().await.unwrap();
+            if status.state != TunnelState::Starting {
+                break status;
+            }
+        };
         assert_eq!(failed.state, TunnelState::Failed);
         assert_eq!(failed.error.as_deref(), Some("ERR cannot reach the edge"));
+        assert_eq!(failed.waiting, None);
+    }
+
+    /// `tailscale serve` on a tailnet without Serve prints a link and waits
+    /// until the user turns Serve on; the status shows the link meanwhile.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shows_what_a_waiting_tool_asks_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("tailscale");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             echo 'Serve is not enabled on your tailnet.'\n\
+             echo 'To enable, visit:'\n\
+             echo ''\n\
+             echo '         https://login.tailscale.com/f/serve?node=abc'\n\
+             sleep 1\n\
+             echo 'https://laptop.tail1234.ts.net/'\n\
+             exec sleep 30\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let spec = Spec::with_program(Tunnel::Tailscale, fake, 7790);
+        let running = Running::start(spec, move |s| {
+            let _ = tx.send(s);
+        })
+        .unwrap();
+        let mut waiting = None;
+        let up = loop {
+            let status = rx.recv().await.unwrap();
+            if status.state != TunnelState::Starting {
+                break status;
+            }
+            waiting = status.waiting;
+        };
+        assert_eq!(
+            waiting.as_deref(),
+            Some(
+                "Serve is not enabled on your tailnet.\nTo enable, visit:\n\
+                 https://login.tailscale.com/f/serve?node=abc"
+            )
+        );
+        assert_eq!(up.state, TunnelState::Running);
+        assert_eq!(up.url.as_deref(), Some("https://laptop.tail1234.ts.net"));
+        assert_eq!(up.waiting, None);
+        running.stop().await;
     }
 }

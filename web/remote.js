@@ -329,6 +329,15 @@ function tunnelGroup(view, remote) {
       ),
     );
     if (tunnel.error) children.push(h("pre", { class: "remote-error" }, tunnel.error));
+    // A step the tool waits for, such as turning on Tailscale Serve; only https lines become links.
+    if (tunnel.state === "starting" && tunnel.waiting) {
+      const lines = tunnel.waiting.split("\n").map((line) =>
+        /^https:\/\/\S+$/.test(line) ? h("a", { href: line, target: "_blank", rel: "noopener" }, line) : h("span", {}, line),
+      );
+      children.push(
+        h("div", { class: "remote-waiting", role: "status" }, h("p", { class: "remote-waiting-title" }, `${tunnel.provider} is waiting for you`), ...lines),
+      );
+    }
     for (const note of tunnel.notes ?? []) children.push(h("p", { class: "field-note" }, icon("info", 14), note));
   }
   children.push(

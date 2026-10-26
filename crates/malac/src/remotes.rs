@@ -519,17 +519,28 @@ pub async fn tunnel(args: TunnelArgs) -> Result<i32> {
     eprintln!("starting {}…", provider.as_str());
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut status = started;
+    let mut shown: Option<String> = None;
     while status.state == TunnelState::Starting && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let remote: RemoteStatus = client::get(&file, "/api/remote").await?;
         if let Some(tunnel) = remote.tunnel {
             status = tunnel;
         }
+        // A step the tool waits for, such as turning on Tailscale Serve,
+        // shows at once: the tunnel goes on as soon as it is done.
+        if !args.json && status.waiting.is_some() && status.waiting != shown {
+            print_waiting(&status);
+            shown = status.waiting.clone();
+        }
     }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
-        print_tunnel(&status);
+        let mut last = status.clone();
+        if shown.is_some() && shown == last.waiting {
+            last.waiting = None; // already printed above
+        }
+        print_tunnel(&last);
         if status.state == TunnelState::Running {
             println!();
             println!(
@@ -542,6 +553,18 @@ pub async fn tunnel(args: TunnelArgs) -> Result<i32> {
     }
     Ok(match status.state {
         TunnelState::Running => 0,
+        TunnelState::Starting if status.waiting.is_some() => {
+            eprintln!(
+                "{}",
+                format!(
+                    "! {} is waiting for the step above; the tunnel starts once it is done \
+                     (`malac tunnel status` checks again)",
+                    status.provider.as_str()
+                )
+                .yellow()
+            );
+            0
+        }
         TunnelState::Starting => {
             eprintln!(
                 "{}",
@@ -551,6 +574,17 @@ pub async fn tunnel(args: TunnelArgs) -> Result<i32> {
         }
         TunnelState::Failed | TunnelState::Stopped => 1,
     })
+}
+
+/// What the tunnel's tool printed while it starts, e.g. a link to open.
+fn print_waiting(tunnel: &TunnelStatus) {
+    let Some(waiting) = &tunnel.waiting else {
+        return;
+    };
+    println!("  {} says:", tunnel.provider.as_str());
+    for line in waiting.lines() {
+        println!("    {}", line.yellow());
+    }
 }
 
 fn print_tunnel(tunnel: &TunnelStatus) {
@@ -574,6 +608,9 @@ fn print_tunnel(tunnel: &TunnelStatus) {
         for line in error.lines() {
             println!("  {}", line.red());
         }
+    }
+    if tunnel.state == TunnelState::Starting {
+        print_waiting(tunnel);
     }
     for note in &tunnel.notes {
         println!("  {}", format!("! {note}").yellow());

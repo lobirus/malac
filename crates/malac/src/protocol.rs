@@ -637,6 +637,10 @@ pub struct TunnelStatus {
     /// The public address, once the tunnel reports it.
     pub url: Option<String>,
     pub error: Option<String>,
+    /// While starting: what the tool printed, such as a link to turn on
+    /// Tailscale Serve for the tailnet, which it waits for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
     /// What to know about this kind of tunnel.
     #[serde(default)]
     pub notes: Vec<String>,
