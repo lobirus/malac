@@ -20,7 +20,8 @@ jobs:
         run: |
           brew install xcodegen
           xcodegen generate
-          xcodebuild -project Malac.xcodeproj -target Malac -sdk iphonesimulator \
+          xcodebuild -project Malac.xcodeproj -scheme Malac \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO build | tail -40
           test "${PIPESTATUS[0]}" -eq 0
 
@@ -32,7 +33,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: android-actions/setup-android@v3
+      # The runner image ships the Android SDK; ANDROID_HOME points to it.
       - name: Core tests and debug APK
         working-directory: apps/android
         run: ./gradlew --no-daemon :core:test :app:assembleDebug
