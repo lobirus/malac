@@ -34,9 +34,11 @@ jobs:
           distribution: temurin
           java-version: "21"
       # The runner image ships the Android SDK; ANDROID_HOME points to it.
-      - name: Core tests and debug APK
+      # The release build runs checks the debug build skips, such as lint's
+      # fatal errors; unsigned here, the release workflow signs it.
+      - name: Core tests, debug APK and release build
         working-directory: apps/android
-        run: ./gradlew --no-daemon :core:test :app:assembleDebug
+        run: ./gradlew --no-daemon :core:test :app:assembleDebug :app:assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: malac-android-debug

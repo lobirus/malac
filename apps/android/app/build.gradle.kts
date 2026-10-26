@@ -81,4 +81,7 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.play.services.code.scanner)
+    // The scanner brings Fragment 1.1, which loses activity results such as
+    // the notification permission's; 1.3 and later deliver them.
+    implementation(libs.androidx.fragment)
 }
