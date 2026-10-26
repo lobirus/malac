@@ -12,7 +12,9 @@ import io.malac.core.protocol.SessionList
 import io.malac.core.protocol.SessionSummary
 import io.malac.core.protocol.SessionTranscript
 import io.malac.core.protocol.encode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
@@ -65,9 +67,7 @@ class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint
     /** Revokes a device: its token stops working and its connections close. */
     suspend fun revoke(device: String): DeviceView {
         val request = authorized("api/devices/$device").delete().build()
-        return client.newCall(request).await().use { response ->
-            MalacJson.decodeFromString(Revoked.serializer(), response.bodyOrThrow()).revoked
-        }
+        return client.fetch(request, Revoked.serializer()).revoked
     }
 
     /** Unpairs this device, when the daemon answers and knows it. */
@@ -81,16 +81,12 @@ class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint
     /** Runs a command without a WebSocket, e.g. from a notification action. */
     suspend fun command(command: Command): ServerMessage {
         val request = authorized("api/command").post(command.encode().toRequestBody(JSON)).build()
-        return client.newCall(request).await().use { response ->
-            MalacJson.decodeFromString(ServerMessage.serializer(), response.bodyOrThrow())
-        }
+        return client.fetch(request, ServerMessage.serializer())
     }
 
     private suspend fun <T> get(path: String, deserializer: DeserializationStrategy<T>): T {
         val request = authorized(path).get().build()
-        return client.newCall(request).await().use { response ->
-            MalacJson.decodeFromString(deserializer, response.bodyOrThrow())
-        }
+        return client.fetch(request, deserializer)
     }
 
     private fun authorized(path: String): Request.Builder =
@@ -111,9 +107,7 @@ class HttpPairingService(private val client: OkHttpClient) : PairingService {
 
     suspend fun hello(base: HttpUrl): Hello {
         val request = Request.Builder().url(base.resolve("api/hello")!!).get().build()
-        return client.newCall(request).await().use { response ->
-            MalacJson.decodeFromString(Hello.serializer(), response.bodyOrThrow())
-        }
+        return client.fetch(request, Hello.serializer())
     }
 
     override suspend fun pair(base: HttpUrl, code: String, deviceName: String): Paired {
@@ -123,15 +117,11 @@ class HttpPairingService(private val client: OkHttpClient) : PairingService {
         } catch (error: DaemonException) {
             if (error.status == 0 || error.forbidden) throw error
             null
-        } catch (error: SerializationException) {
-            null
         }
         if (hello?.app != "malac") throw DaemonException(0, "$base is not a malac daemon")
         val body = MalacJson.encodeToString(PairRequest.serializer(), PairRequest(code, deviceName, kind = "app"))
         val request = Request.Builder().url(base.resolve("api/pair")!!).post(body.toRequestBody(JSON)).build()
-        val response = client.newCall(request).await().use { response ->
-            MalacJson.decodeFromString(PairResponse.serializer(), response.bodyOrThrow())
-        }
+        val response = client.fetch(request, PairResponse.serializer())
         return Paired(response.token, response.device, response.version)
     }
 }
@@ -143,6 +133,27 @@ private fun Response.bodyOrThrow(): String {
         ?.get("error")?.jsonPrimitive?.content
         ?: text.ifBlank { "$code $message" }
     throw DaemonException(code, error)
+}
+
+/**
+ * Sends [request] and decodes the reply. The body is read and decoded on the
+ * IO dispatcher: it comes from the network and can be megabytes, and Android
+ * forbids network reads on the main thread. Every failure is a
+ * [DaemonException], a reply that does not decode included.
+ */
+internal suspend fun <T> OkHttpClient.fetch(request: Request, deserializer: DeserializationStrategy<T>): T {
+    val response = newCall(request).await()
+    return withContext(Dispatchers.IO) {
+        response.use {
+            try {
+                MalacJson.decodeFromString(deserializer, it.bodyOrThrow())
+            } catch (error: SerializationException) {
+                throw DaemonException(it.code, "unexpected reply from the daemon: ${error.message}")
+            } catch (error: IOException) {
+                throw error as? DaemonException ?: DaemonException(0, error.message ?: "the connection dropped")
+            }
+        }
+    }
 }
 
 internal suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->

@@ -4,9 +4,11 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -18,8 +20,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -29,14 +31,17 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -62,6 +67,10 @@ import io.malac.core.transcript.Draft
 import io.malac.core.transcript.TranscriptItem
 import io.malac.core.transcript.TurnSummary
 import io.malac.core.transcript.toolTitle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+import kotlin.math.min
 
 @Composable
 fun UserRow(item: TranscriptItem.User) {
@@ -259,30 +268,44 @@ fun Pill(text: String) {
     }
 }
 
-/** Images from the transcript, decoded once each. */
+private val THUMBNAIL = 96.dp
+
+/**
+ * Images from the transcript as thumbnails. Each is decoded off the main
+ * thread at about the size it is shown: a full-size screenshot takes tens
+ * of megabytes as a bitmap, and a session can hold many.
+ */
 @Composable
 fun Thumbnails(images: List<Block.Image>) {
     val description = pluralStringResource(R.plurals.images, images.size, images.size)
+    val edge = with(LocalDensity.current) { THUMBNAIL.roundToPx() }
     Row(
         Modifier.horizontalScroll(rememberScrollState()).semantics(mergeDescendants = true) {},
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         for (image in images) {
-            val bitmap = remember(image.data) {
-                runCatching { Base64.decode(image.data, Base64.DEFAULT) }.getOrNull()
-                    ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-                    ?.asImageBitmap()
+            val bitmap by produceState<ImageBitmap?>(null, image.data, edge) {
+                value = withContext(Dispatchers.Default) { thumbnail(image.data, edge) }
             }
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap,
-                    contentDescription = description,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(96.dp).clip(MaterialTheme.shapes.small),
-                )
-            }
+            val modifier = Modifier.size(THUMBNAIL).clip(MaterialTheme.shapes.small)
+            bitmap?.let {
+                Image(bitmap = it, contentDescription = description, contentScale = ContentScale.Crop, modifier = modifier)
+            } ?: Box(modifier.background(MaterialTheme.colorScheme.surfaceContainer))
         }
     }
+}
+
+/** Decodes base64 [data] with its shorter side at least [edge] pixels, or null. */
+private fun thumbnail(data: String, edge: Int): ImageBitmap? {
+    val bytes = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull() ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val shortEdge = min(bounds.outWidth, bounds.outHeight)
+    if (shortEdge <= 0) return null
+    var sample = 1
+    while (shortEdge / (sample * 2) >= edge) sample *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
 }
 
 /** Monospace output, cut to [previewLines] until expanded. */

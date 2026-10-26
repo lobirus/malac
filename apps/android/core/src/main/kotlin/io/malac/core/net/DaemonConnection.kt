@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -108,7 +109,12 @@ class DaemonConnection(
         waiting[ref] = reply
         try {
             if (socket?.send(command.encode(ref)) != true) throw CommandException("Not connected to malac")
-            val message = withTimeout(requestTimeoutMillis) { reply.await() }
+            val message = try {
+                withTimeout(requestTimeoutMillis) { reply.await() }
+            } catch (timeout: TimeoutCancellationException) {
+                // Not a cancellation of the caller: report it like any failed command.
+                throw CommandException("malac did not answer in time")
+            }
             if (message is ServerMessage.Error) throw CommandException(message.message, refused = true)
             return message
         } finally {

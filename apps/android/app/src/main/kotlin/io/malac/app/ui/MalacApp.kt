@@ -1,6 +1,7 @@
 package io.malac.app.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
@@ -47,6 +48,7 @@ import io.malac.app.connection.ActiveDaemon
 import io.malac.app.data.SavedDaemon
 import io.malac.app.ui.agent.AgentScreen
 import io.malac.app.ui.approvals.ApprovalsScreen
+import io.malac.app.ui.components.CrashReport
 import io.malac.app.ui.daemons.AddDaemonScreen
 import io.malac.app.ui.daemons.DaemonsScreen
 import io.malac.app.ui.jobs.JobLogScreen
@@ -72,6 +74,7 @@ data class OpenAgent(val daemon: String, val agent: String)
 
 @Composable
 fun MalacApp(graph: AppGraph, opens: Flow<OpenAgent>) {
+    CrashReport(graph.crashes)
     val daemons by graph.daemons.daemons.collectAsStateWithLifecycle<List<SavedDaemon>?>(initialValue = null)
     val active by graph.connections.active.collectAsStateWithLifecycle()
     val saved = daemons ?: return
@@ -132,7 +135,10 @@ private fun Main(graph: AppGraph, active: ActiveDaemon, opens: Flow<OpenAgent>) 
             }
         },
     ) { padding ->
-        Column(Modifier.padding(bottom = padding.calculateBottomPadding()).consumeWindowInsets(padding)) {
+        // Only the bottom is taken here; each screen's top bar pads itself
+        // below the status bar and the camera cutout.
+        val bottom = PaddingValues(bottom = padding.calculateBottomPadding())
+        Column(Modifier.padding(bottom).consumeWindowInsets(bottom)) {
             NavHost(nav, startDestination = WorkspacesRoute) {
                 composable<WorkspacesRoute> {
                     WorkspacesScreen(

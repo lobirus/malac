@@ -9,7 +9,9 @@ class MalacApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        graph = AppGraph(this)
+        // First, so a crash while starting up is kept too.
+        val crashes = CrashLog(this).apply { install() }
+        graph = AppGraph(this, crashes)
         graph.connections.start()
         BackgroundCheckWorker.schedule(this)
     }

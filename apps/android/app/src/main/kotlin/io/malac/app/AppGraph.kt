@@ -25,7 +25,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /** The app's long-lived objects. */
-class AppGraph(context: Context) {
+class AppGraph(context: Context, val crashes: CrashLog) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val http: OkHttpClient = OkHttpClient.Builder()

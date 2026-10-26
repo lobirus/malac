@@ -98,6 +98,10 @@
     <string name="show_all_lines">Show all %1$d lines</string>
     <string name="show_less">Show less</string>
     <string name="copy_code">Copy</string>
+    <string name="crash_title">malac closed unexpectedly</string>
+    <string name="crash_body">This is what went wrong last time. Copy it into a bug report; the app sends nothing by itself.</string>
+    <string name="crash_copy">Copy</string>
+    <string name="crash_dismiss">Dismiss</string>
     <string name="preparing_tool">Preparing %1$s</string>
     <string name="context_tokens">%1$s context</string>
     <string name="waiting_first_message">Waiting for the first message.</string>
