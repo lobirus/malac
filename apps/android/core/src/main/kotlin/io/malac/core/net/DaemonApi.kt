@@ -1,0 +1,161 @@
+package io.malac.core.net
+
+import io.malac.core.pairing.Paired
+import io.malac.core.pairing.PairingService
+import io.malac.core.protocol.Command
+import io.malac.core.protocol.DeviceList
+import io.malac.core.protocol.DeviceView
+import io.malac.core.protocol.Hello
+import io.malac.core.protocol.MalacJson
+import io.malac.core.protocol.ServerMessage
+import io.malac.core.protocol.SessionList
+import io.malac.core.protocol.SessionSummary
+import io.malac.core.protocol.SessionTranscript
+import io.malac.core.protocol.encode
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/** Where a daemon is and the token this device uses for it. */
+data class Endpoint(val base: HttpUrl, val token: String) {
+    override fun toString() = "Endpoint($base)"
+}
+
+/** A failed request; [status] is the HTTP status, 0 when the daemon could not be reached. */
+class DaemonException(val status: Int, message: String) : IOException(message) {
+    /** The token was revoked or never valid: pair again. */
+    val unauthorized: Boolean get() = status == 401
+
+    /** Refused: a wrong, used or expired pairing code, or remote access is off. */
+    val forbidden: Boolean get() = status == 403
+
+    /** Too many wrong pairing codes; a new code is needed. */
+    val tooManyCodes: Boolean get() = status == 429
+}
+
+private val JSON = "application/json; charset=utf-8".toMediaType()
+
+/** The daemon's REST API, for what the WebSocket does not carry and for background checks. */
+class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint) {
+    suspend fun session(id: String): SessionTranscript = get("api/sessions/$id", SessionTranscript.serializer())
+
+    suspend fun sessions(limit: Int = 50): List<SessionSummary> =
+        get("api/sessions?limit=$limit", SessionList.serializer()).sessions
+
+    /** The same snapshot the WebSocket starts with. */
+    suspend fun snapshot(): ServerMessage.Snapshot = get("api/snapshot", ServerMessage.Snapshot.serializer())
+
+    /** This machine's paired devices; the one making the request has `current`. */
+    suspend fun devices(): List<DeviceView> = get("api/devices", DeviceList.serializer()).devices
+
+    /** Revokes a device: its token stops working and its connections close. */
+    suspend fun revoke(device: String): DeviceView {
+        val request = authorized("api/devices/$device").delete().build()
+        return client.newCall(request).await().use { response ->
+            MalacJson.decodeFromString(Revoked.serializer(), response.bodyOrThrow()).revoked
+        }
+    }
+
+    /** Unpairs this device, when the daemon answers and knows it. */
+    suspend fun revokeSelf() {
+        devices().firstOrNull { it.current }?.let { revoke(it.id) }
+    }
+
+    @Serializable
+    private data class Revoked(val revoked: DeviceView)
+
+    /** Runs a command without a WebSocket, e.g. from a notification action. */
+    suspend fun command(command: Command): ServerMessage {
+        val request = authorized("api/command").post(command.encode().toRequestBody(JSON)).build()
+        return client.newCall(request).await().use { response ->
+            MalacJson.decodeFromString(ServerMessage.serializer(), response.bodyOrThrow())
+        }
+    }
+
+    private suspend fun <T> get(path: String, deserializer: DeserializationStrategy<T>): T {
+        val request = authorized(path).get().build()
+        return client.newCall(request).await().use { response ->
+            MalacJson.decodeFromString(deserializer, response.bodyOrThrow())
+        }
+    }
+
+    private fun authorized(path: String): Request.Builder =
+        Request.Builder().url(endpoint.base.resolve(path)!!).header("Authorization", "Bearer ${endpoint.token}")
+}
+
+/**
+ * Pairing as `docs/remote.md` describes it for apps: `GET /api/hello`
+ * confirms the address is a malac daemon, then `POST /api/pair` trades the
+ * one-time code for a device token. Neither needs a token.
+ */
+class HttpPairingService(private val client: OkHttpClient) : PairingService {
+    @Serializable
+    private data class PairRequest(val code: String, val name: String, val kind: String)
+
+    @Serializable
+    private data class PairResponse(val token: String, val device: DeviceView? = null, val version: String = "")
+
+    suspend fun hello(base: HttpUrl): Hello {
+        val request = Request.Builder().url(base.resolve("api/hello")!!).get().build()
+        return client.newCall(request).await().use { response ->
+            MalacJson.decodeFromString(Hello.serializer(), response.bodyOrThrow())
+        }
+    }
+
+    override suspend fun pair(base: HttpUrl, code: String, deviceName: String): Paired {
+        // Unreachable, or refused with a reason (remote access off): say so. Anything else is not malac.
+        val hello = try {
+            hello(base)
+        } catch (error: DaemonException) {
+            if (error.status == 0 || error.forbidden) throw error
+            null
+        } catch (error: SerializationException) {
+            null
+        }
+        if (hello?.app != "malac") throw DaemonException(0, "$base is not a malac daemon")
+        val body = MalacJson.encodeToString(PairRequest.serializer(), PairRequest(code, deviceName, kind = "app"))
+        val request = Request.Builder().url(base.resolve("api/pair")!!).post(body.toRequestBody(JSON)).build()
+        val response = client.newCall(request).await().use { response ->
+            MalacJson.decodeFromString(PairResponse.serializer(), response.bodyOrThrow())
+        }
+        return Paired(response.token, response.device, response.version)
+    }
+}
+
+private fun Response.bodyOrThrow(): String {
+    val text = body.string()
+    if (isSuccessful) return text
+    val error = runCatching { MalacJson.parseToJsonElement(text) as JsonObject }.getOrNull()
+        ?.get("error")?.jsonPrimitive?.content
+        ?: text.ifBlank { "$code $message" }
+    throw DaemonException(code, error)
+}
+
+internal suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
+    enqueue(
+        object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                if (continuation.isActive) continuation.resume(response) else response.close()
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                continuation.resumeWithException(if (e is DaemonException) e else DaemonException(0, e.message ?: "cannot reach the daemon"))
+            }
+        },
+    )
+    continuation.invokeOnCancellation { cancel() }
+}

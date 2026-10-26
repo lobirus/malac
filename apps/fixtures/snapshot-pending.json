@@ -1,0 +1,113 @@
+{
+  "type": "snapshot",
+  "daemon": {
+    "version": "1.0.1",
+    "pid": 81049,
+    "started": "2026-10-26T06:50:43.826502Z",
+    "version_mismatch": true,
+    "clients": 2,
+    "attached": false,
+    "remote": false,
+    "user_home": "/Users/dev"
+  },
+  "workspaces": [
+    {
+      "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+      "name": "default",
+      "tabs": 1,
+      "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+      "running": 1,
+      "created": "2026-10-26T06:51:37.296507Z",
+      "updated": "2026-10-26T06:51:37.318566Z"
+    }
+  ],
+  "workspace": {
+    "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+    "name": "default",
+    "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+    "created": "2026-10-26T06:51:37.296507Z",
+    "updated": "2026-10-26T06:51:37.318566Z",
+    "tabs": [
+      {
+        "id": "01a176fa-99d0-733d-bec9-e9d000301f35",
+        "name": "demo",
+        "cwd": "/Users/dev/src/demo",
+        "agents": [
+          "01a176fa-99d2-7014-9be0-383c2c41ddc3"
+        ],
+        "active_agent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+        "mode": "ask",
+        "options": {},
+        "loaded": true,
+        "snapshots": [
+          {
+            "id": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+            "label": "main",
+            "parent": null,
+            "depth": 0,
+            "read_only": false,
+            "cwd": "/Users/dev/src/demo",
+            "created": "2026-10-26T06:51:37.298539Z",
+            "model": "lora/fast",
+            "status": "running",
+            "activity": "waiting for approval: bash",
+            "usage": {
+              "input_tokens": 3665,
+              "output_tokens": 121,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "cost": 0.00061025
+            },
+            "report": null,
+            "live": true
+          }
+        ]
+      }
+    ]
+  },
+  "pending": [
+    {
+      "id": "01a176fa-9fa1-7585-b237-c13f0d7a3e3f",
+      "call_id": "call_01a176fa9f6471e5b9c94673",
+      "agent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+      "agent_label": "main",
+      "tool": "bash",
+      "summary": "cat main.rs",
+      "input": {
+        "command": "cat main.rs",
+        "description": "Print main.rs contents"
+      },
+      "tab": "01a176fa-99d0-733d-bec9-e9d000301f35"
+    }
+  ],
+  "jobs": [],
+  "update": {
+    "current": "1.0.1",
+    "latest": null,
+    "available": false,
+    "installed": null,
+    "checked_at": null,
+    "method": "self_update",
+    "release_url": "https://github.com/lobirus/malac/releases/latest",
+    "hint": null
+  },
+  "control": {
+    "enabled": false,
+    "connected": false,
+    "tools": 0,
+    "error": null,
+    "permissions": null
+  },
+  "models": [
+    "lora/default",
+    "lora/smart",
+    "lora/fast",
+    "lora/vision",
+    "lora/deepseek-v4.1-flash",
+    "lora/deepseek-v4.1-flash-1017",
+    "lora/glm-5.3-flash",
+    "lora/muse-spark-open",
+    "lora/nemotron-3.5-super-vl"
+  ],
+  "default_model": "lora/fast"
+}

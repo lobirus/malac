@@ -1,0 +1,13 @@
+{
+  "devices": [
+    {
+      "address": "127.0.0.1",
+      "created": "2026-10-26T08:00:13.558821Z",
+      "current": true,
+      "id": "93c5e175",
+      "kind": "app",
+      "last_seen": "2026-10-26T08:00:13.558821Z",
+      "name": "Test iPhone"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "token": "<device token>",
+  "device": {
+    "id": "93c5e175",
+    "name": "Test iPhone",
+    "kind": "app",
+    "created": "2026-10-26T08:00:13.558821Z",
+    "last_seen": "2026-10-26T08:00:13.558821Z",
+    "address": "127.0.0.1",
+    "current": true
+  },
+  "version": "1.0.1"
+}

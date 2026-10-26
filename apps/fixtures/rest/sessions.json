@@ -1,0 +1,24 @@
+{
+  "sessions": [
+    {
+      "created": "2026-10-26T06:51:37.298539Z",
+      "cwd": "/Users/dev/src/demo",
+      "id": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+      "label": "main",
+      "model": "lora/fast",
+      "parent": null,
+      "title": "Do these steps in order, using your tools:",
+      "updated": "2026-10-26T06:51:44.434082473Z"
+    },
+    {
+      "created": "2026-10-26T06:51:39.663628Z",
+      "cwd": "/Users/dev/src/demo",
+      "id": "01a176fa-a30f-7178-9dba-d02eeede0201",
+      "label": "reader",
+      "model": "lora/fast",
+      "parent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+      "title": "Read the file README.md in the current working directory (/Users/dev/src/demo…",
+      "updated": "2026-10-26T06:51:41.200883697Z"
+    }
+  ]
+}

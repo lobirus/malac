@@ -1,0 +1,221 @@
+[
+  {
+    "type": "snapshot",
+    "daemon": {
+      "version": "1.0.1",
+      "pid": 24073,
+      "started": "2026-10-26T07:59:50.135140Z",
+      "version_mismatch": false,
+      "clients": 1,
+      "attached": false,
+      "remote": false,
+      "user_home": "/Users/dev"
+    },
+    "workspaces": [
+      {
+        "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+        "name": "default",
+        "tabs": 1,
+        "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+        "running": 0,
+        "created": "2026-10-26T06:51:37.296507Z",
+        "updated": "2026-10-26T06:51:51.629189Z"
+      }
+    ],
+    "workspace": {
+      "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+      "name": "default",
+      "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+      "created": "2026-10-26T06:51:37.296507Z",
+      "updated": "2026-10-26T06:51:51.629189Z",
+      "tabs": [
+        {
+          "id": "01a176fa-99d0-733d-bec9-e9d000301f35",
+          "name": "demo app",
+          "cwd": "/Users/dev/src/demo",
+          "agents": [
+            "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+            "01a176fa-c603-748e-85a9-2971e96f0c17"
+          ],
+          "active_agent": "01a176fa-c603-748e-85a9-2971e96f0c17",
+          "mode": "edits",
+          "options": {
+            "mode": "edits"
+          },
+          "loaded": false,
+          "snapshots": [
+            {
+              "id": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+              "label": "main",
+              "parent": null,
+              "depth": 0,
+              "read_only": false,
+              "cwd": "/Users/dev/src/demo",
+              "created": "2026-10-26T06:51:37.298539Z",
+              "model": "lora/fast",
+              "status": "idle",
+              "activity": "",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost": 0
+              },
+              "report": null,
+              "live": false,
+              "title": "Do these steps in order, using your tools:"
+            },
+            {
+              "id": "01a176fa-c603-748e-85a9-2971e96f0c17",
+              "label": "main",
+              "parent": null,
+              "depth": 0,
+              "read_only": false,
+              "cwd": "/Users/dev/src/demo",
+              "created": "2026-10-26T06:51:48.611791Z",
+              "model": "lora/fast",
+              "status": "idle",
+              "activity": "",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost": 0
+              },
+              "report": null,
+              "live": false,
+              "title": "Describe this image in one sentence, then use bash to run `sleep 20 && echo done…"
+            }
+          ]
+        }
+      ]
+    },
+    "pending": [],
+    "jobs": [
+      {
+        "id": "19959044",
+        "command": "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick $i; sleep 3; done",
+        "cwd": "/Users/dev/src/demo",
+        "pid": 85758,
+        "log": "/Users/dev/.malac/jobs/19959044.log",
+        "started": "2026-10-26T06:51:41.969787Z",
+        "finished": "2026-10-26T06:51:46.939720Z",
+        "exit_code": null,
+        "status": "killed",
+        "agent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+        "tab": "01a176fa-99d0-733d-bec9-e9d000301f35"
+      }
+    ],
+    "update": {
+      "current": "1.0.1",
+      "latest": null,
+      "available": false,
+      "installed": null,
+      "checked_at": null,
+      "method": "self_update",
+      "release_url": "https://github.com/lobirus/malac/releases/latest",
+      "hint": null
+    },
+    "control": {
+      "enabled": false,
+      "connected": false,
+      "tools": 0,
+      "error": null,
+      "permissions": null
+    },
+    "models": [
+      "lora/default",
+      "lora/smart",
+      "lora/fast",
+      "lora/vision",
+      "lora/deepseek-v4.1-flash",
+      "lora/deepseek-v4.1-flash-1017",
+      "lora/glm-5.3-flash",
+      "lora/muse-spark-open",
+      "lora/nemotron-3.5-super-vl"
+    ],
+    "default_model": "lora/fast",
+    "remote": {
+      "enabled": false,
+      "listen": "127.0.0.1:7791",
+      "urls": [
+        {
+          "kind": "local",
+          "url": "http://127.0.0.1:7791"
+        }
+      ],
+      "tunnel": null,
+      "devices": 1
+    },
+    "awake": {
+      "mode": "busy",
+      "awake": false,
+      "reason": "nothing is running",
+      "method": "caffeinate",
+      "error": null,
+      "since": "2026-10-26T07:59:50.135085Z"
+    }
+  },
+  {
+    "type": "awake",
+    "awake": {
+      "mode": "always",
+      "awake": true,
+      "reason": "always, while the daemon runs",
+      "method": "caffeinate",
+      "error": null,
+      "since": "2026-10-26T08:00:14.227519Z"
+    }
+  },
+  {
+    "type": "ack",
+    "client_ref": "k1"
+  },
+  {
+    "type": "awake",
+    "awake": {
+      "mode": "busy",
+      "awake": true,
+      "reason": "work just finished; releasing shortly",
+      "method": "caffeinate",
+      "error": null,
+      "since": "2026-10-26T08:00:14.227519Z"
+    }
+  },
+  {
+    "type": "ack",
+    "client_ref": "k2"
+  },
+  {
+    "type": "remote",
+    "remote": {
+      "enabled": false,
+      "listen": "127.0.0.1:7791",
+      "urls": [
+        {
+          "kind": "local",
+          "url": "http://127.0.0.1:7791"
+        }
+      ],
+      "tunnel": null,
+      "devices": 2
+    }
+  },
+  {
+    "type": "remote",
+    "remote": {
+      "enabled": false,
+      "listen": "127.0.0.1:7791",
+      "urls": [
+        {
+          "kind": "local",
+          "url": "http://127.0.0.1:7791"
+        }
+      ],
+      "tunnel": null,
+      "devices": 1
+    }
+  }
+]

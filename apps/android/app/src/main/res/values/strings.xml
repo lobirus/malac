@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">malac</string>
+
+    <!-- Navigation -->
+    <string name="nav_workspaces">Workspaces</string>
+    <string name="nav_approvals">Approvals</string>
+    <string name="nav_jobs">Jobs</string>
+    <string name="back">Back</string>
+    <string name="expand">Expand</string>
+    <string name="collapse">Collapse</string>
+    <string name="retry">Retry</string>
+    <string name="refresh">Refresh</string>
+    <string name="cancel">Cancel</string>
+    <string name="save">Save</string>
+    <string name="loading">Loading…</string>
+
+    <!-- Status -->
+    <string name="phase_approval">Approval needed</string>
+    <string name="phase_running">Running</string>
+    <string name="phase_done">Done</string>
+    <string name="phase_failed">Failed</string>
+    <string name="phase_stopped">Stopped</string>
+    <string name="phase_idle">Idle</string>
+    <string name="mode_ask">Ask</string>
+    <string name="mode_edits">Edits</string>
+    <string name="mode_autopilot">Autopilot</string>
+
+    <!-- Connection -->
+    <string name="banner_connecting">Connecting to malac…</string>
+    <string name="banner_offline">Not connected. Retrying.</string>
+    <string name="banner_stopped">The daemon stopped (%1$s). Waiting for it to start again.</string>
+    <string name="banner_unauthorized">This device is no longer paired. Pair it again under Daemons.</string>
+
+    <!-- Daemons -->
+    <string name="daemons_title">Daemons</string>
+    <string name="daemon_subtitle">malac %1$s · %2$s</string>
+    <string name="daemon_actions">Actions for %1$s</string>
+    <string name="add_daemon">Add daemon</string>
+    <string name="pair_intro">On the computer that runs malac, run malac remote pair. Scan the QR code it shows, or type its address and the code.</string>
+    <string name="scan_qr">Scan QR code</string>
+    <string name="scan_not_malac">That QR code is not a malac link.</string>
+    <string name="address">Address</string>
+    <string name="pairing_code">Pairing code</string>
+    <string name="token_instead">Or a token</string>
+    <string name="daemon_name">Name (optional)</string>
+    <string name="device_name">This device’s name</string>
+    <string name="device_name_help">Shown in malac remote devices on the computer.</string>
+    <string name="pair">Pair</string>
+    <string name="pairing">Pairing…</string>
+    <string name="daemon_version">Version</string>
+    <string name="remote_access">Remote access</string>
+    <string name="remote_on">On, listening on %1$s</string>
+    <string name="remote_off">Off: only this computer and SSH tunnels (%1$s)</string>
+    <string name="remote_address">Best address</string>
+    <string name="remote_tunnel">Tunnel</string>
+    <string name="remote_devices">Paired devices</string>
+    <string name="keep_awake">Keep the computer awake</string>
+    <string name="keep_awake_busy">While busy</string>
+    <string name="keep_awake_always">Always</string>
+    <string name="keep_awake_off">Off</string>
+    <string name="awake_held">Awake</string>
+    <string name="awake_released">May sleep</string>
+    <string name="rename">Rename</string>
+    <string name="forget">Forget</string>
+    <string name="forget_title">Forget %1$s?</string>
+    <string name="forget_body">This phone is unpaired on the daemon if it answers, and its token is deleted here. If the daemon cannot be reached, revoke the device on the computer with malac remote revoke.</string>
+
+    <!-- Workspaces and tabs -->
+    <string name="no_workspaces">No workspaces yet</string>
+    <string name="no_workspaces_body">Start malac in a project on the computer and it shows up here.</string>
+    <string name="workspace_detail_running">%1$s · %2$d running</string>
+    <string name="no_tabs">This workspace has no tabs.</string>
+    <string name="no_agents">No agents in this tab</string>
+    <string name="no_agents_body">Start one with New agent.</string>
+    <string name="new_agent">New agent</string>
+    <string name="new_agent_hint">Write a prompt to start a new agent in %1$s.</string>
+
+    <!-- Transcript -->
+    <string name="you">You</string>
+    <string name="thinking">Thinking</string>
+    <string name="recalled_memories">Recalled memories</string>
+    <string name="compacted">Conversation compacted</string>
+    <string name="model_changed">Model changed to %1$s</string>
+    <string name="interrupted">Interrupted</string>
+    <string name="plan">Plan</string>
+    <string name="todo_done">done</string>
+    <string name="todo_in_progress">in progress</string>
+    <string name="todo_pending">pending</string>
+    <string name="task">Task</string>
+    <string name="read_only">read-only</string>
+    <string name="not_started">Not started</string>
+    <string name="open_transcript">Open transcript</string>
+    <string name="tool_pending">Queued</string>
+    <string name="tool_denied">Denied</string>
+    <string name="tool_skipped">Skipped</string>
+    <string name="no_output">(no output)</string>
+    <string name="show_all_lines">Show all %1$d lines</string>
+    <string name="show_less">Show less</string>
+    <string name="copy_code">Copy</string>
+    <string name="preparing_tool">Preparing %1$s</string>
+    <string name="context_tokens">%1$s context</string>
+    <string name="waiting_first_message">Waiting for the first message.</string>
+    <string name="no_messages">This session has no messages yet.</string>
+    <string name="history_failed">Could not load the saved transcript: %1$s</string>
+    <string name="jump_to_latest">Jump to the latest message</string>
+
+    <!-- Composer -->
+    <string name="model">Model</string>
+    <string name="default_model">default</string>
+    <string name="mode">Mode</string>
+    <string name="attach_photos">Attach photos</string>
+    <string name="remove_image">Remove %1$s</string>
+    <string name="prompt_placeholder">Message the agent</string>
+    <string name="prompt_running">Queue a message</string>
+    <string name="send">Send</string>
+    <string name="stop">Stop the agent</string>
+
+    <!-- Approvals -->
+    <string name="allow">Allow</string>
+    <string name="allow_always">Always</string>
+    <string name="deny">Deny</string>
+    <string name="approval_title">%1$s wants to run %2$s</string>
+    <string name="no_approvals">Nothing to approve</string>
+    <string name="no_approvals_body">Requests from every workspace show up here.</string>
+
+    <!-- Jobs -->
+    <string name="no_jobs">No background jobs</string>
+    <string name="no_jobs_body">Commands an agent runs in the background show up here.</string>
+    <string name="job_exited">exited</string>
+    <string name="job_exited_code">exited %1$d</string>
+    <string name="job_killed">killed</string>
+    <string name="job_unknown">ended unobserved</string>
+    <string name="job_gone">This job is no longer known.</string>
+    <string name="job_tail">Last %1$d lines of %2$d KB</string>
+    <string name="no_output_yet">(no output yet)</string>
+    <string name="stop_job">Stop job</string>
+    <string name="stop_job_title">Stop this job?</string>
+    <string name="stop_job_body">%1$s gets SIGTERM, then SIGKILL after 3 seconds.</string>
+
+    <!-- Notifications -->
+    <string name="channel_approvals">Approvals</string>
+    <string name="channel_turns">Finished turns</string>
+    <string name="notification_approval_title">%1$s wants to run %2$s</string>
+    <string name="notification_turn_done">%1$s is done</string>
+    <string name="notification_turn_failed">%1$s failed</string>
+    <string name="notification_turn_stopped">%1$s stopped</string>
+
+    <plurals name="tabs">
+        <item quantity="one">%d tab</item>
+        <item quantity="other">%d tabs</item>
+    </plurals>
+    <plurals name="agents">
+        <item quantity="one">%d agent</item>
+        <item quantity="other">%d agents</item>
+    </plurals>
+    <plurals name="subagents">
+        <item quantity="one">%d subagent</item>
+        <item quantity="other">%d subagents</item>
+    </plurals>
+    <plurals name="clients">
+        <item quantity="one">%d client</item>
+        <item quantity="other">%d clients</item>
+    </plurals>
+    <plurals name="devices">
+        <item quantity="one">%d device</item>
+        <item quantity="other">%d devices</item>
+    </plurals>
+    <plurals name="images">
+        <item quantity="one">%d image</item>
+        <item quantity="other">%d images</item>
+    </plurals>
+    <plurals name="approvals_waiting">
+        <item quantity="one">%d waiting</item>
+        <item quantity="other">%d waiting</item>
+    </plurals>
+</resources>

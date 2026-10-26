@@ -1,0 +1,17 @@
+{
+  "jobs": [
+    {
+      "agent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+      "command": "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick $i; sleep 3; done",
+      "cwd": "/Users/dev/src/demo",
+      "exit_code": null,
+      "finished": "2026-10-26T06:51:46.939720Z",
+      "id": "19959044",
+      "log": "/Users/dev/.malac/jobs/19959044.log",
+      "pid": 85758,
+      "started": "2026-10-26T06:51:41.969787Z",
+      "status": "killed",
+      "tab": "01a176fa-99d0-733d-bec9-e9d000301f35"
+    }
+  ]
+}

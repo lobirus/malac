@@ -1,0 +1,6 @@
+{
+  "status": 403,
+  "body": {
+    "error": "the pairing code is wrong, used or expired"
+  }
+}

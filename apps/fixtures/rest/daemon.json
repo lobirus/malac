@@ -1,0 +1,17 @@
+{
+  "agents_running": 0,
+  "attached": false,
+  "clients": 1,
+  "idle_minutes": 30,
+  "jobs_running": 0,
+  "pending_approvals": 0,
+  "pid": 81049,
+  "remote": false,
+  "started": "2026-10-26T06:50:43.826502Z",
+  "tabs_loaded": 1,
+  "url": "http://127.0.0.1:7791",
+  "user_home": "/Users/dev",
+  "version": "1.0.1",
+  "version_mismatch": false,
+  "workspaces": 1
+}

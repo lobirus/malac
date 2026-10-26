@@ -1,0 +1,71 @@
+[
+  {
+    "type": "snapshot",
+    "daemon": { "version": "0.1.2", "pid": 68119, "started": "2026-10-25T18:33:10.271046Z", "version_mismatch": false,
+                "clients": 2, "attached": false, "remote": false },
+    "workspaces": [
+      { "id": "01a17450-0000-7000-8000-000000000001", "name": "default", "tabs": 1,
+        "active_tab": "01a17453-0000-7000-8000-000000000002", "running": 1,
+        "created": "2026-10-25T18:30:00Z", "updated": "2026-10-25T18:33:10.271046Z" }
+    ],
+    "workspace": {
+      "id": "01a17450-0000-7000-8000-000000000001", "name": "default",
+      "active_tab": "01a17453-0000-7000-8000-000000000002",
+      "created": "2026-10-25T18:30:00Z", "updated": "2026-10-25T18:33:10.271046Z",
+      "tabs": [
+        {
+          "id": "01a17453-0000-7000-8000-000000000002", "name": "api", "cwd": "/src/app",
+          "agents": ["01a17453-0000-7000-8000-000000000003", "01a17456-0000-7000-8000-000000000004"],
+          "active_agent": "01a17456-0000-7000-8000-000000000004",
+          "mode": "ask",
+          "options": { "model": "lora/smart", "mode": "ask" },
+          "loaded": true,
+          "snapshots": [
+            { "id": "01a17456-0000-7000-8000-000000000004", "label": "main", "parent": null, "depth": 0, "read_only": false,
+              "cwd": "/src/app", "created": "2026-10-25T18:31:00Z", "model": "lora/fast", "status": "running",
+              "activity": "bash cargo test", "usage": { "input_tokens": 7012, "output_tokens": 20 },
+              "report": null, "live": true },
+            { "id": "01a17453-0000-7000-8000-000000000003", "label": "main", "parent": null, "depth": 0, "read_only": false,
+              "cwd": "/src/app", "created": "2026-10-24T09:00:00Z", "model": "lora/smart", "status": "idle",
+              "activity": "", "usage": { "input_tokens": 0, "output_tokens": 0 },
+              "report": null, "live": false, "title": "add pagination" }
+          ]
+        }
+      ]
+    },
+    "pending": [
+      { "id": "01a17459-0000-7000-8000-000000000005", "call_id": "call_1", "agent": "01a17456-0000-7000-8000-000000000004",
+        "agent_label": "main", "tool": "bash", "summary": "cargo test", "input": { "command": "cargo test" },
+        "tab": "01a17453-0000-7000-8000-000000000002" }
+    ],
+    "jobs": [],
+    "update": { "current": "0.1.2", "latest": null, "available": false, "installed": null },
+    "control": { "enabled": true, "connected": false, "tools": 0, "error": null, "permissions": null },
+    "models": ["lora/default", "lora/smart", "lora/fast"],
+    "default_model": "lora/fast"
+  },
+  { "type": "event", "tab": "01a17453-0000-7000-8000-000000000002", "workspace": "01a17450-0000-7000-8000-000000000001",
+    "envelope": { "agent": "01a17456-0000-7000-8000-000000000004", "seq": 412, "at": "2026-10-25T18:34:00.5Z", "type": "text_delta", "text": "Done" } },
+  { "type": "event", "tab": null, "workspace": null,
+    "envelope": { "agent": "", "seq": 413, "at": "2026-10-25T18:34:01Z", "type": "update",
+                  "status": { "current": "0.1.2", "latest": "0.1.3", "available": true, "installed": null } } },
+  { "type": "ack", "client_ref": "c7", "agent": "01a17456-0000-7000-8000-000000000004", "tab": "01a17453-0000-7000-8000-000000000002",
+    "attachments": [{ "path": "/src/app/notes.txt", "kind": "text", "size": 27, "note": null }] },
+  { "type": "launched", "client_ref": "c1",
+    "workspace": { "id": "01a17450-0000-7000-8000-000000000001", "name": "default", "active_tab": null,
+                   "created": "2026-10-25T18:30:00Z", "updated": "2026-10-25T18:30:00Z", "tabs": [] },
+    "tab": "01a17453-0000-7000-8000-000000000002", "agent": null },
+  { "type": "error", "client_ref": "c8", "message": "request 01a17459 was already answered" },
+  { "type": "pong", "client_ref": "c9" },
+  { "type": "workspace_deleted", "workspace": "01a17450-0000-7000-8000-000000000001" },
+  { "type": "tab_closed", "workspace": "01a17450-0000-7000-8000-000000000001", "tab": "01a17453-0000-7000-8000-000000000002" },
+  { "type": "tabs_reordered", "workspace": "01a17450-0000-7000-8000-000000000001",
+    "tabs": ["01a17453-0000-7000-8000-000000000002"] },
+  { "type": "mode", "mode": "autopilot", "tab": null, "workspace": "01a17450-0000-7000-8000-000000000001" },
+  { "type": "clients", "clients": 3 },
+  { "type": "notice", "level": "warning", "message": "MCP server github is unavailable", "tab": "01a17453-0000-7000-8000-000000000002" },
+  { "type": "reloaded" },
+  { "type": "lagged", "skipped": 12 },
+  { "type": "shutdown", "reason": "idle" },
+  { "type": "pairing_requested", "note": "a message type this client does not know yet" }
+]

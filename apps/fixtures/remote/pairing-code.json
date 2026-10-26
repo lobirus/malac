@@ -1,0 +1,12 @@
+{
+  "code": "ABCDE-FGHJK",
+  "expires": "2026-10-26T08:10:13.153004Z",
+  "links": [
+    {
+      "kind": "local",
+      "base": "http://127.0.0.1:7791",
+      "url": "http://127.0.0.1:7791/#pair=ABCDE-FGHJK",
+      "svg": ""
+    }
+  ]
+}

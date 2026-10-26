@@ -329,6 +329,12 @@ While agents or jobs run, the daemon keeps the machine awake (`caffeinate` on ma
 
 See [docs/remote.md](docs/remote.md) for pairing, devices, tunnels, the security model, keep-awake and what apps need.
 
+## Mobile apps
+
+Native apps for iOS ([`apps/ios`](apps/ios), SwiftUI, iOS 17+) and Android ([`apps/android`](apps/android), Kotlin and Jetpack Compose, Android 8+) watch and command a daemon from a phone: workspaces, tabs and agents with their live status, transcripts with tool calls and subagents, prompts with photos to any agent or a new one, approvals from every workspace, background jobs with their logs, remote access and keep-awake. Pair them like any other device: `malac remote pair` on the daemon's machine, then scan the QR code in the app. Several daemons can be saved and switched between.
+
+The apps notify you when an agent asks for approval or finishes a turn, with Allow and Deny on the notification. Within the platforms' limits that means a WebSocket while the app is open and for a short while after, then periodic checks in the background, every 15 minutes at best and when the system allows; instant push would need a relay service, and both apps leave a seam for one. They are not in the app stores: build them yourself, as each app's README describes (Xcode and your Apple ID for iOS, a debug APK for Android).
+
 ## Updating
 
 `malac update` installs the latest release. Running sessions and subagents keep the version they started with, so updating is safe at any time. malac checks for new releases once a day and shows when one is available, in the terminal and in the web UI. Set `update.auto = true` to install them automatically.
@@ -360,6 +366,8 @@ Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "
 cargo test
 cargo clippy --all-targets
 cargo run -p malac -- --help
+(cd apps/ios/MalacKit && swift test)     # the iOS app's protocol, state and transcript tests
+(cd apps/android && ./gradlew :core:test) # the Android app's, without the Android SDK
 ```
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together.

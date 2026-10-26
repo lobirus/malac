@@ -1,0 +1,158 @@
+{
+  "control": {
+    "connected": false,
+    "enabled": false,
+    "error": null,
+    "permissions": null,
+    "tools": 0
+  },
+  "daemon": {
+    "attached": false,
+    "clients": 1,
+    "pid": 81049,
+    "remote": false,
+    "started": "2026-10-26T06:50:43.826502Z",
+    "user_home": "/Users/dev",
+    "version": "1.0.1",
+    "version_mismatch": false
+  },
+  "default_model": "lora/fast",
+  "jobs": [
+    {
+      "agent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+      "command": "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick $i; sleep 3; done",
+      "cwd": "/Users/dev/src/demo",
+      "exit_code": null,
+      "finished": "2026-10-26T06:51:46.939720Z",
+      "id": "19959044",
+      "log": "/Users/dev/.malac/jobs/19959044.log",
+      "pid": 85758,
+      "started": "2026-10-26T06:51:41.969787Z",
+      "status": "killed",
+      "tab": "01a176fa-99d0-733d-bec9-e9d000301f35"
+    }
+  ],
+  "models": [
+    "lora/default",
+    "lora/smart",
+    "lora/fast",
+    "lora/vision",
+    "lora/deepseek-v4.1-flash",
+    "lora/deepseek-v4.1-flash-1017",
+    "lora/glm-5.3-flash",
+    "lora/muse-spark-open",
+    "lora/nemotron-3.5-super-vl"
+  ],
+  "pending": [],
+  "type": "snapshot",
+  "update": {
+    "available": false,
+    "checked_at": null,
+    "current": "1.0.1",
+    "hint": null,
+    "installed": null,
+    "latest": null,
+    "method": "self_update",
+    "release_url": "https://github.com/lobirus/malac/releases/latest"
+  },
+  "workspace": {
+    "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+    "created": "2026-10-26T06:51:37.296507Z",
+    "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+    "name": "default",
+    "tabs": [
+      {
+        "active_agent": "01a176fa-c603-748e-85a9-2971e96f0c17",
+        "agents": [
+          "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+          "01a176fa-c603-748e-85a9-2971e96f0c17"
+        ],
+        "cwd": "/Users/dev/src/demo",
+        "id": "01a176fa-99d0-733d-bec9-e9d000301f35",
+        "loaded": true,
+        "mode": "edits",
+        "name": "demo app",
+        "options": {
+          "mode": "edits"
+        },
+        "snapshots": [
+          {
+            "activity": "",
+            "created": "2026-10-26T06:51:37.298539Z",
+            "cwd": "/Users/dev/src/demo",
+            "depth": 0,
+            "id": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+            "label": "main",
+            "live": true,
+            "model": "lora/fast",
+            "parent": null,
+            "read_only": false,
+            "report": "The `rm main.rs` command was denied, so I did not delete the file. `main.rs` is untouched. Let me know if you'd like to delete it another way or if you'd prefer something else (e.g., moving or renaming it).",
+            "status": "completed",
+            "usage": {
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "cost": 0.0045699,
+              "input_tokens": 27926,
+              "output_tokens": 762
+            }
+          },
+          {
+            "activity": "",
+            "created": "2026-10-26T06:51:48.611791Z",
+            "cwd": "/Users/dev/src/demo",
+            "depth": 0,
+            "id": "01a176fa-c603-748e-85a9-2971e96f0c17",
+            "label": "main",
+            "live": true,
+            "model": "lora/fast",
+            "parent": null,
+            "read_only": false,
+            "report": "",
+            "status": "cancelled",
+            "usage": {
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "cost": 0.00067265,
+              "input_tokens": 3591,
+              "output_tokens": 268
+            }
+          },
+          {
+            "activity": "",
+            "created": "2026-10-26T06:51:39.663628Z",
+            "cwd": "/Users/dev/src/demo",
+            "depth": 1,
+            "id": "01a176fa-a30f-7178-9dba-d02eeede0201",
+            "label": "reader",
+            "live": true,
+            "model": "lora/fast",
+            "parent": "01a176fa-99d2-7014-9be0-383c2c41ddc3",
+            "read_only": false,
+            "report": "First line of `README.md`, verbatim:\n\n```\n# demo\n```",
+            "status": "completed",
+            "usage": {
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "cost": 0.0011492,
+              "input_tokens": 7438,
+              "output_tokens": 67
+            }
+          }
+        ]
+      }
+    ],
+    "updated": "2026-10-26T06:51:51.629189Z"
+  },
+  "workspaces": [
+    {
+      "active_tab": "01a176fa-99d0-733d-bec9-e9d000301f35",
+      "created": "2026-10-26T06:51:37.296507Z",
+      "id": "01a176fa-99d0-733d-bec9-e9cf16452a88",
+      "name": "default",
+      "running": 0,
+      "tabs": 1,
+      "updated": "2026-10-26T06:51:51.629189Z"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+name: mobile
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/**", ".github/workflows/mobile.yml"]
+  pull_request:
+    paths: ["apps/**", ".github/workflows/mobile.yml"]
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: MalacKit tests
+        run: swift test --package-path apps/ios/MalacKit
+      - name: Build the app for the simulator
+        working-directory: apps/ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project Malac.xcodeproj -target Malac -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO build | tail -40
+          test "${PIPESTATUS[0]}" -eq 0
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Core tests and debug APK
+        working-directory: apps/android
+        run: ./gradlew --no-daemon :core:test :app:assembleDebug
