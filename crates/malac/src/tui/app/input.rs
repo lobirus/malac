@@ -214,14 +214,14 @@ impl App {
                     return None;
                 }
                 KeyCode::Tab => {
-                    let (name, args, _) = completions[selected];
-                    let space = if args.is_empty() { "" } else { " " };
-                    self.editor.set_text(&format!("/{name}{space}"));
+                    let chosen = &completions[selected];
+                    let space = if chosen.args.is_empty() { "" } else { " " };
+                    self.editor.set_text(&format!("/{}{space}", chosen.name));
                     return None;
                 }
                 KeyCode::Enter if !more_input && !shift && !alt => {
-                    let (name, ..) = completions[selected];
-                    self.editor.set_text(&format!("/{name}"));
+                    self.editor
+                        .set_text(&format!("/{}", completions[selected].name));
                     return self.submit();
                 }
                 KeyCode::Esc => {
@@ -324,11 +324,19 @@ impl App {
         let Some(chosen) = self.file_matches().into_iter().nth(index) else {
             return;
         };
-        let path = self.files.root.join(&chosen.path);
         let cursor = self.editor.cursor_offset();
         self.editor.replace(at..cursor, "");
         self.file_choice = 0;
-        self.attach(&path);
+        if self.backend.is_remote() {
+            // A file on the daemon's machine, which reads it there.
+            let picked = Attachment::on_daemon(&self.files.root, &chosen.path);
+            if !self.attachments.iter().any(|a| a.path == picked.path) {
+                self.attachments.push(picked);
+            }
+        } else {
+            let path = self.files.root.join(&chosen.path);
+            self.attach(&path);
+        }
     }
 
     /// Esc leaves a subagent's view first; on the tab's own view it stops the turn.
@@ -342,6 +350,8 @@ impl App {
         if self.focus == Focus::Transcript {
             self.focus = Focus::Input;
             self.tab_mut().selected = None;
+        } else if self.suggested_root().is_some() {
+            return Some(Action::HideSuggestion);
         }
         None
     }
@@ -367,6 +377,12 @@ impl App {
                 }
                 return match Slash::parse(command) {
                     Ok(slash) => self.slash(slash),
+                    // The tab's own commands are the agent's to expand.
+                    Err(_) if self.tab().commands().iter().any(|c| c.name == name) => {
+                        let attachments = std::mem::take(&mut self.attachments);
+                        self.send(Prompt { text, attachments });
+                        None
+                    }
                     Err(err) => {
                         self.notice(Level::Error, format!("{err:#}"));
                         None
@@ -403,6 +419,18 @@ impl App {
                 Some(Action::OpenFolder(path))
             }
             "jobs" => Some(Action::Jobs),
+            "root" => match self
+                .tab()
+                .project
+                .as_ref()
+                .and_then(|p| p.layout.suggest_root.clone())
+            {
+                Some(root) => Some(Action::OpenFolder(root)),
+                None => {
+                    self.flash("this tab already works at its repository's root");
+                    None
+                }
+            },
             _ => return None,
         })
     }

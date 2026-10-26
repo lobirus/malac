@@ -78,9 +78,7 @@ async fn two_clients_share_tabs_agents_and_approvals() {
             agent: None,
             text: "run it".into(),
             images: Vec::new(),
-            attachments: vec![AttachmentInput {
-                path: "notes.txt".into(),
-            }],
+            attachments: vec![AttachmentInput::path("notes.txt")],
             model: None,
         })
         .await
@@ -623,6 +621,131 @@ async fn pasted_images_travel_with_the_prompt() {
         })
         .collect();
     assert_eq!(images, ["iVBORw0KGgo="]);
+
+    hub.request_stop("done");
+    server.await.unwrap().unwrap();
+}
+
+/// What a client on another machine does: files go as base64 under their
+/// name, and the `@` picker lists the daemon's files.
+#[tokio::test(flavor = "multi_thread")]
+async fn uploaded_files_travel_with_the_prompt() {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD;
+    let _guard = exclusive().await;
+    let script = Scripted::new(vec![answer("marmalade it is"), answer("a big one")]);
+    let daemon = start_daemon(script.clone(), false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, mut events, _) = Client::connect(&file).await.unwrap();
+    let reply = client
+        .request(Command::TabCreate(TabSpec {
+            cwd: project(&[]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let ServerMessage::Ack { tab: Some(tab), .. } = reply else {
+        panic!("ack expected");
+    };
+    let prompt = |attachments: Vec<AttachmentInput>| Command::Prompt {
+        tab: Some(tab.clone()),
+        agent: None,
+        text: "look".into(),
+        images: Vec::new(),
+        attachments,
+        model: None,
+    };
+    let upload = |name: &str, data: String| AttachmentInput {
+        path: name.into(),
+        data: Some(data),
+    };
+    async fn finished(events: &mut malac::client::Events) {
+        wait_for(events, |m| match m {
+            ServerMessage::Event { envelope, .. } => {
+                matches!(envelope.event, Event::TurnFinished { .. }).then_some(())
+            }
+            _ => None,
+        })
+        .await
+    }
+
+    let reply = client
+        .request(prompt(vec![upload(
+            "notes.md",
+            base64.encode("the upload word is marmalade\n"),
+        )]))
+        .await
+        .unwrap();
+    let ServerMessage::Ack { attachments, .. } = reply else {
+        panic!("ack expected, got {reply:?}");
+    };
+    let saved = &attachments[0].path;
+    assert!(saved.starts_with(home().join("uploads")), "{saved:?}");
+    assert_eq!(saved.file_name().unwrap(), "notes.md");
+    finished(&mut events).await;
+    let text = request_text(&script.last_request());
+    assert!(text.contains("<attachment path=\"notes.md\""), "{text}");
+    assert!(text.contains("the upload word is marmalade"), "{text}");
+
+    // A file at the cap is about 28 MB of base64, sent as one frame.
+    const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+    let full = base64.encode(vec![b'a'; MAX_UPLOAD_BYTES]);
+    let reply = client
+        .request(prompt(vec![upload("big.txt", full.clone())]))
+        .await
+        .unwrap();
+    assert!(matches!(reply, ServerMessage::Ack { .. }), "{reply:?}");
+    finished(&mut events).await;
+
+    // Two of them and a little more are too much for one prompt, and
+    // nothing of it is kept.
+    let before = std::fs::read_dir(home().join("uploads")).unwrap().count();
+    let err = client
+        .request(prompt(vec![
+            upload("one.txt", full.clone()),
+            upload("two.txt", full),
+            upload("three.txt", base64.encode("more")),
+        ]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("more than the 40.0 MB one prompt may carry"),
+        "{err}"
+    );
+    let after = std::fs::read_dir(home().join("uploads")).unwrap().count();
+    assert_eq!(after, before);
+
+    // Prompts may come over REST too, past axum's 2 MB default.
+    let three_mb = base64.encode(vec![b'b'; 3 * 1024 * 1024]);
+    let reply: serde_json::Value = malac::client::post(
+        &file,
+        "/api/command",
+        &json!({ "type": "prompt", "tab": tab, "text": "and this",
+                 "attachments": [{ "path": "rest.txt", "data": three_mb }] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["type"], "ack", "{reply}");
+    finished(&mut events).await;
+
+    let root = home().join("browse").canonicalize().unwrap();
+    let all: serde_json::Value = malac::client::get(&file, "/api/files").await.unwrap();
+    assert_eq!(std::path::Path::new(all["root"].as_str().unwrap()), root);
+    assert_eq!(all["files"], json!(["app/Cargo.toml", "app/notes.txt"]));
+    assert_eq!(all["truncated"], false);
+    let app: serde_json::Value = malac::client::get(&file, "/api/files?path=app")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(app["root"].as_str().unwrap()),
+        root.join("app")
+    );
+    assert_eq!(app["files"], json!(["Cargo.toml", "notes.txt"]));
+    let outside = malac::client::get::<serde_json::Value>(&file, "/api/files?path=/etc").await;
+    assert!(outside.is_err(), "the index stays inside the root");
 
     hub.request_stop("done");
     server.await.unwrap().unwrap();

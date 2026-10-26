@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use malac_core::commands::CommandInfo;
 use malac_core::permission::{Decision, PermissionRequest};
 use malac_core::update::{Method, Status};
 use ratatui::Frame;
@@ -334,6 +335,8 @@ impl Picker {
 /// Keys, mouse and commands.
 pub struct Help {
     pub scroll: usize,
+    /// The active tab's custom commands, listed with the built-in ones.
+    pub commands: Vec<CommandInfo>,
 }
 
 const KEYS: &[(&str, &str)] = &[
@@ -426,7 +429,7 @@ const MOUSE: &[(&str, &str)] = &[
 ];
 
 impl Help {
-    fn lines(width: usize) -> Vec<Line<'static>> {
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
         let t = theme();
         let mut lines = vec![
             Line::from(vec![
@@ -453,6 +456,35 @@ impl Help {
         lines.push(section("Commands"));
         for (name, args, help) in COMMANDS.iter().chain(TUI_COMMANDS) {
             lines.push(row(format!("/{name} {args}").trim_end(), help));
+        }
+        // The tab's own, with their argument and where they come from dimmed;
+        // one named like a built-in cannot be run from here.
+        let builtin = |name: &str| {
+            COMMANDS
+                .iter()
+                .chain(TUI_COMMANDS)
+                .any(|(n, _, _)| *n == name)
+        };
+        for command in self.commands.iter().filter(|c| !builtin(&c.name)) {
+            let name = format!("/{}", command.name);
+            let hint = command
+                .argument_hint
+                .as_deref()
+                .map(|h| format!(" {h}"))
+                .unwrap_or_default();
+            let pad = 30usize.saturating_sub(text::width(&name) + text::width(&hint));
+            let source = format!("  · {}", command.source);
+            let room = width.saturating_sub(33 + text::width(&source));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {name}")),
+                Span::styled(hint, t.faint()),
+                Span::raw(" ".repeat(pad + 1)),
+                Span::styled(
+                    text::truncate(&command.description, room).into_owned(),
+                    t.dim(),
+                ),
+                Span::styled(source, t.faint()),
+            ]));
         }
         lines.push(Line::default());
         lines.push(section("Workspaces"));
@@ -494,7 +526,7 @@ impl Help {
             "↑↓ scroll · any other key closes",
             hits,
         );
-        let lines = Self::lines(inner.width as usize);
+        let lines = self.lines(inner.width as usize);
         self.scroll = self
             .scroll
             .min(lines.len().saturating_sub(inner.height as usize));
@@ -730,8 +762,60 @@ impl Approval {
         }
     }
 
+    /// The plugin and what it contains, when this asks to enable one.
+    fn plugin(&self) -> Option<(&str, &str)> {
+        let input = &self.request.input;
+        let plugin = input["plugin"].as_str()?;
+        let contents = input["contents"].as_str()?;
+        (self.request.tool == "malac_configure").then_some((plugin, contents))
+    }
+
+    /// A plugin's contents, one part per line, the parts that run code on
+    /// this machine (hooks, MCP servers, scripts) in the warning color.
+    fn plugin_lines(contents: &str, width: usize) -> Vec<Line<'static>> {
+        let t = theme();
+        let mut lines = Vec::new();
+        for (i, source) in sanitize(contents).lines().enumerate() {
+            let runs = ["hooks", "MCP servers", "scripts"]
+                .iter()
+                .any(|part| source.trim_start().starts_with(part));
+            let (label, rest) = match source.split_once(": ") {
+                Some((label, rest)) if i > 0 => (format!("{label}: "), rest.to_owned()),
+                _ => (String::new(), source.to_owned()),
+            };
+            let (label_style, rest_style) = match (i, runs) {
+                (0, _) => (t.bold(), t.bold()),
+                (_, true) => (t.fg(t.warning), Style::new()),
+                (_, false) => (t.dim(), t.dim()),
+            };
+            let indent = " ".repeat(text::width(&label));
+            for (row, part) in text::hard_wrap(&rest, width.saturating_sub(indent.len()).max(8))
+                .into_iter()
+                .enumerate()
+            {
+                let lead = if row == 0 {
+                    label.clone()
+                } else {
+                    indent.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(lead, label_style),
+                    Span::styled(part, rest_style),
+                ]));
+            }
+        }
+        lines.push(Line::styled(
+            "Allowing it lets these run as you, where malac runs.",
+            t.faint(),
+        ));
+        lines
+    }
+
     fn input_lines(&self, width: usize) -> Vec<Line<'static>> {
         let t = theme();
+        if let Some((_, contents)) = self.plugin() {
+            return Self::plugin_lines(contents, width);
+        }
         let mut lines = Vec::new();
         let input = &self.request.input;
         let entries: Vec<(String, String)> = match input.as_object() {
@@ -774,7 +858,8 @@ impl Approval {
         let width = screen.width.saturating_sub(4).min(100);
         let body = width.saturating_sub(4) as usize;
         let input = self.input_lines(body);
-        let shown = if self.details {
+        // What a plugin would run is shown whole, as far as the screen allows.
+        let shown = if self.details || self.plugin().is_some() {
             input.len().min(screen.height.saturating_sub(12) as usize)
         } else {
             input.len().min(6)
@@ -784,18 +869,25 @@ impl Approval {
         } else {
             "Permission".to_owned()
         };
-        let hint = if input.len() > 6 {
+        let hint = if input.len() > shown.max(6) {
             "d details · h hide"
         } else {
             "h hide"
         };
         let height = shown as u16 + 7;
         let inner = frame_box(frame, width, height, &title, hint, hits);
-        let who = Line::from(vec![
-            Span::styled(self.request.agent_label.clone(), t.bold()),
-            Span::styled(" wants to run ", t.dim()),
-            Span::styled(self.request.tool.clone(), t.bold().fg(t.warning)),
-        ]);
+        let who = match self.plugin() {
+            Some((plugin, _)) => Line::from(vec![
+                Span::styled(self.request.agent_label.clone(), t.bold()),
+                Span::styled(" wants to enable the plugin ", t.dim()),
+                Span::styled(plugin.to_owned(), t.bold().fg(t.warning)),
+            ]),
+            None => Line::from(vec![
+                Span::styled(self.request.agent_label.clone(), t.bold()),
+                Span::styled(" wants to run ", t.dim()),
+                Span::styled(self.request.tool.clone(), t.bold().fg(t.warning)),
+            ]),
+        };
         put(frame, inner, 0, who);
         let summary = sanitize(&self.request.summary).into_owned();
         put(frame, inner, 1, Line::raw(summary));

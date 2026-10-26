@@ -8,6 +8,7 @@ pub mod client;
 mod commands;
 pub mod connections;
 pub mod daemon;
+mod files;
 mod plugins;
 mod project;
 pub mod protocol;

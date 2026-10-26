@@ -11,7 +11,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use malac_core::agent::AgentInfo;
+use malac_core::commands::CommandInfo;
 use malac_core::config::Config;
+use malac_core::context::{Layout, Summary};
 use malac_core::event::{Envelope, Event, TurnStatus};
 use malac_core::jobs::{JobInfo, JobOutput, JobStatus};
 use malac_core::message::{Block, Message, StopReason, Usage};
@@ -635,7 +637,7 @@ async fn at_attaches_files_and_prompts_send_their_paths() {
     std::fs::write(root.join("notes.md"), "# notes\n").unwrap();
     app.files = super::app::FileIndex {
         root: root.clone(),
-        list: Some(super::files::index(&root)),
+        list: Some(crate::files::index(&root).files),
         loading: false,
     };
     type_text(&mut app, "explain @mai");
@@ -1454,6 +1456,325 @@ async fn slash_completion_runs_the_highlighted_command() {
     let frame = render(&mut app, 90, 24);
     assert!(frame.contains("/help"));
     assert_eq!(app.on_key(press(KeyCode::Enter), false), Some(Action::Help));
+}
+
+/// The repository the test project is one part of.
+fn monorepo() -> PathBuf {
+    project().parent().unwrap().to_owned()
+}
+
+/// A tab whose folder is one part of the repository at `monorepo()`, with
+/// the given custom commands.
+fn in_a_monorepo(commands: Vec<CommandInfo>) -> App {
+    let root = monorepo();
+    let mut view = tab(TAB, "project", &[AGENT]);
+    view.project = Some(Summary {
+        layout: Layout {
+            root: root.clone(),
+            subdir: Some("app".into()),
+            suggest_root: Some(root),
+            ..Default::default()
+        },
+        commands,
+    });
+    app_with(snapshot(), workspace(vec![view]))
+}
+
+#[tokio::test]
+async fn a_folder_inside_a_repository_offers_all_of_it() {
+    let root = monorepo();
+    let mut app = in_a_monorepo(Vec::new());
+    let frame = render(&mut app, 160, 24);
+    println!("{frame}");
+    assert!(frame.contains(&format!(
+        "This folder is part of {}. Open the whole repository?",
+        root.display()
+    )));
+
+    // By mouse: the tab for the root, made or reused.
+    let (x, y) = find(&frame, "Open the whole repository?");
+    let action = click(&mut app, x + 5, y, MouseButton::Left).unwrap();
+    assert_eq!(action, Action::OpenFolder(root.clone()));
+    app.perform(action).await;
+    let Some(Command::TabCreate(spec)) = sent(&app).pop() else {
+        panic!("tab_create expected");
+    };
+    assert_eq!((spec.cwd, spec.reuse), (root.clone(), true));
+
+    // By keyboard, and from the menu.
+    type_text(&mut app, "/root");
+    app.on_key(press(KeyCode::Esc), false);
+    let action = app.on_key(press(KeyCode::Enter), false).unwrap();
+    assert_eq!(action, Action::OpenFolder(root.clone()));
+    key(&mut app, KeyCode::F(9)).await;
+    key(&mut app, KeyCode::Enter).await;
+    let frame = render(&mut app, 100, 30);
+    assert!(frame.contains("Open the whole repository"), "{frame}");
+    assert_eq!(
+        app.on_key(press(KeyCode::Char('p')), false),
+        Some(Action::OpenFolder(root.clone()))
+    );
+    app.overlay = None;
+
+    // Esc puts it away for this session.
+    assert_eq!(
+        app.on_key(press(KeyCode::Esc), false),
+        Some(Action::HideSuggestion)
+    );
+    app.perform(Action::HideSuggestion).await;
+    assert!(!render(&mut app, 160, 24).contains("This folder is part of"));
+    assert!(app.suggested_root().is_none());
+    assert_eq!(app.on_key(press(KeyCode::Esc), false), None);
+}
+
+#[tokio::test]
+async fn a_tab_at_its_root_has_no_notice() {
+    let mut app = app();
+    assert!(!render(&mut app, 100, 24).contains("This folder is part of"));
+    type_text(&mut app, "/root");
+    app.on_key(press(KeyCode::Esc), false);
+    assert_eq!(app.on_key(press(KeyCode::Enter), false), None);
+    let flash = &app.flash.as_ref().expect("a flash").text;
+    assert_eq!(flash, "this tab already works at its repository's root");
+}
+
+#[tokio::test]
+async fn custom_commands_complete_run_and_have_help() {
+    let mut app = in_a_monorepo(vec![
+        CommandInfo {
+            name: "deploy".into(),
+            description: "ship the current branch".into(),
+            argument_hint: Some("[env]".into()),
+            source: "project".into(),
+        },
+        CommandInfo {
+            name: "deps".into(),
+            description: "check the dependencies".into(),
+            argument_hint: None,
+            source: "plugin acme".into(),
+        },
+        CommandInfo {
+            name: "help".into(),
+            description: "a custom help that the built-in one hides".into(),
+            argument_hint: None,
+            source: "user".into(),
+        },
+    ]);
+    type_text(&mut app, "/de");
+    let buffer = draw_buffer(&mut app, 100, 24);
+    let frame = screen(&buffer);
+    println!("{frame}");
+    assert!(frame.contains("/deploy [env]"));
+    assert!(frame.contains("ship the current branch · project"));
+    assert!(frame.contains("check the dependencies · plugin acme"));
+    let (x, y) = find(&frame, "· plugin acme");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        theme().faint,
+        "where it comes from is quiet"
+    );
+
+    // Tab leaves room for its argument; Enter sends it for the agent to expand.
+    app.on_key(press(KeyCode::Tab), false);
+    assert_eq!(app.editor.text(), "/deploy ");
+    type_text(&mut app, "staging");
+    key(&mut app, KeyCode::Enter).await;
+    let Some(Command::Prompt { text, .. }) = sent(&app).pop() else {
+        panic!("a prompt");
+    };
+    assert_eq!(text, "/deploy staging");
+
+    app.perform(Action::Help).await;
+    if let Some(Overlay::Help(help)) = &mut app.overlay {
+        help.scroll = usize::MAX / 2;
+    }
+    let frame = render(&mut app, 100, 40);
+    println!("{frame}");
+    assert!(frame.contains("/deploy [env]"));
+    assert!(frame.contains("ship the current branch"));
+    assert!(frame.contains("· project"));
+    assert!(
+        !frame.contains("a custom help"),
+        "a built-in name stays built in"
+    );
+}
+
+#[tokio::test]
+async fn enabling_a_plugin_shows_what_it_brings() {
+    let mut app = app();
+    let contents = "acme 1.2.0: deploy helpers\n  commands: deploy\n  \
+                    MCP servers (start programs): acme (npx acme-mcp)\n  \
+                    hooks (run commands): PreToolUse: ./guard.sh\n  scripts: bin/release";
+    emit(
+        &mut app,
+        Event::PermissionRequested {
+            request_id: "r1".into(),
+            call_id: "c1".into(),
+            tool: "malac_configure".into(),
+            summary: "enable acme".into(),
+            input: json!({"plugin": "acme", "contents": contents}),
+        },
+    );
+    let buffer = draw_buffer(&mut app, 100, 36);
+    let frame = screen(&buffer);
+    println!("{frame}");
+    assert!(frame.contains("main wants to enable the plugin acme"));
+    for line in [
+        "acme 1.2.0: deploy helpers",
+        "commands: deploy",
+        "MCP servers (start programs): acme (npx acme-mcp)",
+        "hooks (run commands): PreToolUse: ./guard.sh",
+        "scripts: bin/release",
+        "Allowing it lets these run as you",
+    ] {
+        assert!(frame.contains(line), "`{line}` is shown");
+    }
+    let warning = theme().warning;
+    for part in ["hooks (run commands)", "MCP servers", "scripts:"] {
+        let (x, y) = find(&frame, part);
+        assert_eq!(buffer[(x, y)].fg, warning, "{part} stands out");
+    }
+    let (x, y) = find(&frame, "commands: deploy");
+    assert_ne!(buffer[(x, y)].fg, warning, "the rest does not");
+    assert!(frame.contains(" Allow  y "));
+}
+
+fn remote(app: &mut App) {
+    app.backend
+        .set_endpoint(Endpoint::Saved(crate::connections::Connection {
+            name: "studio".into(),
+            url: "http://192.0.2.1:7700".into(),
+            token: "t".into(),
+            device: None,
+            added: chrono::Utc::now(),
+        }));
+}
+
+#[tokio::test]
+async fn files_from_here_go_to_a_daemon_elsewhere_as_contents() {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD;
+    let mut app = app();
+    remote(&mut app);
+    let here = tempfile::tempdir().unwrap();
+    for (dir, text) in [("one", "first notes\n"), ("two", "second notes\n")] {
+        std::fs::create_dir_all(here.path().join(dir)).unwrap();
+        std::fs::write(here.path().join(dir).join("notes.md"), text).unwrap();
+    }
+    app.on_paste(&here.path().join("one/notes.md").display().to_string());
+    app.on_paste(&here.path().join("two/notes.md").display().to_string());
+    app.on_paste(&here.path().join("one").display().to_string());
+    assert_eq!(app.attachments.len(), 2, "a folder stays here");
+    let flash = &app.flash.as_ref().expect("a flash").text;
+    assert!(
+        flash.ends_with("one/ stays on this machine: studio can be sent files, not folders"),
+        "{flash}"
+    );
+
+    type_text(&mut app, "compare");
+    key(&mut app, KeyCode::Enter).await;
+    let sent = sent_json(&app);
+    let prompt = sent
+        .iter()
+        .find(|c| c["type"] == "prompt")
+        .expect("a prompt");
+    assert_eq!(
+        prompt["attachments"],
+        json!([
+            {"path": "notes.md", "data": base64.encode("first notes\n")},
+            {"path": "notes (2).md", "data": base64.encode("second notes\n")},
+        ]),
+        "named by the file alone, told apart"
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_elsewhere_takes_files_up_to_its_limits() {
+    let mut app = app();
+    remote(&mut app);
+    let here = tempfile::tempdir().unwrap();
+    let sized = |name: &str, mb: u64| {
+        let path = here.path().join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(mb * 1024 * 1024).unwrap();
+        path.display().to_string()
+    };
+    app.on_paste(&sized("huge.bin", 21));
+    assert!(app.attachments.is_empty());
+    let flash = |app: &App| app.flash.as_ref().expect("a flash").text.clone();
+    assert!(
+        flash(&app).ends_with("huge.bin is 21.0 MB, more than the 20.0 MB studio accepts"),
+        "{}",
+        flash(&app)
+    );
+    app.on_paste(&sized("a.bin", 15));
+    app.on_paste(&sized("b.bin", 15));
+    app.on_paste(&sized("c.bin", 15));
+    assert_eq!(app.attachments.len(), 2);
+    assert!(
+        flash(&app).contains(
+            "c.bin would bring this prompt's files to 45.0 MB, more than the 40.0 MB studio \
+             accepts at once"
+        ),
+        "{}",
+        flash(&app)
+    );
+}
+
+#[tokio::test]
+async fn at_lists_the_daemons_files_when_it_is_elsewhere() {
+    let mut app = app();
+    remote(&mut app);
+    let root = app.tab_cwd();
+    type_text(&mut app, "explain @app");
+    let asked = std::mem::take(&mut *app.backend.rests.lock().unwrap());
+    assert!(
+        asked
+            .iter()
+            .any(|r| matches!(r, Rest::Files { root: r } if *r == root)),
+        "the daemon indexes its own disk: {asked:?}"
+    );
+    assert!(render(&mut app, 90, 24).contains("indexing") || app.files.loading);
+    app.on_update(Update::Rest(
+        Rest::Files { root: root.clone() },
+        Ok(json!({"root": root, "files": ["README.md", "src/app.rs"], "truncated": false})),
+    ));
+    let frame = render(&mut app, 90, 24);
+    assert!(frame.contains("src/app.rs"), "{frame}");
+    app.on_key(press(KeyCode::Tab), false);
+    let frame = render(&mut app, 90, 24);
+    println!("{frame}");
+    assert!(frame.contains("▤ src/app.rs ×"), "a chip with no size");
+
+    key(&mut app, KeyCode::Enter).await;
+    let sent = sent_json(&app);
+    let prompt = sent
+        .iter()
+        .find(|c| c["type"] == "prompt")
+        .expect("a prompt");
+    assert_eq!(
+        prompt["attachments"],
+        json!([{"path": root.join("src/app.rs")}]),
+        "a path the daemon reads itself"
+    );
+
+    // A folder the daemon will not list says so.
+    app.files = Default::default();
+    type_text(&mut app, "@x");
+    let asked = std::mem::take(&mut *app.backend.rests.lock().unwrap());
+    let rest = asked
+        .into_iter()
+        .find(|r| matches!(r, Rest::Files { .. }))
+        .unwrap();
+    app.on_update(Update::Rest(
+        rest,
+        Err("403 outside the browse root".into()),
+    ));
+    let flash = &app.flash.as_ref().expect("a flash").text;
+    assert_eq!(
+        flash,
+        "cannot list the files there: 403 outside the browse root"
+    );
 }
 
 // Against a real daemon.

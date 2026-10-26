@@ -16,6 +16,8 @@ pub enum Action {
     AgentMap,
     FolderDialog,
     OpenFolder(PathBuf),
+    /// Puts away the notice suggesting the whole repository for this tab.
+    HideSuggestion,
     Jobs,
     StopJob(String),
     /// Attach the clipboard's image.
@@ -104,6 +106,7 @@ impl App {
             0 => vec![
                 Item::new("New tab here", 'n', Action::NewTab).hint("^T"),
                 Item::new("Open folder…", 'f', Action::FolderDialog).hint("/cd"),
+                self.repository_item(),
                 Item::new("Open session…", 'o', Action::Sessions).hint("F7"),
                 Item::new("Rename tab…", 'r', Action::RenameTab).enabled(tab.id.is_some()),
                 Item::new("Close tab", 't', Action::CloseTab(self.active))
@@ -363,6 +366,21 @@ impl App {
         }
     }
 
+    /// Opens the repository the tab's folder is part of, when there is one.
+    fn repository_item(&self) -> Item {
+        let tab = self.tab();
+        match tab
+            .project
+            .as_ref()
+            .and_then(|p| p.layout.suggest_root.clone())
+        {
+            Some(root) => {
+                Item::new("Open the whole repository", 'p', Action::OpenFolder(root)).hint("/root")
+            }
+            None => Item::new("Open the whole repository", 'p', Action::CloseDialog).enabled(false),
+        }
+    }
+
     fn tab_menu_items(&self) -> Vec<Item> {
         let mut items: Vec<Item> = (0..self.tabs.len())
             .map(|i| {
@@ -374,6 +392,7 @@ impl App {
         items.push(Item::separator());
         items.push(Item::new("New tab here", 'n', Action::NewTab).hint("^T"));
         items.push(Item::new("Open folder…", 'f', Action::FolderDialog));
+        items.push(self.repository_item());
         items.push(Item::new("Rename tab…", 'r', Action::RenameTab));
         items.push(
             Item::new("Move left", 'l', Action::MoveTab(-1))
@@ -727,7 +746,13 @@ impl App {
     pub async fn perform(&mut self, action: Action) {
         self.dirty = true;
         match action {
-            Action::Help => self.overlay = Some(Overlay::Help(Help { scroll: 0 })),
+            Action::Help => {
+                let commands = self.tab().commands().to_vec();
+                self.overlay = Some(Overlay::Help(Help {
+                    scroll: 0,
+                    commands,
+                }));
+            }
             Action::Copy => {
                 let answer = self
                     .shown()
@@ -753,6 +778,10 @@ impl App {
                 }
             },
             Action::OpenFolder(dir) => self.open_folder(&dir),
+            Action::HideSuggestion => {
+                let cwd = self.tab_cwd();
+                self.hidden_suggestions.insert(cwd);
+            }
             Action::Jobs => {
                 self.overlay = Some(Overlay::Jobs(JobsView::default()));
                 self.backend.request(Command::JobList, Reply::Jobs);

@@ -1,7 +1,8 @@
 //! `GET /api/fs?path=`: what a directory holds, for folder and file
-//! pickers: its subdirectories, and with `files=true` its files too. Only
-//! directories below `daemon.browse_root` (the home directory by default)
-//! are listed.
+//! pickers: its subdirectories, and with `files=true` its files too.
+//! `GET /api/files?path=`: every file below a directory that `.gitignore`
+//! keeps, for `@` pickers. Only directories below `daemon.browse_root` (the
+//! home directory by default) are listed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,8 +82,42 @@ pub(super) async fn list(
         listing(&root, query.path.as_deref(), query.hidden, query.files)
     })
     .await;
-    match listing {
-        Ok(Ok(listing)) => Json(listing).into_response(),
+    respond(listing)
+}
+
+#[derive(Deserialize)]
+pub(super) struct FilesQuery {
+    /// Absolute, `~/...`, or relative to the root. Defaults to the root.
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Files {
+    root: PathBuf,
+    #[serde(flatten)]
+    index: crate::files::Index,
+}
+
+pub(super) async fn files(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FilesQuery>,
+) -> Response {
+    let root = state.hub.options().browse_root.clone();
+    let files = tokio::task::spawn_blocking(move || file_index(&root, query.path.as_deref())).await;
+    respond(files)
+}
+
+fn file_index(root: &Path, path: Option<&str>) -> Result<Files> {
+    let dir = confine(root, path)?;
+    Ok(Files {
+        index: crate::files::index(&dir),
+        root: dir,
+    })
+}
+
+fn respond<T: Serialize>(result: Result<Result<T>, tokio::task::JoinError>) -> Response {
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(err)) => {
             let status = if err.is::<OutsideRoot>() {
                 StatusCode::FORBIDDEN
@@ -114,7 +149,9 @@ impl std::fmt::Display for OutsideRoot {
 
 impl std::error::Error for OutsideRoot {}
 
-fn listing(root: &Path, path: Option<&str>, hidden: bool, files: bool) -> Result<Listing> {
+/// The directory `path` names (absolute, `~/…` or relative to `root`), if
+/// it is `root` or below it.
+fn confine(root: &Path, path: Option<&str>) -> Result<PathBuf> {
     let root = root
         .canonicalize()
         .with_context(|| format!("cannot open {}", root.display()))?;
@@ -131,6 +168,12 @@ fn listing(root: &Path, path: Option<&str>, hidden: bool, files: bool) -> Result
     if !path.is_dir() {
         bail!("{} is not a directory", path.display());
     }
+    Ok(path)
+}
+
+fn listing(root: &Path, path: Option<&str>, hidden: bool, files: bool) -> Result<Listing> {
+    let path = confine(root, path)?;
+    let root = root.canonicalize()?;
     let mut entries: Vec<Entry> = std::fs::read_dir(&path)
         .with_context(|| format!("cannot list {}", path.display()))?
         .flatten()
@@ -189,6 +232,25 @@ fn markers(dir: &Path) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexes_files_below_the_root_only() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("app");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("target")).unwrap();
+        std::fs::write(project.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(project.join("src/main.rs"), "").unwrap();
+        std::fs::write(project.join("target/main.o"), "").unwrap();
+        let found = file_index(root.path(), Some(&project.display().to_string())).unwrap();
+        assert_eq!(found.root, project.canonicalize().unwrap());
+        assert_eq!(found.index.files, ["src/main.rs"]);
+        let json = serde_json::to_value(&found).unwrap();
+        assert_eq!(json["files"][0], "src/main.rs");
+        assert_eq!(json["truncated"], false);
+        let outside = file_index(&project, Some("..")).unwrap_err();
+        assert!(outside.is::<OutsideRoot>());
+    }
 
     #[test]
     fn lists_subdirectories_with_markers() {

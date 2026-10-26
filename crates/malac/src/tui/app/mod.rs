@@ -4,14 +4,16 @@
 //! from the daemon's snapshot and the changes it broadcasts; everything
 //! the user asks for goes through [`Backend`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use malac_core::agent::AgentInfo;
+use malac_core::commands::CommandInfo;
 use malac_core::config::{self, Config};
+use malac_core::context::Summary;
 use malac_core::event::{AgentId, Envelope, Event, Level, TurnStatus};
 use malac_core::permission::{Decision, Mode, PermissionRequest};
 use malac_core::session::SessionSummary;
@@ -41,6 +43,7 @@ use super::theme::theme;
 use super::transcript::{AgentView, Agents, Entry, SPINNER, duration};
 use crate::client::{Client, Events, Launched};
 use crate::connections::Endpoint;
+use crate::daemon::uploads::{MAX_PROMPT_UPLOAD_BYTES, MAX_UPLOAD_BYTES};
 use crate::protocol::{
     AwakeStatus, ControlStatus, DaemonStatus, JobView, RemoteStatus, ServerMessage, Snapshot,
     TabId, TabView, WorkspaceSummary, WorkspaceView,
@@ -60,6 +63,11 @@ pub use backend::{Backend, Connection, Reply, Rest};
 pub const TUI_COMMANDS: &[(&str, &str, &str)] = &[
     ("cd", "[dir]", "work in another folder, in a new tab"),
     ("jobs", "", "background processes the agents started"),
+    (
+        "root",
+        "",
+        "open the repository this folder is part of, in a tab",
+    ),
 ];
 
 /// What a menu or dialog wants after a key or click.
@@ -155,6 +163,8 @@ pub struct Tab {
     pub sending: bool,
     /// This terminal asked the daemon to create the tab.
     pub creating: bool,
+    /// The folder's layout and custom commands, once the daemon loaded it.
+    pub project: Option<Summary>,
 }
 
 /// A prompt on its way: what was typed and what was attached.
@@ -199,6 +209,7 @@ impl Tab {
             queued: VecDeque::new(),
             sending: false,
             creating: false,
+            project: None,
         }
     }
 
@@ -216,6 +227,10 @@ impl Tab {
         self.cwd = view.cwd.clone();
         self.agents = view.agents.clone();
         self.mode = view.mode;
+        // Only loaded tabs report it; what an unloaded one said still holds.
+        if view.project.is_some() {
+            self.project = view.project.clone();
+        }
         if self.agent.as_ref().is_none_or(|a| !self.agents.contains(a)) {
             self.agent = view.active_agent.clone();
             self.reset_view();
@@ -225,6 +240,11 @@ impl Tab {
     /// The agent shown when no subagent is opened.
     pub fn root(&self) -> Option<&str> {
         self.agent.as_deref()
+    }
+
+    /// The tab's custom slash commands.
+    pub fn commands(&self) -> &[CommandInfo] {
+        self.project.as_ref().map_or(&[], |p| p.commands.as_slice())
     }
 
     pub fn shown(&self) -> Option<&str> {
@@ -428,6 +448,8 @@ pub struct App {
     pub jobs: Vec<JobView>,
     jobs_polled: Instant,
     pub agents_view: AgentsView,
+    /// Folders whose "open the whole repository" notice was put away.
+    pub hidden_suggestions: HashSet<PathBuf>,
     /// The tab this terminal created and shows once the daemon announces it.
     focus_tab: Option<TabId>,
     /// Where `malac` started, for a workspace's first tab.
@@ -516,6 +538,7 @@ impl App {
             jobs: Vec::new(),
             jobs_polled: Instant::now(),
             agents_view: AgentsView::List,
+            hidden_suggestions: HashSet::new(),
             focus_tab: None,
             home_cwd: cwd,
             tools: malac_core::tools::builtin(),
@@ -771,12 +794,13 @@ impl App {
         }
     }
 
-    /// Slash commands matching what is typed, while the command name is typed.
-    pub fn completions(&self) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+    /// Slash commands matching what is typed, while the command name is
+    /// typed: the built-in ones, then the tab's own.
+    pub fn completions(&self) -> Vec<Completion> {
         if self.completion_dismissed || self.focus != Focus::Input {
             return Vec::new();
         }
-        completions(self.editor.text())
+        completions(self.editor.text(), self.tab().commands())
     }
 
     /// The `@` being typed before the cursor and the query after it.
@@ -805,7 +829,7 @@ impl App {
 
     /// Attaches a file or folder; refusals are flashed.
     pub fn attach(&mut self, path: &Path) -> bool {
-        match Attachment::open(path, &self.tab_cwd()) {
+        match Attachment::open(path, &self.tab_cwd()).and_then(|a| self.sendable(a)) {
             Ok(attachment) => {
                 if !self.attachments.iter().any(|a| a.path == attachment.path) {
                     self.attachments.push(attachment);
@@ -819,9 +843,52 @@ impl App {
         }
     }
 
+    /// A file from this machine goes to a daemon elsewhere as its contents,
+    /// which a folder has none of and which may be only so large.
+    fn sendable(&self, attachment: Attachment) -> Result<Attachment, String> {
+        if !self.backend.is_remote() {
+            return Ok(attachment);
+        }
+        let to = self.backend.endpoint().label();
+        match (attachment.kind, attachment.size) {
+            (attach::Kind::Directory, _) => Err(format!(
+                "{}/ stays on this machine: {to} can be sent files, not folders",
+                attachment.name
+            )),
+            (_, Some(bytes)) if bytes > MAX_UPLOAD_BYTES as u64 => Err(format!(
+                "{} is {}, more than the {} {to} accepts",
+                attachment.name,
+                attach::size(bytes),
+                attach::size(MAX_UPLOAD_BYTES as u64)
+            )),
+            (_, Some(bytes)) => {
+                let sent: u64 = self.attachments.iter().filter_map(|a| a.size).sum();
+                if sent + bytes > MAX_PROMPT_UPLOAD_BYTES as u64 {
+                    return Err(format!(
+                        "{} would bring this prompt's files to {}, more than the {} {to} \
+                         accepts at once: send it with the next prompt",
+                        attachment.name,
+                        attach::size(sent + bytes),
+                        attach::size(MAX_PROMPT_UPLOAD_BYTES as u64)
+                    ));
+                }
+                Ok(attachment)
+            }
+            _ => Ok(attachment),
+        }
+    }
+
     /// The working directory of the active tab.
     pub fn tab_cwd(&self) -> PathBuf {
         self.tab().cwd.clone()
+    }
+
+    /// The repository the active tab's folder is part of, when the daemon
+    /// suggests opening it instead and the notice was not put away.
+    pub fn suggested_root(&self) -> Option<&Path> {
+        let tab = self.tab();
+        let root = tab.project.as_ref()?.layout.suggest_root.as_deref()?;
+        (!self.hidden_suggestions.contains(&tab.cwd)).then_some(root)
     }
 
     fn is_ours(&self, workspace: &str) -> bool {
@@ -1519,17 +1586,55 @@ pub(super) fn recent_sessions(
         .collect()
 }
 
-pub fn completions(input: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+/// A slash command offered while its name is typed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completion {
+    pub name: String,
+    /// What it takes, e.g. `[provider/model]`.
+    pub args: String,
+    pub help: String,
+    /// Where a custom command comes from (`project`, `user`, `plugin <id>`,
+    /// `skill`); `None` for the built-in ones.
+    pub source: Option<String>,
+}
+
+impl Completion {
+    /// Every built-in command, then the custom ones whose names are free.
+    pub fn all(custom: &[CommandInfo]) -> Vec<Self> {
+        let mut all: Vec<Self> = COMMANDS
+            .iter()
+            .chain(TUI_COMMANDS)
+            .map(|(name, args, help)| Self {
+                name: (*name).to_owned(),
+                args: (*args).to_owned(),
+                help: (*help).to_owned(),
+                source: None,
+            })
+            .collect();
+        for command in custom {
+            if !all.iter().any(|c| c.name == command.name) {
+                all.push(Self {
+                    name: command.name.clone(),
+                    args: command.argument_hint.clone().unwrap_or_default(),
+                    help: command.description.clone(),
+                    source: Some(command.source.clone()),
+                });
+            }
+        }
+        all
+    }
+}
+
+pub fn completions(input: &str, custom: &[CommandInfo]) -> Vec<Completion> {
     let Some(prefix) = input.strip_prefix('/') else {
         return Vec::new();
     };
     if prefix.contains(char::is_whitespace) {
         return Vec::new();
     }
-    COMMANDS
-        .iter()
-        .chain(TUI_COMMANDS)
-        .filter(|(name, ..)| name.starts_with(prefix))
+    Completion::all(custom)
+        .into_iter()
+        .filter(|c| c.name.starts_with(prefix))
         .collect()
 }
 
@@ -1574,13 +1679,30 @@ mod tests {
 
     #[test]
     fn completes_command_names_only() {
-        let names: Vec<&str> = completions("/m").iter().map(|c| c.0).collect();
-        assert_eq!(names, vec!["model", "mode", "mcp", "memory"]);
-        assert!(completions("/model lora").is_empty());
-        assert!(completions("hello").is_empty());
-        assert_eq!(completions("/").len(), COMMANDS.len() + TUI_COMMANDS.len());
-        assert_eq!(completions("/c")[0].0, "compact");
-        assert!(completions("/c").iter().any(|c| c.0 == "cd"));
+        let names = |input: &str, custom: &[CommandInfo]| -> Vec<String> {
+            completions(input, custom)
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        };
+        assert_eq!(names("/mo", &[]), vec!["model", "mode"]);
+        assert!(completions("/model lora", &[]).is_empty());
+        assert!(completions("hello", &[]).is_empty());
+        assert_eq!(
+            completions("/", &[]).len(),
+            COMMANDS.len() + TUI_COMMANDS.len()
+        );
+        assert!(names("/c", &[]).contains(&"cd".to_owned()));
+        let custom = |name: &str| CommandInfo {
+            name: name.into(),
+            description: "ship it".into(),
+            argument_hint: Some("[env]".into()),
+            source: "project".into(),
+        };
+        let found = completions("/de", &[custom("deploy"), custom("model")]);
+        assert_eq!(found.len(), 1, "built-in names win");
+        assert_eq!(found[0].source.as_deref(), Some("project"));
+        assert_eq!(found[0].args, "[env]");
     }
 
     #[test]

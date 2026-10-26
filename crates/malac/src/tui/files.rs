@@ -1,30 +1,6 @@
-//! Finding files for the `@` picker: an index of what `.gitignore` does
-//! not hide under a directory, and fuzzy matching over it.
-
-use std::path::Path;
-
-/// Indexing stops here, so a home directory cannot stall the picker.
-const MAX_FILES: usize = 50_000;
-
-/// Files under `root`, relative to it and sorted. Hidden and ignored files
-/// are left out, `.gitignore` honored inside and outside repositories.
-pub fn index(root: &Path) -> Vec<String> {
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .require_git(false)
-        .build();
-    let mut files: Vec<String> = walker
-        .flatten()
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let relative = e.path().strip_prefix(root).ok()?;
-            Some(relative.to_string_lossy().into_owned())
-        })
-        .take(MAX_FILES)
-        .collect();
-    files.sort();
-    files
-}
+//! Fuzzy matching for the `@` picker and the folder browser. The files
+//! themselves come from [`crate::files::index`], here or on the daemon's
+//! machine.
 
 /// A candidate that matched, with the characters that matched it.
 #[derive(Debug, Clone, PartialEq)]
@@ -150,18 +126,5 @@ mod tests {
         assert_eq!(found[0].positions, vec![0, 4, 9]);
         assert!(score("xyz", "src/main.rs").is_none());
         assert_eq!(best(&files, "", 2).len(), 2);
-    }
-
-    #[test]
-    fn indexes_what_gitignore_keeps() {
-        let dir = std::env::temp_dir().join(format!("malac-files-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::create_dir_all(dir.join("target")).unwrap();
-        std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
-        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
-        std::fs::write(dir.join("target/out.o"), "").unwrap();
-        std::fs::write(dir.join(".env"), "").unwrap();
-        assert_eq!(index(&dir), vec!["src/lib.rs".to_owned()]);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

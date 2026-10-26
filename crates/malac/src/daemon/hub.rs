@@ -33,6 +33,7 @@ use super::access::Access;
 use super::awake::{self, Awake, Runner, SystemRunner, Work};
 use super::store::{Store, Tab, Workspace};
 use super::tunnel;
+use super::uploads;
 use crate::protocol::{
     AgentView, AttachmentInput, AwakeStatus, Command, ControlStatus, DaemonInfo, DaemonStatus,
     ImageInput, JobView, Launch, PairLink, Pairing, PendingApproval, RemoteStatus, RemoteUrl,
@@ -1419,10 +1420,27 @@ impl Hub {
             Some(handle) => handle.info().cwd.clone(),
             None => self.tab(&tab)?.1.cwd,
         };
+        uploads::check(
+            attachments
+                .iter()
+                .filter_map(|a| Some((a.path.as_str(), a.data.as_deref()?))),
+        )?;
         let mut content = Vec::new();
         let mut attached = Vec::new();
         for input in attachments {
-            let attachment = attach::attach(&attach::resolve(&input.path, &cwd), &cwd)?;
+            let attachment = match input.data {
+                // A file from a client whose disk this daemon cannot read,
+                // shown under the client's name for it.
+                Some(data) => {
+                    let saved = tokio::task::spawn_blocking(move || {
+                        uploads::save(&uploads::dir(), &input.path, &data)
+                    })
+                    .await??;
+                    let folder = saved.parent().unwrap_or(&saved).to_owned();
+                    attach::attach(&saved, &folder)?
+                }
+                None => attach::attach(&attach::resolve(&input.path, &cwd), &cwd)?,
+            };
             content.extend(attachment.blocks.iter().cloned());
             attached.push(attachment);
         }

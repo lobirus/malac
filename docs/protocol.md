@@ -55,7 +55,7 @@ A command is a JSON object whose `type` names it. `client_ref` is optional; when
 
 | `type` | Fields | Reply |
 |---|---|---|
-| `prompt` | `text`; `agent`? (prompt this agent, resuming it if saved); `tab`? (start a new top-level agent there; default: the connection's active tab); `images`? `[{media_type, data, name?}]` (base64; with a `name` the image shows as an attachment of that name, e.g. a pasted screenshot); `attachments`? `[{path}]`; `model`? (for a new agent) | `ack` with `agent`, `tab`, `workspace`, `attachments` |
+| `prompt` | `text`; `agent`? (prompt this agent, resuming it if saved); `tab`? (start a new top-level agent there; default: the connection's active tab); `images`? `[{media_type, data, name?}]` (base64; with a `name` the image shows as an attachment of that name, e.g. a pasted screenshot); `attachments`? `[{path, data?}]` (with `data`, the file itself in base64 and `path` only its name); `model`? (for a new agent) | `ack` with `agent`, `tab`, `workspace`, `attachments` |
 | `agent_start` | `tab`; `model`?; `label`? | `ack` with `agent`, `tab` |
 | `agent_open` | `agent`; `tab`? | `ack` with `agent`, `tab`. Loads a saved or live session into a tab: the tab that lists it, else `tab`, else a tab for the session's directory, created if needed. |
 | `agent_activate` | `tab`, `agent` | `ack` |
@@ -66,7 +66,11 @@ A command is a JSON object whose `type` names it. `client_ref` is optional; when
 | `model` | `agent`, `model` (`provider/model`) | none |
 | `compact` | `agent` | none |
 
-Attachments resolve against the agent's directory (`~/` and absolute paths work too). Text files become a fenced block (cut at 256 KB), PNG, JPEG, GIF and WebP images become image blocks (up to 10 MB), directories a listing of up to 200 entries, other files a note. Each one starts with an `<attachment path="…">` text block so clients can tell it from typed text. The `user_message` event carries only the typed text plus a line `[attached: a.txt, src]`. The `ack` describes each attachment:
+Attachments resolve against the agent's directory (`~/` and absolute paths work too). Text files become a fenced block (cut at 256 KB), PNG, JPEG, GIF and WebP images become image blocks (up to 10 MB), directories a listing of up to 200 entries, other files a note. Each one starts with an `<attachment path="…">` text block so clients can tell it from typed text. The `user_message` event carries only the typed text plus a line `[attached: a.txt, src]`.
+
+A client whose files the daemon cannot read, such as one on another machine, sends a file's contents in `data` (base64) with `path` set to just the file's name. The daemon saves it as `<MALAC_HOME>/uploads/<uuid>/<name>`, keeping only the name's last component, and attaches it from there under that name. A file may be 20 MB decoded and the files of one prompt 40 MB together; a prompt over either fails with an error saying so, and nothing is saved. The daemon accepts WebSocket messages and frames of up to 64 MB, so a prompt at those limits fits in one frame, and `POST /api/command` takes bodies of the same size. Uploads older than 7 days are removed. Folders cannot be sent this way.
+
+The `ack` describes each attachment:
 
 ```json
 { "type": "ack", "client_ref": "c7", "agent": "01a17456-…", "tab": "01a17453-…",
@@ -268,7 +272,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 
 ## REST
 
-All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out; failures are `{"error": "…"}` with status 400 (403 for `/api/fs` outside its root, 409 for a refused stop).
+All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out; failures are `{"error": "…"}` with status 400 (403 for `/api/fs` and `/api/files` outside their root, 409 for a refused stop).
 
 | Endpoint | |
 |---|---|
@@ -279,6 +283,7 @@ All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out;
 | `GET /api/workspaces` | `{workspaces: [WorkspaceSummary]}` |
 | `GET /api/jobs` | `{jobs: [JobView]}` |
 | `GET /api/jobs/{id}/output?tail=` | `{job, text, size, truncated}` |
+| `GET /api/files?path=` | Every file below a directory for `@` pickers: `{root, files, truncated}`. `files` are paths relative to `root`, sorted, with hidden files and what `.gitignore` excludes left out (inside and outside repositories), at most 50,000 (`truncated` says when there were more). `path` and its limits are as for `/api/fs`. |
 | `GET /api/fs?path=&hidden=&files=` | A directory's contents for folder and file pickers: `{path, parent, root, markers, entries: [{name, path, kind, size?, markers}], truncated}`. Entries are its subdirectories (`kind: "directory"`) and, with `files=true`, its files (`kind: "file"`, `size` in bytes) after them. `markers` names what a directory holds among `.git`, `.malac`, `AGENTS.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`. `path` is absolute, `~/…` or relative to the root; only what is below `daemon.browse_root` (default: the home directory) is listed, at most 1000 entries. `hidden=true` includes dot entries. |
 | `GET /api/sessions?cwd=&limit=&subagents=` | Saved sessions, newest first: `{sessions: [{id, label, parent, cwd, model, created, title, updated}]}`. `cwd` keeps those started in that directory; `limit` defaults to 50; `subagents=true` includes subagent sessions. `title` is the first prompt's typed text. Clients use this rather than reading `~/.malac/sessions`, so it works with a daemon on another machine. |
 | `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | A transcript (`meta`, `history`, `usage`); deleting also removes it from its tabs |

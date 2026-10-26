@@ -12,6 +12,7 @@ pub mod awake;
 pub mod hub;
 pub mod store;
 pub mod tunnel;
+pub(crate) mod uploads;
 
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;

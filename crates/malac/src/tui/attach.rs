@@ -25,10 +25,14 @@ pub struct Attachment {
     /// The path as shown: relative to the working directory when inside it.
     pub name: String,
     pub kind: Kind,
-    /// Bytes, or entries for a directory.
-    pub size: u64,
+    /// Bytes, or entries for a directory; unknown for a file on the daemon's
+    /// machine.
+    pub size: Option<u64>,
     /// A pasted image's PNG bytes, sent with the prompt instead of a path.
     pub inline: Option<Inline>,
+    /// A path on the daemon's machine, picked from its `@` index; this
+    /// machine has no such file.
+    pub on_daemon: bool,
 }
 
 /// Image bytes carried by an attachment.
@@ -59,9 +63,27 @@ impl Attachment {
             path: path.to_owned(),
             name,
             kind,
-            size,
+            size: Some(size),
             inline: None,
+            on_daemon: false,
         })
+    }
+
+    /// A file below `root` on the daemon's machine, `relative` to it.
+    pub fn on_daemon(root: &Path, relative: &str) -> Self {
+        let path = root.join(relative);
+        let kind = match is_image(&path) {
+            true => Kind::Image { pixels: None },
+            false => Kind::File,
+        };
+        Self {
+            path,
+            name: relative.to_owned(),
+            kind,
+            size: None,
+            inline: None,
+            on_daemon: true,
+        }
     }
 
     /// A PNG from the clipboard, named `name`.
@@ -71,25 +93,31 @@ impl Attachment {
             kind: Kind::Image {
                 pixels: pixels_of(&png),
             },
-            size: png.len() as u64,
+            size: Some(png.len() as u64),
             name,
             inline: Some(Inline(png)),
+            on_daemon: false,
         }
     }
 
     /// `▤ src/main.rs · 2.1 KB`, `▣ shot.png · 640×480 · 88 KB`, `▥ src/ · 12 entries`.
     pub fn label(&self) -> String {
+        let bytes = self
+            .size
+            .map(|b| format!(" · {}", size(b)))
+            .unwrap_or_default();
         match self.kind {
-            Kind::File => format!("▤ {} · {}", self.name, size(self.size)),
+            Kind::File => format!("▤ {}{bytes}", self.name),
             Kind::Image { pixels } => {
                 let pixels = pixels
                     .map(|(w, h)| format!(" · {w}×{h}"))
                     .unwrap_or_default();
-                format!("▣ {}{pixels} · {}", self.name, size(self.size))
+                format!("▣ {}{pixels}{bytes}", self.name)
             }
             Kind::Directory => {
-                let noun = if self.size == 1 { "entry" } else { "entries" };
-                format!("▥ {}/ · {} {noun}", self.name, self.size)
+                let entries = self.size.unwrap_or_default();
+                let noun = if entries == 1 { "entry" } else { "entries" };
+                format!("▥ {}/ · {entries} {noun}", self.name)
             }
         }
     }

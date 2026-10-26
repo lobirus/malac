@@ -114,7 +114,7 @@ pub fn project_file(project_root: &Path) -> PathBuf {
 ///
 /// ```toml
 /// [marketplaces]
-/// lobirus = "lobirus/claude-plugins"
+/// lobirus = "lobirus/agent-plugins"
 ///
 /// [plugins]
 /// "server-setup@lobirus" = true

@@ -210,7 +210,7 @@ impl App {
                 None
             }
             Target::Completion(index) => {
-                let (name, ..) = *self.completions().get(index)?;
+                let name = self.completions().get(index)?.name.clone();
                 self.editor.set_text(&format!("/{name}"));
                 self.submit()
             }

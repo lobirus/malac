@@ -2,6 +2,7 @@
 //! prompt, status line, function keys and whatever floats above them.
 //! Every clickable area is recorded in the app's hit map.
 
+use std::path::Path;
 use std::time::Instant;
 
 use malac_core::AgentStatus;
@@ -211,10 +212,44 @@ fn draw_agent_strip(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// A calm line offering the repository the tab's folder is part of.
+fn draw_suggestion(frame: &mut Frame, app: &mut App, area: Rect, root: &Path) {
+    let t = theme();
+    let lead = format!(" This folder is part of {}. ", short_path(root));
+    let open = "Open the whole repository?";
+    let keys = "   /root · ";
+    let hide = "Esc hides";
+    let line = Line::from(vec![
+        Span::styled(lead.clone(), t.dim()),
+        Span::styled(open, t.fg(t.accent)),
+        Span::styled(keys, t.faint()),
+        Span::styled(hide, t.faint()),
+    ]);
+    let line = text::truncate_line(line, area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
+    let open_x = area.x + text::width(&lead) as u16;
+    let hide_x = open_x + text::width(open) as u16 + text::width(keys) as u16;
+    for (x, width, action) in [
+        (open_x, open, Action::OpenFolder(root.to_owned())),
+        (hide_x, hide, Action::HideSuggestion),
+    ] {
+        if x < area.right() {
+            let width = (text::width(width) as u16).min(area.right() - x);
+            app.hits
+                .push(Rect::new(x, area.y, width, 1), Target::Do(action));
+        }
+    }
+}
+
 fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let t = theme();
     let mut area = area;
     let shown = app.tab().shown().map(str::to_owned).unwrap_or_default();
+    if let Some(root) = app.suggested_root().map(Path::to_path_buf) {
+        draw_suggestion(frame, app, Rect { height: 1, ..area }, &root);
+        area.y += 1;
+        area.height = area.height.saturating_sub(1);
+    }
     if app.tab().agents.len() > 1 {
         draw_agent_strip(frame, app, Rect { height: 1, ..area });
         area.y += 1;
@@ -828,7 +863,7 @@ fn draw_completions(frame: &mut Frame, app: &mut App, input: Rect) {
         .border_style(t.faint());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    for (row, (index, (name, args, help))) in completions
+    for (row, (index, completion)) in completions
         .iter()
         .enumerate()
         .skip(first)
@@ -840,14 +875,27 @@ fn draw_completions(frame: &mut Frame, app: &mut App, input: Rect) {
         } else {
             Style::new()
         };
-        let help_style = if index == selected { style } else { t.dim() };
-        let command = format!(" /{name} {args}");
-        let gap = 26usize.saturating_sub(text::width(&command));
-        let line = Line::from(vec![
-            Span::styled(command, style),
+        let quiet = |faint: bool| match (index == selected, faint) {
+            (true, _) => style,
+            (false, true) => t.faint(),
+            (false, false) => t.dim(),
+        };
+        let name = format!(" /{}", completion.name);
+        let args = match completion.args.as_str() {
+            "" => String::new(),
+            args => format!(" {args}"),
+        };
+        let gap = 26usize.saturating_sub(text::width(&name) + text::width(&args));
+        let mut spans = vec![
+            Span::styled(name, style),
+            Span::styled(args, quiet(completion.source.is_some())),
             Span::styled(" ".repeat(gap), style),
-            Span::styled(format!("{help} "), help_style),
-        ]);
+            Span::styled(format!("{} ", completion.help), quiet(false)),
+        ];
+        if let Some(source) = &completion.source {
+            spans.push(Span::styled(format!("· {source} "), quiet(true)));
+        }
+        let line = Line::from(spans);
         let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
         let line = text::truncate_line(line, inner.width as usize);
         frame.render_widget(Paragraph::new(line).style(style), rect);

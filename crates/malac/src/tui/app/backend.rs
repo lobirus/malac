@@ -64,7 +64,13 @@ pub enum Reply {
 /// What a REST answer is for.
 #[derive(Debug, Clone)]
 pub enum Rest {
-    History { agent: AgentId },
+    History {
+        agent: AgentId,
+    },
+    /// The `@` index of a folder on the daemon's machine.
+    Files {
+        root: PathBuf,
+    },
     Sessions,
     Models,
     Tools,
@@ -144,6 +150,27 @@ impl Backend {
 
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// The daemon runs elsewhere and cannot read this machine's files.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.endpoint, Endpoint::Saved(_))
+    }
+
+    #[cfg(test)]
+    pub fn set_endpoint(&mut self, endpoint: Endpoint) {
+        self.endpoint = endpoint;
+    }
+
+    /// Asks the daemon for the files below `root` on its machine.
+    pub fn file_index(&self, root: &Path) {
+        let path = format!("/api/files?path={}", query(&root.display().to_string()));
+        self.get(
+            path,
+            Rest::Files {
+                root: root.to_owned(),
+            },
+        );
     }
 
     /// Talks to another daemon from now on.
@@ -403,39 +430,53 @@ impl App {
     /// Sends the prompt at the head of a tab's queue, to its shown agent or
     /// to a new one when the tab has none yet.
     pub(super) fn dispatch(&mut self, index: usize, prompt: Prompt) {
-        let tab = &mut self.tabs[index];
-        let Some(id) = tab.id.clone() else {
-            tab.queued.push_front(prompt);
+        let Some(id) = self.tabs[index].id.clone() else {
+            self.tabs[index].queued.push_front(prompt);
             return;
         };
+        // Pasted images travel with the prompt, so a daemon elsewhere gets them too.
+        let (pasted, files): (Vec<&Attachment>, Vec<&Attachment>) =
+            prompt.attachments.iter().partition(|a| a.inline.is_some());
+        let remote = self.backend.is_remote();
+        let attachments: Result<Vec<AttachmentInput>, String> =
+            files.iter().map(|a| attachment_input(a, remote)).collect();
+        let attachments = match attachments {
+            Ok(mut attachments) => {
+                distinct_names(&mut attachments);
+                attachments
+            }
+            Err(err) => {
+                // A file that cannot be read goes back to the editor with its prompt.
+                if index == self.active && self.editor.is_empty() {
+                    self.editor.set_text(&prompt.text);
+                    self.attachments = prompt.attachments;
+                }
+                self.notice(Level::Error, err);
+                return;
+            }
+        };
+        let images = pasted
+            .iter()
+            .filter_map(|a| {
+                Some(ImageInput {
+                    media_type: "image/png".into(),
+                    data: BASE64.encode(&a.inline.as_ref()?.0),
+                    name: Some(a.name.clone()),
+                })
+            })
+            .collect();
+        let tab = &mut self.tabs[index];
         tab.sending = true;
         let model = match tab.agent {
             None => tab.model.take(),
             Some(_) => None,
         };
-        // Pasted images travel with the prompt, so a daemon elsewhere gets them too.
-        let (pasted, files): (Vec<&Attachment>, Vec<&Attachment>) =
-            prompt.attachments.iter().partition(|a| a.inline.is_some());
         let command = Command::Prompt {
             tab: Some(id.clone()),
             agent: tab.agent.clone(),
             text: prompt.text.clone(),
-            images: pasted
-                .iter()
-                .filter_map(|a| {
-                    Some(ImageInput {
-                        media_type: "image/png".into(),
-                        data: BASE64.encode(&a.inline.as_ref()?.0),
-                        name: Some(a.name.clone()),
-                    })
-                })
-                .collect(),
-            attachments: files
-                .iter()
-                .map(|a| AttachmentInput {
-                    path: a.path.display().to_string(),
-                })
-                .collect(),
+            images,
+            attachments,
             model,
         };
         self.backend
@@ -611,6 +652,21 @@ impl App {
                 .unwrap_or_else(|| malac_core::tools::summarize_arguments(input))
         };
         match (rest, result) {
+            (Rest::Files { root }, result) => {
+                if root == self.files.root {
+                    let index: crate::files::Index = match result
+                        .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+                    {
+                        Ok(index) => index,
+                        Err(err) => {
+                            self.flash(format!("cannot list the files there: {err}"));
+                            Default::default()
+                        }
+                    };
+                    self.files.list = Some(index.files);
+                    self.files.loading = false;
+                }
+            }
             (Rest::History { agent }, result) => {
                 // A new agent has no saved conversation yet.
                 let saved = result.unwrap_or_default();
@@ -818,9 +874,14 @@ impl App {
             list: None,
             loading: true,
         };
+        // The tab's folder is on the daemon's machine.
+        if self.backend.is_remote() {
+            self.backend.file_index(&root);
+            return;
+        }
         let updates = self.backend.updates();
         std::thread::spawn(move || {
-            let list = files::index(&root);
+            let list = crate::files::index(&root).files;
             let _ = updates.send(Update::Files { root, list });
         });
     }
@@ -877,6 +938,58 @@ impl App {
         }
         nodes
     }
+}
+
+/// What a prompt says about an attachment. A daemon elsewhere cannot read
+/// this machine's files, so their contents go along, named by the file.
+fn attachment_input(attachment: &Attachment, remote: bool) -> Result<AttachmentInput, String> {
+    let path = attachment.path.display().to_string();
+    if !remote || attachment.on_daemon {
+        return Ok(AttachmentInput::path(path));
+    }
+    let bytes = std::fs::read(&attachment.path).map_err(|e| format!("{path}: {e}"))?;
+    let name = attachment
+        .path
+        .file_name()
+        .map_or(path, |n| n.to_string_lossy().into_owned());
+    Ok(AttachmentInput {
+        path: name,
+        data: Some(BASE64.encode(bytes)),
+    })
+}
+
+/// Sent files of the same name, from different folders, are told apart as
+/// `notes (2).md`, since only the name goes along.
+fn distinct_names(inputs: &mut [AttachmentInput]) {
+    let mut seen = HashSet::new();
+    for input in inputs.iter_mut().filter(|i| i.data.is_some()) {
+        let mut name = input.path.clone();
+        let mut n = 1;
+        while !seen.insert(name.clone()) {
+            n += 1;
+            let path = Path::new(&input.path);
+            name = match (path.file_stem(), path.extension()) {
+                (Some(stem), Some(ext)) => {
+                    format!("{} ({n}).{}", stem.to_string_lossy(), ext.to_string_lossy())
+                }
+                _ => format!("{} ({n})", input.path),
+            };
+        }
+        input.path = name;
+    }
+}
+
+/// Escapes a query value: everything but unreserved characters and `/`.
+fn query(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn mcp_lines(servers: &Value) -> Vec<Line<'static>> {

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -36,6 +36,7 @@ use crate::SessionOptions;
 use crate::client::{self, Client};
 use crate::daemon::access::{self, Caller, Reach};
 use crate::daemon::hub::Conn;
+use crate::daemon::uploads::MAX_MESSAGE_BYTES;
 use crate::daemon::{Hub, HubOptions, ServeArgs};
 use crate::protocol::{Command, Request as ClientRequest, ServerMessage, TabSpec};
 use crate::repl::working_dir;
@@ -209,11 +210,16 @@ impl Server {
             .route("/api/daemon", get(api_daemon))
             .route("/api/daemon/stop", post(api_daemon_stop))
             .route("/api/snapshot", get(api_snapshot))
-            .route("/api/command", post(api_command))
+            // A prompt may come this way too, files and all.
+            .route(
+                "/api/command",
+                post(api_command).layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES)),
+            )
             .route("/api/workspaces", get(api_workspaces))
             .route("/api/jobs", get(api_jobs))
             .route("/api/jobs/{id}/output", get(api_job_output))
             .route("/api/fs", get(fs::list))
+            .route("/api/files", get(fs::files))
             .route("/api/usage", get(usage::summary))
             .merge(settings::routes())
             .merge(remote::routes())
@@ -618,7 +624,10 @@ async fn api_ws(
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     let device = caller.device().map(str::to_owned);
-    ws.on_upgrade(move |socket| client_socket(state, socket, query.version, device))
+    // Large enough for a prompt with files sent as one frame.
+    ws.max_frame_size(MAX_MESSAGE_BYTES)
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| client_socket(state, socket, query.version, device))
 }
 
 /// Browsers may open the socket from the page's own origin, as the daemon

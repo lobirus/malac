@@ -178,8 +178,23 @@ pub struct ImageInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentInput {
-    /// Absolute, `~/`, or relative to the tab's directory.
+    /// Absolute, `~/`, or relative to the tab's directory. With `data`,
+    /// only the client's file name.
     pub path: String,
+    /// The file itself, base64, from a client whose files the daemon cannot
+    /// read. It is saved under `<MALAC_HOME>/uploads` and attached from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
+impl AttachmentInput {
+    /// A path on the daemon's machine.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            data: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
