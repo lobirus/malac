@@ -5523,3 +5523,165 @@ span.attached-chip,
     display: none;
   }
 }
+
+/* Remote access: pairing screen and the settings section. */
+
+.pair-screen {
+  max-width: 420px;
+}
+
+.pair-form {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.pair-form .label {
+  display: grid;
+  gap: 4px;
+}
+
+.pair-code-input {
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.badge.on {
+  border-color: var(--green-border);
+  color: var(--green);
+}
+
+td .badge {
+  margin-left: 6px;
+}
+
+.remote-status {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.remote-status p {
+  margin: 0;
+}
+
+.remote-urls {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.remote-url,
+.remote-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.remote-url a,
+.remote-command code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-kind {
+  flex: none;
+  width: 190px;
+  font-size: 12px;
+}
+
+.remote-command code {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.remote-error {
+  margin: 0 0 8px;
+  padding: 8px;
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.pair-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.pair-box .qr {
+  flex: none;
+  width: 196px;
+  height: 196px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.pair-details {
+  display: grid;
+  flex: 1 1 260px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pair-details p {
+  margin: 0;
+}
+
+.pair-code {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.remote-ways {
+  display: grid;
+  gap: 14px;
+}
+
+.remote-way h3 {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.remote-way p {
+  margin: 0 0 4px;
+}
+
+@media (max-width: 640px) {
+  .remote-url {
+    flex-wrap: wrap;
+  }
+
+  .remote-kind {
+    width: auto;
+  }
+
+  .table.devices th:nth-child(3),
+  .table.devices td:nth-child(3),
+  .table.devices th:nth-child(5),
+  .table.devices td:nth-child(5) {
+    display: none;
+  }
+}
+
+.app.unpaired .sidebar,
+.app.unpaired .tabbar,
+.app.unpaired .backdrop {
+  display: none;
+}

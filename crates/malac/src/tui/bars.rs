@@ -214,6 +214,10 @@ pub struct Status {
     pub daemon: Option<String>,
     /// What computer control is missing.
     pub control: Option<&'static str>,
+    /// The saved connection, when the daemon is on another machine.
+    pub connection: Option<String>,
+    /// The daemon holds a keep-awake assertion.
+    pub awake: bool,
     pub branch: Option<String>,
     pub clock: String,
 }
@@ -249,6 +253,16 @@ pub fn status_line(status: &Status, width: u16) -> (Line<'static>, Vec<Spot>) {
     let bar = t.bar();
     let dim = bar.fg(t.dim);
     let mut segments = Vec::new();
+    if let Some(name) = &status.connection {
+        segments.push(segment(
+            vec![Span::styled(
+                format!("@{}", text::truncate(name, 16)),
+                bar.fg(t.accent).add_modifier(Modifier::BOLD),
+            )],
+            1,
+            Some(Action::OpenMenu(5)),
+        ));
+    }
     segments.push(segment(
         vec![Span::styled(status.model.clone(), bar)],
         1,
@@ -331,6 +345,13 @@ pub fn status_line(status: &Status, width: u16) -> (Line<'static>, Vec<Spot>) {
             vec![Span::styled(label, bar)],
             7,
             Some(Action::CopyWebUrl),
+        ));
+    }
+    if status.awake {
+        segments.push(segment(
+            vec![Span::styled("awake", dim)],
+            7,
+            Some(Action::OpenMenu(4)),
         ));
     }
     if let Some(update) = &status.update {
@@ -469,7 +490,7 @@ mod tests {
         let (line, spots) = header(None, &tabs(2), 1, "default", 100);
         let text = line.to_string();
         assert!(text.starts_with(
-            " Session  Model  Mode  Agents  View  Web  Help  │ 1 session 0 ✓  2 session 1 × "
+            " Session  Model  Mode  Agents  View  Connection  Help  │ 1 session 0 ✓  2 session 1 × "
         ));
         assert!(text.ends_with("default "), "the workspace's name");
         let x = text.find("default").unwrap() as u16;
@@ -508,6 +529,8 @@ mod tests {
             update: None,
             daemon: None,
             control: None,
+            connection: None,
+            awake: false,
             branch: Some("main".into()),
             clock: "14:05".into(),
         }
@@ -532,6 +555,26 @@ mod tests {
         assert!(text.contains("lora/smart"));
         assert!(!text.contains("14:05"));
         assert!(!text.contains("main"));
+    }
+
+    #[test]
+    fn remote_daemons_and_keep_awake_show() {
+        let status = Status {
+            connection: Some("bstation".into()),
+            awake: true,
+            ..status()
+        };
+        let (line, spots) = status_line(&status, 160);
+        let text = line.to_string();
+        assert!(text.contains("@bstation │ lora/smart"), "{text}");
+        assert!(text.contains("│ web │ awake │ main"), "{text}");
+        let col = text::width(&text[..text.find("@bstation").unwrap()]) as u16;
+        assert_eq!(spot_at(&spots, col), Some(&Target::Do(Action::OpenMenu(5))));
+        let (narrow, _) = status_line(&status, 60);
+        assert!(
+            narrow.to_string().contains("@bstation"),
+            "the daemon shows first"
+        );
     }
 
     #[test]

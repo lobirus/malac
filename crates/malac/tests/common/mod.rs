@@ -55,6 +55,7 @@ enabled = false
 [daemon]
 idle_minutes = 0
 browse_root = "{}"
+keep_awake = "off"
 "#,
                 browse.display()
             ),
@@ -95,6 +96,21 @@ pub async fn start_daemon(script: Arc<Scripted>, publish: bool) -> Daemon {
         ..Default::default()
     };
     let daemon = Daemon::start(&args, publish).await.unwrap();
+    daemon.hub().insert_provider("mock", script);
+    daemon
+}
+
+/// A daemon on a free loopback port with remote access on: requests that
+/// name another host, or come through a proxy, count as remote.
+pub async fn start_remote_daemon(script: Arc<Scripted>) -> Daemon {
+    home();
+    let args = ServeArgs {
+        port: Some(0),
+        host: Some("127.0.0.1".into()),
+        remote: true,
+        ..Default::default()
+    };
+    let daemon = Daemon::start(&args, false).await.unwrap();
     daemon.hub().insert_provider("mock", script);
     daemon
 }

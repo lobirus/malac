@@ -1,0 +1,7 @@
+{
+  "name": "release-tools",
+  "version": "1.0.0",
+  "description": "Changelog entries, release notes and a guard against force pushes",
+  "author": { "name": "malac" },
+  "license": "MIT"
+}

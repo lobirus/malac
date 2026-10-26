@@ -7,8 +7,11 @@
 //! `~/.malac/daemon.lock` while it runs, and logs to `~/.malac/daemon.log`
 //! when started in the background.
 
+pub mod access;
+pub mod awake;
 pub mod hub;
 pub mod store;
+pub mod tunnel;
 
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
@@ -66,10 +69,11 @@ pub struct ServeArgs {
     /// Port (default `web.port`, or any free port if it is taken); 0 picks one.
     #[arg(long)]
     pub port: Option<u16>,
-    /// Bind address (default `web.host`, or 0.0.0.0 with --remote).
+    /// Bind address (default `web.host`, else 127.0.0.1, or 0.0.0.0 with --remote).
     #[arg(long)]
     pub host: Option<String>,
-    /// Also accept connections from other machines. The token is still required.
+    /// Allow paired devices on other machines, directly or through a tunnel.
+    /// They need a device token from `malac remote pair`.
     #[arg(long)]
     pub remote: bool,
     /// Use this token instead of the saved one.
@@ -103,10 +107,10 @@ impl Daemon {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let base = Config::load_user()?;
         let remote = args.remote || base.web.remote;
-        let host = match &args.host {
-            Some(host) => host.clone(),
-            None if remote => "0.0.0.0".into(),
-            None => base.web.host.clone(),
+        let host = match (&args.host, &base.web.host) {
+            (Some(host), _) | (None, Some(host)) => host.clone(),
+            (None, None) if remote => "0.0.0.0".into(),
+            (None, None) => "127.0.0.1".into(),
         };
         let port = args.port.unwrap_or(base.web.port);
         let token = match &args.token {
@@ -120,8 +124,27 @@ impl Daemon {
                 Some(root) => malac_core::attach::resolve(&root.to_string_lossy(), &home),
                 None => home,
             },
+            keep_awake: base.daemon.keep_awake,
+            public_url: base.remote.public_url.clone(),
         })?;
         let server = Server::bind(hub.clone(), &host, port, true, token.clone()).await?;
+        hub.set_listen(server.addr(), remote.then(|| server.lan_url()).flatten());
+        if !remote && !server.addr().ip().is_loopback() {
+            tracing::warn!(
+                "listening on {} without remote access: other machines are refused (use --remote)",
+                server.addr()
+            );
+        }
+        if let Some(provider) = base.remote.tunnel {
+            match remote {
+                true => {
+                    if let Err(err) = hub.start_tunnel(provider).await {
+                        tracing::warn!("remote.tunnel: {err:#}");
+                    }
+                }
+                false => tracing::warn!("remote.tunnel is set, but remote access is off"),
+            }
+        }
         let file = DaemonFile {
             url: server.base_url(),
             token,
@@ -129,6 +152,7 @@ impl Daemon {
             version: update::CURRENT.into(),
             urls: server.urls(),
             started: Some(Utc::now()),
+            connection: None,
         };
         if publish {
             file.write()?;
@@ -405,9 +429,52 @@ async fn status(json: bool) -> Result<i32> {
             .format("%Y-%m-%d %H:%M")
     );
     println!("  url        {}", file.web_url());
-    for url in file.urls.iter().skip(1) {
-        println!("  remote     {url}");
+    let remote = &info.remote_access;
+    match remote.enabled {
+        true => {
+            let others: Vec<String> = remote
+                .urls
+                .iter()
+                .filter(|u| u.kind != crate::protocol::UrlKind::Local)
+                .map(|u| format!("{} ({})", u.url, u.kind.label()))
+                .collect();
+            println!(
+                "  remote     allowed · {} paired devices{}",
+                remote.devices,
+                match others.is_empty() {
+                    true => String::new(),
+                    false => format!(" · {}", others.join(", ")),
+                }
+            );
+        }
+        false => println!(
+            "  remote     off (this machine and SSH tunnels only) · {} paired devices",
+            remote.devices
+        ),
     }
+    if let Some(tunnel) = &remote.tunnel {
+        println!(
+            "  tunnel     {} {:?}{}",
+            tunnel.provider.as_str(),
+            tunnel.state,
+            tunnel
+                .url
+                .as_deref()
+                .map(|u| format!(" {u}"))
+                .unwrap_or_default()
+        );
+    }
+    let awake = &info.awake;
+    println!(
+        "  awake      {} · {} (keep_awake = {})",
+        if awake.awake {
+            "holding"
+        } else {
+            "not holding"
+        },
+        awake.error.as_deref().unwrap_or(&awake.reason),
+        awake.mode.as_str(),
+    );
     println!("  clients    {}", status.clients);
     println!(
         "  workspaces {} · {} tabs loaded",

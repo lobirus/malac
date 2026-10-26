@@ -649,7 +649,7 @@ pub fn can_install(status: &Status) -> bool {
     status.available && status.installed.is_none() && status.method == Method::SelfUpdate
 }
 
-fn draw_buttons(
+pub(super) fn draw_buttons(
     frame: &mut Frame,
     inner: Rect,
     row: u16,

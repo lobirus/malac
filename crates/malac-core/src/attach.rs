@@ -54,15 +54,25 @@ pub fn is_attachment(text: &str) -> bool {
 
 /// Recalled memories are attached to a prompt in a block starting so.
 const RECALLED: &str = "<recalled-memories>";
+/// A slash command's expansion, added after what was typed.
+pub const COMMAND_EXPANSION: &str = "<command-expansion>";
+/// Context from plugin hooks, added before what was typed.
+pub const HOOK_CONTEXT: &str = "<hook-context>";
 
-/// What the user typed, without attached files or recalled memories.
+/// Whether a text block is context malac added to a prompt.
+fn is_added(text: &str) -> bool {
+    [RECALLED, COMMAND_EXPANSION, HOOK_CONTEXT]
+        .iter()
+        .any(|tag| text.starts_with(tag))
+}
+
+/// What the user typed, without attached files, recalled memories or
+/// other context malac added.
 pub fn typed_text(content: &[Block]) -> String {
     content
         .iter()
         .filter_map(|b| match b {
-            Block::Text { text } if !is_attachment(text) && !text.starts_with(RECALLED) => {
-                Some(text.as_str())
-            }
+            Block::Text { text } if !is_attachment(text) && !is_added(text) => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

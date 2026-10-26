@@ -21,6 +21,7 @@ const UNTRUSTED_PROJECT_KEYS: &[&str] = &[
     "web",
     "update",
     "daemon",
+    "remote",
     // A project profile could carry any of the keys above into `--profile`.
     "profiles",
 ];
@@ -50,6 +51,9 @@ pub struct Config {
     pub web: WebConfig,
     pub update: UpdateConfig,
     pub daemon: DaemonConfig,
+    pub remote: RemoteConfig,
+    pub context: ContextConfig,
+    pub plugins: PluginsConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +120,12 @@ pub struct McpServerConfig {
     pub enabled: bool,
     /// Expose tools as `<server>__<tool>`.
     pub prefix: bool,
+    /// Working directory for a `command` server.
+    pub cwd: Option<PathBuf>,
+    /// Pass `command`, `args` and `env` as written, without `${VAR}`
+    /// expansion. Agent Plugins servers require it.
+    #[serde(skip)]
+    pub literal: bool,
 }
 
 impl Default for McpServerConfig {
@@ -129,6 +139,8 @@ impl Default for McpServerConfig {
             token_env: None,
             enabled: true,
             prefix: true,
+            cwd: None,
+            literal: false,
         }
     }
 }
@@ -244,10 +256,10 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
-    /// Listen on all interfaces so other machines can connect (token still required).
+    /// Accept paired devices from other machines (device tokens only).
     pub remote: bool,
-    /// Bind address when not remote.
-    pub host: String,
+    /// Bind address. Unset: 127.0.0.1, or every interface with `remote`.
+    pub host: Option<String>,
     pub port: u16,
 }
 
@@ -255,7 +267,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             remote: false,
-            host: "127.0.0.1".into(),
+            host: None,
             port: 7700,
         }
     }
@@ -263,7 +275,11 @@ impl Default for WebConfig {
 
 impl WebConfig {
     pub fn bind_host(&self) -> &str {
-        if self.remote { "0.0.0.0" } else { &self.host }
+        match &self.host {
+            Some(host) => host,
+            None if self.remote => "0.0.0.0",
+            None => "127.0.0.1",
+        }
     }
 }
 
@@ -294,6 +310,8 @@ pub struct DaemonConfig {
     /// The directory picker (`GET /api/fs`) lists only directories below
     /// this one. Defaults to the home directory.
     pub browse_root: Option<PathBuf>,
+    /// Keeps the machine from sleeping while agents or jobs run.
+    pub keep_awake: KeepAwake,
 }
 
 impl Default for DaemonConfig {
@@ -301,6 +319,140 @@ impl Default for DaemonConfig {
         Self {
             idle_minutes: 120,
             browse_root: None,
+            keep_awake: KeepAwake::Busy,
+        }
+    }
+}
+
+/// When the daemon holds a power assertion against idle and system sleep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeepAwake {
+    /// While agents or jobs run.
+    #[default]
+    Busy,
+    /// As long as the daemon runs.
+    Always,
+    Off,
+}
+
+impl KeepAwake {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeepAwake::Busy => "busy",
+            KeepAwake::Always => "always",
+            KeepAwake::Off => "off",
+        }
+    }
+}
+
+/// `[remote]`: how other machines reach the daemon, when `web.remote` allows them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    /// A tunnel the daemon starts and stops with itself.
+    pub tunnel: Option<Tunnel>,
+    /// An address other devices use, e.g. a reverse proxy with TLS; shown
+    /// in pairing links next to the LAN and tunnel addresses.
+    pub public_url: Option<String>,
+}
+
+/// A tunnel helper `malac tunnel` and `remote.tunnel` can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tunnel {
+    /// A Cloudflare quick tunnel (`cloudflared tunnel --url`).
+    Cloudflare,
+    Ngrok,
+    /// `tailscale serve`: reachable from your tailnet only.
+    Tailscale,
+    /// `tailscale funnel`: public on the internet.
+    TailscaleFunnel,
+}
+
+impl Tunnel {
+    pub const ALL: [Tunnel; 4] = [
+        Tunnel::Cloudflare,
+        Tunnel::Ngrok,
+        Tunnel::Tailscale,
+        Tunnel::TailscaleFunnel,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tunnel::Cloudflare => "cloudflare",
+            Tunnel::Ngrok => "ngrok",
+            Tunnel::Tailscale => "tailscale",
+            Tunnel::TailscaleFunnel => "tailscale-funnel",
+        }
+    }
+}
+
+impl std::str::FromStr for Tunnel {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> Result<Self> {
+        match name {
+            "cloudflared" => return Ok(Tunnel::Cloudflare),
+            "funnel" => return Ok(Tunnel::TailscaleFunnel),
+            _ => {}
+        }
+        Tunnel::ALL
+            .into_iter()
+            .find(|t| t.as_str() == name)
+            .with_context(|| {
+                format!(
+                    "unknown tunnel `{name}`: use cloudflare, ngrok, tailscale or tailscale-funnel"
+                )
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    /// More instruction files, relative to the project root (or absolute,
+    /// or `~/…`, in the user config). Read after the standard ones.
+    pub instruction_files: Vec<String>,
+    /// Characters of instruction files in the system prompt, all together.
+    pub max_instruction_chars: usize,
+    /// List the project's Markdown docs (path, title, one line) in the prompt.
+    pub docs: bool,
+    /// Keep a structural index of the project in `.malac/index.md`.
+    pub index: bool,
+    /// Most files whose symbols the index lists.
+    pub index_max_files: usize,
+    /// Include `.malac/MALAC.md`, the project knowledge malac keeps.
+    pub knowledge: bool,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            instruction_files: Vec::new(),
+            max_instruction_chars: 40_000,
+            docs: true,
+            index: true,
+            index_max_files: 5000,
+            knowledge: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Load installed and enabled plugins.
+    pub enabled: bool,
+    /// Enable the plugins that ship with malac (ponytail).
+    pub defaults: bool,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            defaults: true,
         }
     }
 }
@@ -358,6 +510,9 @@ impl Config {
                     }
                 }
             }
+            if !trusted {
+                confine_instruction_files(&mut project, &project_path, &mut warnings);
+            }
             merge(&mut merged, project);
         }
         if let Some(name) = profile {
@@ -410,6 +565,35 @@ impl Config {
             "no model configured; run `malac provider add` or set `model` in ~/.malac/config.toml",
         )
     }
+}
+
+/// A project may name instruction files inside itself only: one that pointed
+/// at `~/.ssh/id_rsa` would send the key to the model provider.
+fn confine_instruction_files(project: &mut toml::Table, path: &Path, warnings: &mut Vec<String>) {
+    let Some(files) = project
+        .get_mut("context")
+        .and_then(|c| c.get_mut("instruction_files"))
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return;
+    };
+    files.retain(|file| {
+        let Some(file) = file.as_str() else {
+            return false;
+        };
+        let inside = !file.starts_with('~')
+            && Path::new(file).is_relative()
+            && !Path::new(file)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+        if !inside {
+            warnings.push(format!(
+                "ignored instruction file `{file}` in {}: a project may only name files inside itself",
+                path.display()
+            ));
+        }
+        inside
+    });
 }
 
 fn defaults() -> toml::Table {

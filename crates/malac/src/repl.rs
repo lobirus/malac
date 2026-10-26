@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::approve::{FirstAnswer, TerminalApprover, TerminalLock};
 use crate::client::Client;
+use crate::connections::{self, Connection, Endpoint};
 use crate::daemon::ServeArgs;
 use crate::render::{self, Renderer};
 use crate::{RunArgs, SessionOptions, remote, tui, web};
@@ -72,6 +73,28 @@ pub fn working_dir(cwd: Option<&PathBuf>) -> Result<PathBuf> {
 }
 
 pub async fn run(args: RunArgs) -> Result<i32> {
+    if let Some(name) = args.connect.as_deref() {
+        match connections::resolve(Some(name))? {
+            Endpoint::Saved(connection) => return run_connected(&args, connection).await,
+            // `-C local` from the full-screen interface is remembered too.
+            Endpoint::Local => connections::remember(None),
+        }
+    } else if bare_interactive(&args) {
+        if let Some(connection) = connections::remembered() {
+            let name = connection.name.clone();
+            match run_connected(&args, connection).await {
+                Err(err) if err.is::<Unreachable>() => {
+                    eprintln!(
+                        "{}",
+                        format!("! {err:#}; using this computer's daemon (`malac -C {name}` tries again)")
+                            .yellow()
+                    );
+                    connections::remember(None);
+                }
+                result => return result,
+            }
+        }
+    }
     let cwd = working_dir(args.session.cwd.as_ref())?;
     let config = load_config(&args.session, &cwd)?;
     config.main_model()?;
@@ -191,6 +214,79 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     result.map(|_| 0)
 }
 
+/// A plain `malac` in a terminal: it reopens the full-screen interface's
+/// last connection.
+fn bare_interactive(args: &RunArgs) -> bool {
+    args.prompt.is_empty()
+        && !args.print
+        && !args.json
+        && !args.plain
+        && !args.continue_last
+        && args.resume.is_none()
+        && args.session.cwd.is_none()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && Config::load_user().is_ok_and(|c| c.ui.tui)
+}
+
+/// The daemon of a saved connection did not answer.
+#[derive(Debug)]
+struct Unreachable(String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Runs against a daemon on another machine. Paths there mean nothing
+/// here: `--cwd` names a directory on that machine, and the default is its
+/// home. Models and keys are the other machine's too.
+async fn run_connected(args: &RunArgs, connection: Connection) -> Result<i32> {
+    if args.json {
+        bail!("--json runs in this process; use it without --connect");
+    }
+    let config = Config::load_user().unwrap_or_default();
+    let show_thinking = config.ui.show_thinking || args.session.verbose;
+    let stdin_tty = std::io::stdin().is_terminal();
+    let interactive = stdin_tty && std::io::stdout().is_terminal() && !args.print;
+    let use_tui = interactive
+        && !args.plain
+        && config.ui.tui
+        && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+    let mut prompt = args.prompt.join(" ");
+    if !stdin_tty {
+        let piped = read_piped_stdin(!prompt.trim().is_empty());
+        if !piped.trim().is_empty() {
+            prompt = format!("{prompt}\n\n<stdin>\n{}\n</stdin>", piped.trim_end());
+        }
+    }
+    if !interactive && prompt.trim().is_empty() {
+        bail!("no prompt given");
+    }
+    let cwd = args
+        .session
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("~"));
+    let name = connection.name.clone();
+    let endpoint = Endpoint::Saved(connection);
+    let connected = endpoint
+        .connect()
+        .await
+        .map_err(|err| Unreachable(format!("{err:#}")))?;
+    if use_tui {
+        connections::remember(Some(&name));
+        let mut config = config;
+        config.ui.show_thinking = show_thinking;
+        tui::run_on(connected, endpoint, args, config, &cwd, prompt).await?;
+        return Ok(0);
+    }
+    remote::run(connected, args, &cwd, prompt, show_thinking).await
+}
+
 /// Piped input becomes part of the prompt. When a prompt was also given on
 /// the command line, a stdin that stays open (as under some IDEs and CI
 /// runners) is ignored after a short wait instead of blocking forever.
@@ -296,6 +392,9 @@ pub enum Slash<'a> {
     Mcp,
     Memory,
     Web(&'a str),
+    /// Anything else, without its `/`: sent to the agent, whose runtime
+    /// runs `/context`, plugin commands and skills, and rejects unknown names.
+    Forward(&'a str),
 }
 
 /// Every slash command: name, arguments and what it does.
@@ -315,6 +414,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("mcp", "", "connected tool servers"),
     ("memory", "", "saved memories"),
     ("web", "[remote]", "serve the web UI for this session"),
+    (
+        "context",
+        "",
+        "instruction files, docs, index, skills, commands and plugins in use",
+    ),
     ("help", "", "list commands"),
     ("exit", "", "quit"),
 ];
@@ -340,7 +444,8 @@ impl<'a> Slash<'a> {
             "mcp" => Slash::Mcp,
             "memory" => Slash::Memory,
             "web" => Slash::Web(arg),
-            other => bail!("unknown command /{other} (try /help)"),
+            "" => bail!("type a command after / (try /help)"),
+            _ => Slash::Forward(input.trim()),
         })
     }
 }
@@ -369,10 +474,10 @@ impl Session {
     /// `remote`; does nothing if it already serves.
     pub async fn serve_web(&mut self, remote: bool, port: Option<u16>) -> Result<()> {
         let web = &self.runtime.config.web;
-        let host = if remote {
-            "0.0.0.0".to_owned()
-        } else {
-            web.host.clone()
+        let host = match &web.host {
+            Some(host) => host.clone(),
+            None if remote => "0.0.0.0".to_owned(),
+            None => "127.0.0.1".to_owned(),
         };
         let port = port.unwrap_or(web.port);
         self.start_web(&host, port).await
@@ -528,6 +633,9 @@ impl Repl {
                 for url in &session.web_urls {
                     println!("web UI: {url}");
                 }
+            }
+            Slash::Forward(command) => {
+                self.turn(format!("/{command}")).await;
             }
         }
         Ok(Flow::Continue)

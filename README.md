@@ -91,9 +91,9 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 
 `malac` opens a full-screen terminal UI in the spirit of Midnight Commander and byobu. It works with the keyboard alone, and everything is also clickable.
 
-- **Header:** a menu bar (Session, Model, Mode, Agents, View, Web, Help; F9 opens it), the workspace's tabs, one per project folder, and the workspace's name.
+- **Header:** a menu bar (Session, Model, Mode, Agents, View, Connection, Help; F9 opens it), the workspace's tabs, one per project folder, and the workspace's name (with the daemon's, `server › work`, when it runs elsewhere).
 - **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, and subagents as live cards you can open. A tab with several agents shows a switcher above it; F3 shows every agent as a list or a map.
-- **Footer:** a status line (model, mode, context, tokens and cost, running agents, pending approvals, web UI, git branch, update, clock) above a function-key bar.
+- **Footer:** a status line (the daemon when it is another machine's, model, mode, context, tokens and cost, running agents, pending approvals, web UI, keep-awake, git branch, update, clock) above a function-key bar.
 - **Dialogs:** permission requests (Allow / Always / Deny), a model picker across all providers, sessions, and help.
 
 | Key | | Key | |
@@ -139,7 +139,7 @@ The terminal UI, the web UI and the editor extension share the daemon's workspac
 | `malac daemon stop [--force]` | Stop it; refused while agents or jobs run unless `--force` |
 | `malac daemon restart [--force]` | Stop and start, e.g. to use an updated malac |
 
-Permission prompts go to every connected client, and the first answer wins; a client that connects later still sees what is waiting. Background jobs (`bash` with `background: true`) are listed with their output, and stopped with `job_kill` or from a client. The daemon exits after `daemon.idle_minutes` (default 120) with no clients and nothing running. Updating malac never disturbs it: it keeps its version until restarted, and clients show a notice when theirs differs.
+Permission prompts go to every connected client, and the first answer wins; a client that connects later still sees what is waiting. Background jobs (`bash` with `background: true`) are listed with their output, and stopped with `job_kill` or from a client. While agents or jobs run, the daemon keeps the machine from sleeping (`daemon.keep_awake`). The daemon exits after `daemon.idle_minutes` (default 120) with no clients and nothing running. Updating malac never disturbs it: it keeps its version until restarted, and clients show a notice when theirs differs.
 
 ## Command line
 
@@ -158,8 +158,9 @@ Permission prompts go to every connected client, and the first answer wins; a cl
 | `--no-control` | Do not connect the control service |
 | `-v, --verbose` | Show model reasoning |
 | `--plain` | Line-based interface instead of the full-screen UI |
+| `-C, --connect <name>` | Use a saved connection's daemon on another machine ([Remote access](#remote-access)) |
 
-The daemon serves the web UI for every session, so no flag is needed for it: `malac web` prints its address, and `web.remote = true` or `malac daemon start --remote` opens it to other machines.
+The daemon serves the web UI for every session, so no flag is needed for it: `malac web` prints its address. Other machines connect after pairing; see [Remote access](#remote-access).
 
 | Subcommand | |
 |---|---|
@@ -173,9 +174,14 @@ The daemon serves the web UI for every session, so no flag is needed for it: `ma
 | `malac config [path\|show]` | Configuration files and the merged result |
 | `malac memory [list\|search\|reindex]` | Long-term memory |
 | `malac mcp` | Connected MCP servers and their tools |
+| `malac plugin ...` | Plugins and marketplaces: `marketplace add\|list\|update\|remove`, `install`, `enable`, `disable`, `uninstall`, `update`, `list`, `show` |
+| `malac index [--rebuild]` | Build or update the project index, `.malac/index.md` |
+| `malac context [--json]` | What a session here reads: instruction files, docs, index, skills, commands, plugins |
+| `malac remote [status\|pair\|devices\|revoke\|add\|list\|remove]` | Pair devices with this daemon and save connections to daemons elsewhere |
+| `malac tunnel [cloudflare\|ngrok\|tailscale\|tailscale-funnel\|status\|stop]` | Give the daemon a public address |
 | `malac control ...` | Run `malac-control` |
 
-In a session: `/model`, `/mode`, `/agents`, `/compact`, `/clear`, `/resume`, `/cost`, `/mcp`, `/memory`, `/web`, `/exit`. Ctrl-C interrupts the current turn and every subagent it started.
+In a session: `/model`, `/mode`, `/agents`, `/compact`, `/clear`, `/resume`, `/cost`, `/mcp`, `/memory`, `/web`, `/context`, `/exit`, plus your commands, skills and plugin commands (`/ponytail-review`, `/release-tools:release-notes 2.0`). Ctrl-C interrupts the current turn and every subagent it started.
 
 ## Permissions
 
@@ -209,7 +215,7 @@ Reusable agent types are Markdown files in `.malac/agents/`; see [configuration]
 
 ## Memory
 
-The agent saves durable facts with `memory_save`: user preferences, project conventions, decisions. Each memory is a Markdown file in `~/.malac/memory/` (global) or `.malac/memory/` (project), and an index of them is part of every prompt.
+The agent saves durable facts with `memory_save`: user preferences, project commands, conventions, gotchas, decisions. Each memory is a Markdown file in `~/.malac/memory/` (global) or `.malac/memory/` (project), and an index of them is part of every prompt. Project memories are listed by kind in `.malac/MALAC.md` (see [Project context](#project-context)); commit both, and the knowledge reaches your other machines and your teammates.
 
 Add a Milvus collection for semantic search and automatic recall:
 
@@ -224,6 +230,33 @@ model = "text-embedding-3-small"
 ```
 
 The files stay the source of truth. `malac memory reindex` rebuilds the collection from them.
+
+## Project context
+
+Before the first prompt, malac reads what the project says about itself:
+
+- **Instruction files**, from `~/.malac/` and every directory between the repository root and where you are: `AGENTS.md` first, then `MALAC.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursorrules`, `.cursor/rules/*.mdc`, `.windsurfrules`, `.clinerules` and the rest of the forms other agents use, plus `~/.claude/CLAUDE.md` and anything in `[context] instruction_files`. A `CLAUDE.md` that is a symlink to (or a copy of) `AGENTS.md` is read once. Cursor rules with `globs` are listed for the files they cover rather than pasted.
+- **A docs map**: README, ARCHITECTURE, CONTRIBUTING, `docs/**` and decision records, each as a path, its title and one line, so the agent knows where to look without reading them all.
+- **The project index**, `.malac/index.md`: the directory tree with file counts, languages, manifests and entry points, the top-level symbols of every source file and the headings of the docs. It is built without a model, follows `.gitignore`, rereads only changed files and refreshes itself in the background; the agent reads it with `project_index` before searching broadly, and leaves notes in it for the next session. It is regenerable, so `.malac/.gitignore` keeps it out of git; `malac index` updates it by hand.
+- **Project knowledge**, `.malac/MALAC.md`: what malac learned here, kept as project memories and listed by kind (commands, conventions, gotchas, decisions). It is meant to be committed. Instructions for agents stay in `AGENTS.md`, which malac suggests changes to but does not write unasked.
+
+Working in `frontend/` of a repository that also has `backend/`? The agent is told where the other parts are, and the UIs suggest opening the repository root, which is what to do for work across the stack. `/context` (or `malac context`) shows everything that was loaded and why anything was skipped. See [configuration](docs/configuration.md#context).
+
+## Skills
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) format: a folder with a `SKILL.md` (name and description, then instructions), optionally with `scripts/` and `references/`. malac finds them in `~/.malac/skills/`, `.malac/skills/`, `.claude/skills/`, `~/.claude/skills/`, `.agents/skills/` and in plugins. The prompt lists each one's name and description; the agent loads a skill with the `skill` tool when it fits, and runs its scripts with `bash`, where `$SKILL_DIR` points at the skill. Every skill is also a slash command: `/release 2.0`.
+
+## Plugins and marketplaces
+
+Plugins bundle skills, slash commands, agent types, MCP servers and hooks. malac installs both Claude Code plugins and [Agent Plugins](https://agent-plugins.org), from marketplaces: folders, GitHub (`owner/repo`), GitLab or any git URL, private repositories included through your own git credentials, or the URL of a `marketplace.json`.
+
+```bash
+malac plugin marketplace add lobirus/claude-plugins
+malac plugin install server-setup@lobirus-plugins
+malac plugin marketplace add git@gitlab.example.com:team/agent-plugins.git --project   # for the whole team
+```
+
+Installing runs nothing. A plugin with hooks, MCP servers or scripts is enabled only after you approve what it runs, and a repository's `.malac/plugins.toml` can list plugins for the team but never turns their code on by itself. Hooks cover session start, prompts and tool calls (allow, deny, ask, or change the input). malac ships [ponytail](https://ponytail.dev) (MIT, by Dietrich Gebert) as a default plugin for lean, complete changes and reviews; `malac plugin disable ponytail@malac` or `[plugins] defaults = false` turns it off. See [docs/plugins.md](docs/plugins.md) for the formats, sources, scopes, security model and how to publish a marketplace that every agent can read, and [examples/marketplace](examples/marketplace) for one.
 
 ## Computer and browser control
 
@@ -252,15 +285,47 @@ On macOS, desktop control needs Screen Recording and Accessibility. macOS grants
 
 `malac web` starts the daemon if needed and prints its UI address, `127.0.0.1:7700` by default, with a token that is part of the URL (kept in `~/.malac/daemon.token`; delete it to get a new one). The UI shows live sessions, the subagent tree, streaming transcripts, tool calls and approval prompts, and every setting can be changed from it.
 
-The web UI is local-only by default. `web.remote = true` (or starting the daemon with `--remote`) listens on all interfaces and prints a LAN URL as well. The token is still required, but traffic is plain HTTP, so prefer an SSH tunnel or a reverse proxy with TLS on untrusted networks. The daemon always serves the UI, so terminal sessions need no flag for it; `malac web` prints its address.
+The web UI is local-only by default; other machines and phones use it after pairing (see [Remote access](#remote-access)). The daemon always serves the UI, so terminal sessions need no flag for it; `malac web` prints its address.
 
-The extension in [`editors/vscode`](editors/vscode) embeds the same UI in a panel and adds **Malac: Ask About Selection** and **Malac: Run in Terminal**. Download `malac-vscode-<version>.vsix` from the [latest release](https://github.com/lobirus/malac/releases/latest) and install it with `code --install-extension malac-vscode-<version>.vsix`, or via Extensions → … → Install from VSIX. The same file works in VS Code–compatible editors such as Cursor, Windsurf and VSCodium. It is not on the Marketplace yet. To work on it, open `editors/vscode` in VS Code and press F5, or:
+The extension in [`editors/vscode`](editors/vscode) puts malac in the activity bar (the pig), next to GitHub Copilot and Claude Code:
+
+- **Chat**: a native panel with streaming answers, tool cards and Allow / Always / Deny approvals inline, a model picker, the permission mode (Shift+Tab cycles it) and Stop. The open file goes along as a chip (`README.md`, or `README.md:12-30` with a selection) that you can turn off; `@` picks workspace files; drop files from the Explorer (hold Shift) or Finder, and drop or paste screenshots.
+- **Workspaces → Tabs → Agents**, **Jobs** (log tail, kill) and **Sessions** trees, and a **Usage** view with tokens and cost today, over the week and per model.
+- A status bar item with running agents and waiting approvals, approval notifications when the chat is hidden, and commands: Ask About Selection, Add File to Context, New Agent, New Tab for This Folder, Stop Agent, Open Full UI (the web UI in a panel), Restart Daemon.
+
+It connects to the daemon in `~/.malac/daemon.json`, or starts one with `malac web`, and offers a tab for the workspace folder (the repository root when the folder sits inside a larger repository). See [editors/vscode/README.md](editors/vscode/README.md). Download `malac-vscode-<version>.vsix` from the [latest release](https://github.com/lobirus/malac/releases/latest) and install it with `code --install-extension malac-vscode-<version>.vsix`, or via Extensions → … → Install from VSIX. The same file works in VS Code–compatible editors such as Cursor, Windsurf and VSCodium. It is not on the Marketplace yet. To work on it, open `editors/vscode` in VS Code and press F5, or:
 
 ```bash
-cd editors/vscode && npm install && npx tsc -p . && code --extensionDevelopmentPath="$PWD" /path/to/project
+cd editors/vscode && npm install && npm test && code --extensionDevelopmentPath="$PWD" /path/to/project
 ```
 
-Set `malac.path` if `malac` is not on your `PATH`.
+Set `malac.path` if `malac` is not on your `PATH` (the extension also looks in `~/.local/bin`, `~/.cargo/bin` and Homebrew).
+
+## Remote access
+
+Run the agents on a server and command them from your laptop or phone. Remote access is opt-in: `web.remote = true` or `malac daemon start --remote`. The master token never leaves the daemon's machine; every other device pairs once for a token of its own, which you can revoke.
+
+```bash
+# on the server
+malac daemon start --remote
+malac remote pair                     # a code valid for ten minutes, and a QR code for a phone
+
+# on the laptop
+malac remote add server http://192.168.1.20:7700 --pair ABCDE-FGHJK
+malac -C server                       # the full-screen UI on the server's daemon (also --plain, -p, prompts)
+```
+
+| Way | |
+|---|---|
+| Same network | `--remote`, then the server's address |
+| SSH tunnel | `ssh -N -L 7700:127.0.0.1:7700 server`, then `http://127.0.0.1:7700`; works with remote access off |
+| Cloudflare Tunnel, ngrok, Tailscale | `malac tunnel cloudflare`, `ngrok`, `tailscale` or `tailscale-funnel`: the daemon runs the tool, prints the public address and stops it when it stops (`[remote] tunnel` starts one with it) |
+
+In the terminal UI, the **Connection** menu switches between this computer and saved daemons (remembered for the next `malac`), and Connection → Remote access shows whether others may connect, the addresses, the paired devices, keep-awake, how to connect and a pairing QR code. The web UI has the same under Settings → Remote access, and a browser opened at a daemon's address shows a pairing form. `malac remote devices` and `malac remote revoke <id>` manage devices.
+
+While agents or jobs run, the daemon keeps the machine awake (`caffeinate` on macOS, `systemd-inhibit` on Linux), and releases it a minute after; `daemon.keep_awake = "always"` or `"off"` changes that. A MacBook still sleeps when its lid closes, unless it is in clamshell mode.
+
+See [docs/remote.md](docs/remote.md) for pairing, devices, tunnels, the security model, keep-awake and what apps need.
 
 ## Updating
 
@@ -270,17 +335,18 @@ Set `malac.path` if `malac` is not on your `PATH`.
 
 Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "allow cargo commands without asking". It changes its own configuration with the `malac_configure` tool, asking for approval first.
 
-`~/.malac/config.toml` for you, `.malac/config.toml` for a project, `AGENTS.md` (or `MALAC.md`, `CLAUDE.md`) for instructions. See [docs/configuration.md](docs/configuration.md) and [examples/config.toml](examples/config.toml).
+`~/.malac/config.toml` for you, `.malac/config.toml` for a project, `AGENTS.md` (or any of the other instruction files) for instructions, `.malac/plugins.toml` for the project's plugins. See [docs/configuration.md](docs/configuration.md) and [examples/config.toml](examples/config.toml).
 
 ## Things to know
 
 - **Early software.** malac is at 0.1. macOS is the primary platform, Linux works, and Windows is untested. Expect rough edges and breaking config changes before 1.0.
 - **Autopilot means autopilot.** With `-y` the agent runs commands and edits files without asking. Deny rules still apply, but they are pattern matches, not a sandbox. Use it in repositories you can restore.
 - **Project config is restricted.** A repository's `.malac/config.toml` cannot set the mode, providers, MCP servers, control service, permissions, memory, web UI, update settings or profiles unless you set `trust_project_config = true`. Cloning a repository is never enough to make malac run its commands.
+- **Plugins are code.** Hooks and MCP servers from plugins run on your machine with your permissions once you approve them. Read what `malac plugin show` lists before approving, as you would before running a script from the internet.
 - **Your data stays local.** Transcripts are JSONL files in `~/.malac/sessions` and memories are Markdown files, both readable and deletable. Anything you paste into a prompt, including an API key, ends up in that session's transcript. Prefer `api_key_env` or `malac provider add --api-key-stdin`, which writes `~/.malac/credentials.toml` with owner-only permissions.
 - **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
 - **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.
-- **The web UI is local unless you say otherwise.** It needs the per-run token in the URL. `web.remote = true` (or `malac daemon start --remote`) listens on your network over plain HTTP; use an SSH tunnel or a TLS proxy outside trusted networks.
+- **The web UI is local unless you say otherwise.** Its token works only on the daemon's machine. With remote access on, paired devices connect over plain HTTP unless a tunnel or proxy adds TLS; use an SSH tunnel, Tailscale or a TLS proxy outside trusted networks. A paired device can do everything you can, so revoke lost ones.
 - **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions and the daemon keep their version until you restart them (`malac daemon restart`).
 - **The daemon keeps running.** Agents started through it continue after the terminal closes, until they finish; the daemon itself exits after two idle hours. It keeps the environment it was started with, so restart it after changing API key variables.
 - **Models without vision** get screenshots described by `vision_model` when you mark them `vision = false`.

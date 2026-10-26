@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "release-tools",
+  "version": "1.0.0",
+  "description": "Changelog entries, release notes and a guard against force pushes",
+  "author": { "name": "malac" },
+  "license": "MIT",
+  "keywords": ["release", "changelog"]
+}

@@ -2,16 +2,18 @@
 
 mod agents;
 mod fs;
+mod index;
 mod jobs;
 mod mcp;
 mod memory;
 mod search;
 mod settings;
 mod shell;
+mod skill;
 mod todo;
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -113,6 +115,31 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub cancel: CancellationToken,
     pub files: FileTracker,
+    /// Variables the agent's shell commands get, like `SKILL_DIR`.
+    pub env: SessionEnv,
+}
+
+/// Environment variables for an agent's shell commands, set as it works
+/// (loading a skill sets `SKILL_DIR`).
+#[derive(Clone, Default)]
+pub struct SessionEnv(Arc<Mutex<BTreeMap<String, String>>>);
+
+impl SessionEnv {
+    pub fn set(&self, key: &str, value: impl Into<String>) {
+        self.0.lock().unwrap().insert(key.to_owned(), value.into());
+    }
+
+    pub fn vars(&self) -> BTreeMap<String, String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// `export` lines for these variables, to put before a script.
+    pub fn exports(&self) -> String {
+        self.vars()
+            .iter()
+            .map(|(k, v)| format!("export {k}='{}'\n", v.replace('\'', "'\\''")))
+            .collect()
+    }
 }
 
 impl ToolContext {
@@ -181,6 +208,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(search::Grep),
         Arc::new(web::WebFetch),
         Arc::new(todo::Todos),
+        Arc::new(skill::Load),
+        Arc::new(index::ProjectIndex),
         Arc::new(memory::Save),
         Arc::new(memory::Search),
         Arc::new(memory::Forget),
@@ -195,6 +224,38 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
 
 /// Names of tools that manage subagents, hidden once the depth limit is reached.
 pub const AGENT_TOOLS: &[&str] = &["agent_spawn", "agent_wait", "agent_send", "agent_list"];
+
+/// Claude Code's names for the built-in tools, as plugins' agents and hooks use them.
+const CLAUDE_NAMES: &[(&str, &str)] = &[
+    ("read", "Read"),
+    ("write", "Write"),
+    ("edit", "Edit"),
+    ("edit", "MultiEdit"),
+    ("bash", "Bash"),
+    ("glob", "Glob"),
+    ("grep", "Grep"),
+    ("web_fetch", "WebFetch"),
+    ("todo", "TodoWrite"),
+    ("agent_spawn", "Task"),
+    ("agent_spawn", "Agent"),
+    ("skill", "Skill"),
+];
+
+/// The Claude Code name of a built-in tool, e.g. `Bash` for `bash`.
+pub fn claude_name(tool: &str) -> Option<&'static str> {
+    CLAUDE_NAMES
+        .iter()
+        .find(|(ours, _)| *ours == tool)
+        .map(|(_, theirs)| *theirs)
+}
+
+/// The built-in tool a Claude Code tool name means, e.g. `bash` for `Bash`.
+pub fn from_claude_name(name: &str) -> Option<&'static str> {
+    CLAUDE_NAMES
+        .iter()
+        .find(|(_, theirs)| *theirs == name)
+        .map(|(ours, _)| *ours)
+}
 
 /// `key=value` pairs, with strings unquoted: `url=https://example.com ref=3`.
 pub fn summarize_arguments(input: &Value) -> String {

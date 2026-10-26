@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use malac_core::permission::Mode;
 
 use crate::protocol::{Launch, TabOptions, WorkspaceChoice};
-use crate::{commands, daemon, repl, tui, web};
+use crate::{commands, daemon, plugins, project, remotes, repl, tui, web};
 
 /// Multi-Agent Loop for Autonomous Coding. `malac <prompt>` starts working
 /// on the prompt right away; `malac` alone opens an interactive session.
@@ -60,6 +60,10 @@ pub struct RunArgs {
     /// Name the new tab, or with -n the new workspace.
     #[arg(long)]
     pub name: Option<String>,
+    /// Use the daemon of a saved connection (`malac remote list`) instead
+    /// of this machine's; `local` is this machine.
+    #[arg(short = 'C', long = "connect", value_name = "NAME")]
+    pub connect: Option<String>,
 }
 
 /// Options shared by the terminal and `malac web`.
@@ -169,6 +173,22 @@ enum Command {
     },
     /// Show connected MCP servers and their tools.
     Mcp,
+    /// Manage plugins and the marketplaces they come from.
+    Plugin {
+        #[command(subcommand)]
+        action: plugins::PluginAction,
+    },
+    /// Build or update the project index (.malac/index.md).
+    Index(project::IndexArgs),
+    /// Show the instruction files, docs, index, skills, commands and plugins a session here uses.
+    Context(project::ContextArgs),
+    /// Pair devices, list and revoke them, and save connections to daemons elsewhere.
+    Remote {
+        #[command(subcommand)]
+        action: Option<remotes::RemoteAction>,
+    },
+    /// Give the daemon a public address through cloudflared, ngrok or Tailscale.
+    Tunnel(remotes::TunnelArgs),
     /// Run the computer and browser control service (`malac-control`).
     Control {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -212,7 +232,12 @@ fn prompt_starts_with_subcommand(args: &[OsString], err: &clap::Error) -> bool {
         "models",
         "update",
         "mcp",
+        "plugin",
+        "index",
+        "context",
         "control",
+        "remote",
+        "tunnel",
     ];
     first_positional.is_some_and(|a| names.contains(&a.to_string_lossy().as_ref()))
 }
@@ -240,6 +265,11 @@ pub async fn main() -> i32 {
         Some(Command::Models) => commands::models().await.map(|_| 0),
         Some(Command::Update { check }) => commands::update(check).await.map(|_| 0),
         Some(Command::Mcp) => commands::mcp().await.map(|_| 0),
+        Some(Command::Plugin { action }) => plugins::run(action).await.map(|_| 0),
+        Some(Command::Index(args)) => project::index(args).map(|_| 0),
+        Some(Command::Context(args)) => project::context(args).map(|_| 0),
+        Some(Command::Remote { action }) => remotes::remote(action).await,
+        Some(Command::Tunnel(args)) => remotes::tunnel(args).await,
         Some(Command::Control { args }) => commands::control(&args),
     };
     match result {
@@ -301,6 +331,28 @@ mod tests {
             parse(&["malac", "workspaces"]).command,
             Some(Command::Workspaces { action: None })
         ));
+    }
+
+    #[test]
+    fn connections_and_remote_commands() {
+        let cli = parse(&["malac", "-C", "bstation", "--plain"]);
+        assert_eq!(cli.run.connect.as_deref(), Some("bstation"));
+        assert!(cli.run.plain);
+        let cli = parse(&["malac", "--connect=bstation", "fix", "it"]);
+        assert_eq!(cli.run.connect.as_deref(), Some("bstation"));
+        assert_eq!(cli.run.prompt.join(" "), "fix it");
+        assert!(matches!(
+            parse(&["malac", "remote", "pair"]).command,
+            Some(Command::Remote {
+                action: Some(remotes::RemoteAction::Pair { json: false })
+            })
+        ));
+        assert!(matches!(
+            parse(&["malac", "tunnel", "cloudflare"]).command,
+            Some(Command::Tunnel(_))
+        ));
+        let cli = parse(&["malac", "remote", "control", "of", "the", "build"]);
+        assert_eq!(cli.run.prompt.join(" "), "remote control of the build");
     }
 
     #[test]

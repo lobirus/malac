@@ -16,6 +16,7 @@ mod jobs;
 mod markdown;
 mod menu;
 mod pig;
+mod remote;
 mod select;
 mod term;
 mod text;
@@ -38,6 +39,7 @@ use tokio::sync::mpsc;
 
 use crate::RunArgs;
 use crate::client::{Client, Events};
+use crate::connections::Endpoint;
 use crate::protocol::Snapshot;
 use app::{App, Backend};
 pub use term::log_writer;
@@ -51,7 +53,19 @@ const FRAME: Duration = Duration::from_millis(16);
 /// `config` is the user's, for what only the interface uses: whether
 /// thinking shows and the models' context windows.
 pub async fn run(
+    connection: (Client, Events, Snapshot),
+    args: &RunArgs,
+    config: Config,
+    cwd: &Path,
+    prompt: String,
+) -> Result<()> {
+    run_on(connection, Endpoint::Local, args, config, cwd, prompt).await
+}
+
+/// The same on a given daemon; `cwd` is a directory on its machine.
+pub async fn run_on(
     (client, events, snapshot): (Client, Events, Snapshot),
+    endpoint: Endpoint,
     args: &RunArgs,
     config: Config,
     cwd: &Path,
@@ -61,7 +75,7 @@ pub async fn run(
 
     let (updates_tx, updates) = mpsc::unbounded_channel();
     let (connections_tx, connections) = mpsc::unbounded_channel();
-    let backend = Backend::new(client, updates_tx, connections_tx);
+    let backend = Backend::new(client, endpoint, updates_tx, connections_tx);
     let app = App::new(
         backend,
         config,
@@ -97,7 +111,11 @@ async fn goodbye(app: &App) -> String {
         1 => "1 agent keeps running in the daemon".to_owned(),
         n => format!("{n} agents keep running in the daemon"),
     };
-    format!("{agents} · `malac` reattaches to {}", app.workspace_name)
+    let place = match app.connection_name() {
+        Some(name) => format!("{name} › {}", app.workspace_name),
+        None => app.workspace_name.clone(),
+    };
+    format!("{agents} · `malac` reattaches to {place}")
 }
 
 async fn event_loop(
@@ -153,10 +171,14 @@ async fn event_loop(
                 }
             },
             Some(connection) = connections.recv() => {
-                let (client, fresh, snapshot) = connection;
-                events = fresh;
+                events = connection.events;
                 listening = true;
-                app.reconnected(client, snapshot);
+                match connection.switched {
+                    Some((endpoint, launched)) => {
+                        app = app.switched(connection.client, endpoint, connection.snapshot, launched);
+                    }
+                    None => app.reconnected(connection.client, connection.snapshot),
+                }
                 app.dirty = true;
             }
             Some(update) = updates.recv() => {

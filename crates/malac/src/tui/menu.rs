@@ -19,7 +19,7 @@ pub const TITLES: [(&str, char); 7] = [
     ("Mode", 'o'),
     ("Agents", 'a'),
     ("View", 'v'),
-    ("Web", 'w'),
+    ("Connection", 'c'),
     ("Help", 'h'),
 ];
 

@@ -10,6 +10,9 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use super::{Tool, ToolContext, ToolKind, ToolOutput, str_arg};
 use crate::config;
+use crate::event::Event;
+use crate::permission::{Decision, PermissionRequest};
+use crate::plugins::{Manager, NeedsApproval, Scope};
 use crate::update;
 
 const REFERENCE: &str = include_str!("../../../../docs/configuration.md");
@@ -25,8 +28,10 @@ impl Tool for Settings {
     fn description(&self) -> String {
         "Inspect malac itself: `config` shows the user and project config files and the merged result, \
          `reference` documents every setting, `models` lists the models each provider offers, `status` \
-         shows the version, available updates and tool servers. `use_model` switches this session's model \
-         from the next message on. Use `malac_configure` to change settings."
+         shows the version, available updates and tool servers, `context` the instruction files, docs, \
+         project index, skills, commands and plugins this session uses, `plugins` the installed plugins and \
+         known marketplaces. `use_model` switches this session's model from the next message on. Use \
+         `malac_configure` to change settings and manage plugins."
             .into()
     }
 
@@ -34,7 +39,7 @@ impl Tool for Settings {
         json!({
             "type": "object",
             "properties": {
-                "show": { "type": "string", "enum": ["config", "reference", "models", "status"] },
+                "show": { "type": "string", "enum": ["config", "reference", "models", "status", "context", "plugins"] },
                 "use_model": { "type": "string", "description": "provider/model to switch this session to" }
             }
         })
@@ -150,9 +155,51 @@ async fn inspect(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
                 runtime.agents().len(),
             )
         }
+        "context" => runtime.context_report().render(),
+        "plugins" => plugins_text(ctx)?,
         other => bail!("unknown `show` value `{other}`"),
     };
     Ok(ToolOutput::text(text))
+}
+
+fn manager(ctx: &ToolContext) -> Manager {
+    Manager::new(
+        &config::home_dir(),
+        Some(&ctx.runtime.project_root),
+        &ctx.cwd,
+        ctx.runtime.config.plugins.defaults,
+    )
+}
+
+fn plugins_text(ctx: &ToolContext) -> Result<String> {
+    let manager = manager(ctx);
+    let mut out = vec!["Plugins:".to_owned()];
+    for plugin in manager.list()? {
+        let state = if plugin.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let error = plugin.error.map(|e| format!(" ({e})")).unwrap_or_default();
+        out.push(format!(
+            "- {} {} [{state}]{error}: {}",
+            plugin.id,
+            plugin.version.unwrap_or_default(),
+            plugin.description.unwrap_or_default()
+        ));
+    }
+    out.push("\nMarketplaces:".into());
+    for market in manager.list_marketplaces()? {
+        let names: Vec<&str> = market.plugins.iter().map(|p| p.name.as_str()).collect();
+        out.push(format!(
+            "- {} ({}, {}): {}",
+            market.name,
+            market.scope.as_str(),
+            market.source,
+            market.error.unwrap_or_else(|| names.join(", "))
+        ));
+    }
+    Ok(out.join("\n"))
 }
 
 pub struct Configure;
@@ -168,8 +215,12 @@ impl Tool for Configure {
          config file by dotted path, e.g. `providers.openrouter.base_url` or `models.\"lora/smart\".context_window`; \
          comments in the file are kept and the result is validated before saving. Check `malac_settings` \
          (`reference`) for valid keys. `set_api_key` stores a provider key securely (prefer `api_key_env` when \
-         the user keeps keys in the environment). `install_update` installs the latest release. Saved settings \
-         apply to new sessions."
+         the user keeps keys in the environment). `install_update` installs the latest release. Plugins: \
+         `marketplace_add` (a `source`: folder, owner/repo, git URL or marketplace.json URL), `marketplace_remove`, \
+         `marketplace_update`, `plugin_install`, `plugin_enable`, `plugin_disable`, `plugin_uninstall` and \
+         `plugin_update` (a `plugin`: name or name@marketplace); `file` picks the user or project scope. \
+         Enabling a plugin that runs code (hooks, MCP servers, scripts) asks the user. Saved settings and \
+         plugins apply to new sessions."
             .into()
     }
 
@@ -177,11 +228,17 @@ impl Tool for Configure {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["set", "unset", "set_api_key", "remove_api_key", "install_update"] },
+                "action": { "type": "string", "enum": [
+                    "set", "unset", "set_api_key", "remove_api_key", "install_update",
+                    "marketplace_add", "marketplace_remove", "marketplace_update",
+                    "plugin_install", "plugin_enable", "plugin_disable", "plugin_uninstall", "plugin_update"
+                ] },
                 "file": { "type": "string", "enum": ["user", "project"], "default": "user" },
                 "key": { "type": "string", "description": "Dotted path; quote segments containing dots or slashes" },
                 "value": { "description": "Any JSON value for `set`" },
                 "provider": { "type": "string", "description": "Provider name for the API key actions" },
+                "source": { "type": "string", "description": "Marketplace source for marketplace_add" },
+                "plugin": { "type": "string", "description": "Plugin or marketplace name for the plugin actions" },
                 "api_key": { "type": "string" }
             },
             "required": ["action"]
@@ -202,6 +259,17 @@ impl Tool for Configure {
             "unset" => format!("{file} config: remove {key}"),
             "set_api_key" => format!("store the API key for {provider}"),
             "remove_api_key" => format!("remove the API key for {provider}"),
+            "marketplace_add" => format!(
+                "{file}: add marketplace {}",
+                input["source"].as_str().unwrap_or_default()
+            ),
+            action if action.starts_with("plugin_") || action.starts_with("marketplace_") => {
+                format!(
+                    "{} {}",
+                    action.replace('_', " "),
+                    input["plugin"].as_str().unwrap_or("(all)")
+                )
+            }
             other => other.to_owned(),
         }
     }
@@ -212,6 +280,8 @@ impl Tool for Configure {
         let target = input["key"]
             .as_str()
             .or(input["provider"].as_str())
+            .or(input["plugin"].as_str())
+            .or(input["source"].as_str())
             .unwrap_or_default();
         vec![format!("{action}:{target}")]
     }
@@ -277,8 +347,122 @@ async fn configure(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
                 status.current
             )))
         }
+        action if action.starts_with("plugin_") || action.starts_with("marketplace_") => {
+            manage_plugins(action, input, ctx).await
+        }
         other => bail!("unknown action `{other}`"),
     }
+}
+
+async fn manage_plugins(action: &str, input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    let manager = manager(ctx);
+    let scope = match input["file"].as_str().unwrap_or("user") {
+        "user" => Scope::User,
+        "project" => Scope::Project,
+        other => bail!("unknown file `{other}` (expected user or project)"),
+    };
+    let plugin = input["plugin"].as_str();
+    let named = || plugin.context("this action needs `plugin`");
+    let applies = "It applies to new sessions; the web UI can apply it now.";
+    let text = match action {
+        "marketplace_add" => {
+            let catalog = manager
+                .add_marketplace(str_arg(input, "source")?, scope)
+                .await?;
+            let names: Vec<&str> = catalog.plugins.iter().map(|p| p.name.as_str()).collect();
+            format!(
+                "Added the marketplace `{}` with {} plugins: {}. Install one with plugin_install `<plugin>@{}`.",
+                catalog.name,
+                names.len(),
+                names.join(", "),
+                catalog.name
+            )
+        }
+        "marketplace_remove" => {
+            manager.remove_marketplace(named()?, scope)?;
+            format!("Removed the marketplace `{}`.", named()?)
+        }
+        "marketplace_update" => manager.update_marketplaces(plugin).await?.join("\n"),
+        "plugin_install" => {
+            let installed = manager.install(named()?).await?;
+            let id = installed.id.clone();
+            let enabled = enable(&manager, &id, scope, ctx).await?;
+            format!(
+                "Installed {}.\n{}\n{enabled} {applies}",
+                id,
+                installed.describe()
+            )
+        }
+        "plugin_enable" => {
+            let message = enable(&manager, named()?, scope, ctx).await?;
+            format!("{message} {applies}")
+        }
+        "plugin_disable" => format!("Disabled {}. {applies}", manager.disable(named()?, scope)?),
+        "plugin_uninstall" => format!("Uninstalled {}.", manager.uninstall(named()?)?),
+        "plugin_update" => manager.update(plugin).await?.join("\n"),
+        other => bail!("unknown action `{other}`"),
+    };
+    Ok(ToolOutput::text(text))
+}
+
+/// Enables a plugin, asking the user first, whatever the permission mode,
+/// when it runs code that was not approved before.
+async fn enable(manager: &Manager, spec: &str, scope: Scope, ctx: &ToolContext) -> Result<String> {
+    let needs = match manager.enable(spec, scope, false) {
+        Ok(id) => {
+            return Ok(format!(
+                "Enabled {id} in the {} plugins file.",
+                scope.as_str()
+            ));
+        }
+        Err(err) => match err.downcast::<NeedsApproval>() {
+            Ok(needs) => needs,
+            Err(err) => return Err(err),
+        },
+    };
+    let request = PermissionRequest {
+        id: uuid::Uuid::now_v7().to_string(),
+        call_id: String::new(),
+        agent: ctx.agent.clone(),
+        agent_label: ctx
+            .runtime
+            .agent(&ctx.agent)
+            .map(|a| a.info().label.clone())
+            .unwrap_or_default(),
+        tool: "malac_configure".into(),
+        summary: format!(
+            "enable plugin {}, which runs {}",
+            needs.id,
+            needs.parts.join(", ")
+        ),
+        input: json!({ "plugin": needs.id, "contents": needs.summary }),
+    };
+    ctx.emit(Event::PermissionRequested {
+        request_id: request.id.clone(),
+        call_id: request.call_id.clone(),
+        tool: request.tool.clone(),
+        summary: request.summary.clone(),
+        input: request.input.clone(),
+    });
+    let decision = ctx.runtime.approver().approve(&request).await;
+    ctx.emit(Event::PermissionResolved {
+        request_id: request.id,
+        allowed: decision != Decision::Deny,
+    });
+    if decision == Decision::Deny {
+        bail!(
+            "the user did not approve enabling {}; it stays installed but off. They can run `malac plugin enable {}` themselves.\n{}",
+            needs.id,
+            needs.id,
+            needs.summary
+        );
+    }
+    let id = manager.enable(&needs.id, scope, true)?;
+    Ok(format!(
+        "Enabled {id} in the {} plugins file; the user approved its {}.",
+        scope.as_str(),
+        needs.parts.join(", ")
+    ))
 }
 
 fn project_config(ctx: &ToolContext) -> PathBuf {

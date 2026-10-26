@@ -1,0 +1,13 @@
+# A project's .malac/plugins.toml, committed so the team shares its plugins.
+# Teammates run `malac plugin install` once to install what it enables; hooks
+# and MCP servers still run only after each of them approves them.
+
+[marketplaces]
+# A folder (relative to the project), owner/repo on GitHub, a git URL, or the URL of a marketplace.json.
+malac-examples = "./tools/marketplace"
+team = "git@gitlab.example.com:platform/agent-plugins.git#main"
+
+[plugins]
+"release-tools@malac-examples" = true
+# Built-in plugins can be turned off per project too.
+"ponytail@malac" = false

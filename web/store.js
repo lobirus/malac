@@ -3,9 +3,11 @@
 // agent events) keep it up to date. Also cached REST resources and a
 // per-frame render scheduler.
 
-import { emptyUsage, firstLine, sessionStore, setUserHome, toast, truncate } from "./dom.js";
+import { emptyUsage, firstLine, local, sessionStore, setUserHome, toast, truncate } from "./dom.js";
 
 const TOKEN_KEY = "malac.token";
+/** A paired browser's device token, kept across restarts (see remote.js). */
+const DEVICE_KEY = "malac.device";
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
 const NEW_AGENT_WINDOW_MS = 5_000;
@@ -27,6 +29,10 @@ export const state = {
   jobs: new Map(),
   control: null,
   update: null,
+  // Remote access and keep-awake, from the snapshot.
+  remote: null,
+  awake: null,
+  remoteChanges: 0,
   models: [],
   defaultModel: null,
   shutdown: null,
@@ -64,7 +70,7 @@ export class HttpError extends Error {
 
 export function readToken() {
   const token = params.get("token");
-  if (!token) return sessionStore.get(TOKEN_KEY);
+  if (!token) return sessionStore.get(TOKEN_KEY) ?? local.get(DEVICE_KEY);
   sessionStore.set(TOKEN_KEY, token);
   params.delete("token");
   const query = params.toString();
@@ -158,7 +164,32 @@ export function viewAgent(id, defaults) {
 
 // WebSocket
 
+/** Forgets the token this page used, after the daemon refused it. */
+export function forgetToken() {
+  if (sessionStore.get(TOKEN_KEY) === state.token) sessionStore.set(TOKEN_KEY, null);
+  if (local.get(DEVICE_KEY) === state.token) local.set(DEVICE_KEY, null);
+  state.token = null;
+  state.socket?.close();
+}
+
+let onAuthFailed = () => {};
+
+/** Called when the daemon no longer accepts this page's token, e.g. revoked. */
+export function setAuthFailedHandler(fn) {
+  onAuthFailed = fn;
+}
+
+async function tokenRefused() {
+  try {
+    const response = await fetch("/api/daemon", { headers: { Authorization: `Bearer ${state.token}` } });
+    return response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
 export function connect() {
+  if (!state.token) return;
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   const version = state.pageVersion ? `&version=${encodeURIComponent(state.pageVersion)}` : "";
   const socket = new WebSocket(`${scheme}://${location.host}/api/ws?token=${encodeURIComponent(state.token)}${version}`);
@@ -180,8 +211,11 @@ export function connect() {
     for (const { reject } of state.callbacks.values()) reject(new Error("Disconnected from malac"));
     state.callbacks.clear();
     setConnection("offline");
-    setTimeout(connect, state.backoff);
-    state.backoff = Math.min(state.backoff * 2, RECONNECT_MAX_MS);
+    tokenRefused().then((refused) => {
+      if (refused) return onAuthFailed();
+      setTimeout(connect, state.backoff);
+      state.backoff = Math.min(state.backoff * 2, RECONNECT_MAX_MS);
+    });
   });
 }
 
@@ -268,6 +302,13 @@ function receive(message) {
     case "clients":
       if (state.daemon) state.daemon.clients = message.clients;
       return invalidate("settings", "home");
+    case "remote":
+      state.remote = message.remote;
+      state.remoteChanges += 1;
+      return invalidate("settings");
+    case "awake":
+      state.awake = message.awake;
+      return invalidate("settings", "header");
     case "notice":
       return toast(message.message, message.level === "error" ? "error" : message.level === "warning" ? "warning" : "info");
     case "reloaded":
@@ -302,6 +343,8 @@ function applySnapshot(snapshot) {
   state.jobs = new Map((snapshot.jobs ?? []).map((job) => [job.id, job]));
   state.update = snapshot.update ?? state.update;
   state.control = snapshot.control ?? null;
+  state.remote = snapshot.remote ?? null;
+  state.awake = snapshot.awake ?? null;
   state.models = snapshot.models ?? [];
   state.defaultModel = snapshot.default_model ?? null;
   state.shutdown = null;

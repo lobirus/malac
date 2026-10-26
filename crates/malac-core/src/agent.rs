@@ -18,16 +18,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::attach;
 use crate::catalog::AgentType;
+use crate::commands;
 use crate::config::ModelConfig;
 use crate::event::{AgentId, Event, Level, TurnStatus};
 use crate::message::{Block, Message, Role, StopReason, Usage};
 use crate::permission::{Decision, PermissionRequest, Verdict};
+use crate::plugins::hooks::{self, Decision as HookDecision};
 use crate::prompt::{self, PromptInputs};
 use crate::provider::{Completion, Delta, ProviderError, Request, ToolSpec};
 use crate::runtime::{AgentSpec, Runtime};
 use crate::session::{self, Record, SessionLog, SessionMeta, Transcript};
 use crate::tools::{
-    AGENT_TOOLS, FileTracker, Tool, ToolContext, ToolKind, ToolOutput, truncate_chars,
+    AGENT_TOOLS, FileTracker, SessionEnv, Tool, ToolContext, ToolKind, ToolOutput, truncate_chars,
     truncate_middle,
 };
 
@@ -323,14 +325,18 @@ pub(crate) fn spawn(
         shared,
         choice,
         system,
+        resumed: !messages.is_empty(),
         messages,
         tools,
         specs,
         log,
         files: FileTracker::default(),
+        env: SessionEnv::default(),
         last_context: 0,
         image_notes: HashMap::new(),
         recall_failed: false,
+        started: false,
+        agent_type: agent_type.map(|t| t.name),
     };
     tokio::spawn(agent.run(rx));
     Ok(handle)
@@ -380,11 +386,18 @@ struct Agent {
     specs: Vec<ToolSpec>,
     log: SessionLog,
     files: FileTracker,
+    /// Variables for its shell commands.
+    env: SessionEnv,
     /// Context size reported for the latest request.
     last_context: u64,
     /// Descriptions of images, for models without vision.
     image_notes: HashMap<u64, String>,
     recall_failed: bool,
+    /// Whether the session-start hooks ran.
+    started: bool,
+    /// Continued from a saved transcript.
+    resumed: bool,
+    agent_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -501,9 +514,53 @@ impl Agent {
         cancel: &CancellationToken,
     ) -> Result<String> {
         let text = attach::typed_text(&content);
+        let top = self.shared.info.depth == 0;
+        let mut expansion = None;
+        if let Some((name, args)) = commands::parse_invocation(&text).filter(|_| top) {
+            if name == "context" && args.is_empty() {
+                return Ok(self.show_context(&text));
+            }
+            match self.runtime.command(name) {
+                Ok(Some(command)) => expansion = Some(command.expand(args)),
+                Ok(None) if args.is_empty() => bail!("unknown command /{name} (try /help)"),
+                Ok(None) => {}
+                Err(err) => bail!(err),
+            }
+        }
         self.emit(Event::UserMessage {
             text: with_attachment_list(&text, &content),
         });
+        if let Some(expansion) = expansion {
+            if let Some(dir) = &expansion.skill_dir {
+                self.env.set("SKILL_DIR", dir.display().to_string());
+            }
+            content.push(Block::text(format!(
+                "{}\n{}\n</command-expansion>",
+                attach::COMMAND_EXPANSION,
+                expansion.text
+            )));
+        }
+        self.start_session().await;
+        if self.runtime.hooks.has("UserPromptSubmit") {
+            let outcome = self
+                .runtime
+                .hooks
+                .prompt_submit(&self.hook_session(), &text)
+                .await;
+            if let Some(reason) = outcome.blocked {
+                bail!(reason);
+            }
+            if !outcome.context.is_empty() {
+                content.insert(
+                    0,
+                    Block::text(format!(
+                        "{}\n{}\n</hook-context>",
+                        attach::HOOK_CONTEXT,
+                        outcome.context.join("\n\n")
+                    )),
+                );
+            }
+        }
         if let Some(recalled) = self.recall(&text).await {
             content.insert(0, Block::text(recalled));
         }
@@ -557,6 +614,58 @@ impl Agent {
             if steps > max_steps {
                 return Ok(message.text());
             }
+        }
+    }
+
+    /// `/context`: answered here, without the model, and kept out of the history.
+    fn show_context(&self, typed: &str) -> String {
+        self.emit(Event::UserMessage {
+            text: typed.to_owned(),
+        });
+        let report = self.runtime.context_report().render();
+        // Streamed like a model's answer, so every front end shows it.
+        self.emit(Event::TextDelta {
+            text: report.clone(),
+        });
+        self.emit(Event::AssistantMessage {
+            message: Message::assistant(vec![Block::text(report.clone())]),
+        });
+        report
+    }
+
+    fn hook_session(&self) -> hooks::Session<'_> {
+        hooks::Session {
+            id: &self.shared.info.id,
+            cwd: &self.shared.info.cwd,
+            project_dir: &self.runtime.project_root,
+        }
+    }
+
+    /// Runs the plugins' session-start hooks once, before the first
+    /// request, and adds what they print to the system prompt.
+    async fn start_session(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let hooks = &self.runtime.hooks;
+        if !hooks.has("SessionStart") && !hooks.has("SubagentStart") {
+            return;
+        }
+        let source = if self.resumed { "resume" } else { "startup" };
+        let subagent = (self.shared.info.depth > 0).then(|| {
+            self.agent_type
+                .clone()
+                .unwrap_or_else(|| "general-purpose".into())
+        });
+        let context = hooks
+            .session_start(&self.hook_session(), source, subagent.as_deref())
+            .await;
+        if !context.is_empty() {
+            self.system.push_str(&format!(
+                "\n\n# Context from plugins\n\n{}",
+                context.join("\n\n")
+            ));
         }
     }
 
@@ -700,14 +809,41 @@ impl Agent {
     }
 
     async fn run_tools(&mut self, calls: &[Call], cancel: &CancellationToken) -> Vec<Block> {
+        let mut calls = calls.to_vec();
         let mut outputs: Vec<Option<ToolOutput>> = vec![None; calls.len()];
         let mut approved: Vec<(usize, Arc<dyn Tool>)> = Vec::new();
-        for (index, call) in calls.iter().enumerate() {
+        for index in 0..calls.len() {
+            let call = &mut calls[index];
             let Some(tool) = self.tools.iter().find(|t| t.name() == call.name).cloned() else {
                 outputs[index] = Some(ToolOutput::error(format!("unknown tool `{}`", call.name)));
                 continue;
             };
-            match self.authorize(tool.as_ref(), call, cancel).await {
+            let mut hook = None;
+            if self.runtime.hooks.has("PreToolUse") {
+                let session = hooks::Session {
+                    id: &self.shared.info.id,
+                    cwd: &self.shared.info.cwd,
+                    project_dir: &self.runtime.project_root,
+                };
+                let outcome = self
+                    .runtime
+                    .hooks
+                    .pre_tool(&session, &call.name, &call.input)
+                    .await;
+                if let Some(input) = outcome.input {
+                    call.input = input;
+                }
+                if let Some(HookDecision::Deny(reason)) = &outcome.decision {
+                    outputs[index] =
+                        Some(ToolOutput::error(format!("Blocked by a hook: {reason}")));
+                    continue;
+                }
+                hook = outcome.decision;
+            }
+            match self
+                .authorize(tool.as_ref(), &calls[index], hook, cancel)
+                .await
+            {
                 Ok(()) => approved.push((index, tool)),
                 Err(reason) => outputs[index] = Some(ToolOutput::error(reason)),
             }
@@ -720,6 +856,7 @@ impl Agent {
             cwd: self.shared.info.cwd.clone(),
             cancel: cancel.clone(),
             files: self.files.clone(),
+            env: self.env.clone(),
         };
         // Consecutive safe tools run together; anything else runs alone, in order.
         let mut rest = approved.as_slice();
@@ -750,6 +887,32 @@ impl Agent {
             }
         }
 
+        if self.runtime.hooks.has("PostToolUse") {
+            let session = self.hook_session();
+            for (index, _) in &approved {
+                let (Some(output), call) = (outputs[*index].as_mut(), &calls[*index]) else {
+                    continue;
+                };
+                let feedback = self
+                    .runtime
+                    .hooks
+                    .post_tool(
+                        &session,
+                        &call.name,
+                        &call.input,
+                        &output.preview(),
+                        output.is_error,
+                    )
+                    .await;
+                if !feedback.is_empty() {
+                    output.content.push(Block::text(format!(
+                        "<hook-feedback>\n{}\n</hook-feedback>",
+                        feedback.join("\n")
+                    )));
+                }
+            }
+        }
+
         calls
             .iter()
             .zip(outputs)
@@ -762,17 +925,21 @@ impl Agent {
             .collect()
     }
 
+    /// A hook may allow a call the policy would ask about, or ask about one
+    /// it would allow; deny rules win either way.
     async fn authorize(
         &self,
         tool: &dyn Tool,
         call: &Call,
+        hook: Option<HookDecision>,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
         let policy = &self.runtime.policy;
-        match policy.check(tool, &call.input) {
-            Verdict::Allow => return Ok(()),
-            Verdict::Deny(reason) => return Err(reason),
-            Verdict::Ask => {}
+        match (policy.check(tool, &call.input), hook) {
+            (Verdict::Deny(reason), _) => return Err(reason),
+            (_, Some(HookDecision::Allow)) => return Ok(()),
+            (Verdict::Allow, None | Some(HookDecision::Deny(_))) => return Ok(()),
+            (Verdict::Allow, Some(HookDecision::Ask(_))) | (Verdict::Ask, _) => {}
         }
         let request = PermissionRequest {
             id: uuid::Uuid::now_v7().to_string(),

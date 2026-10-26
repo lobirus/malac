@@ -108,6 +108,7 @@ async fn get_settings(State(state): Shared) -> ApiResult {
         "agent_types": agent_types,
         "skills": skills,
         "instructions": instructions,
+        "context": runtime.context_report(),
         "reloadable": !state.hub.is_attached(),
     })))
 }

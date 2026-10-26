@@ -69,6 +69,23 @@ max_concurrent = 4
 # The background daemon that holds workspaces, tabs and agents.
 [daemon]
 idle_minutes = 120
+keep_awake = "busy"          # hold off sleep while agents or jobs run; "always" or "off"
+
+# Remote access (docs/remote.md): paired devices on other machines may connect.
+# [web]
+# remote = true
+# [remote]
+# tunnel = "cloudflare"      # or "ngrok", "tailscale", "tailscale-funnel"
+
+# What a session reads about its project; `malac context` shows the result.
+[context]
+instruction_files = ["docs/agent-guide.md"]
+max_instruction_chars = 40000
+index = true
+
+[plugins]
+# Set false to turn off the built-in ponytail plugin.
+defaults = true
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"

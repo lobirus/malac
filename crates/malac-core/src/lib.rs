@@ -4,13 +4,17 @@
 pub mod agent;
 pub mod attach;
 pub mod catalog;
+pub mod commands;
 pub mod config;
+pub mod context;
 pub mod event;
+pub mod frontmatter;
 pub mod jobs;
 pub mod mcp;
 pub mod memory;
 pub mod message;
 pub mod permission;
+pub mod plugins;
 pub mod prompt;
 pub mod provider;
 pub mod runtime;

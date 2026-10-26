@@ -50,6 +50,10 @@ impl Scope {
 pub struct Entry {
     pub name: String,
     pub description: String,
+    /// For project memories: `command`, `convention`, `gotcha`,
+    /// `decision` or `note`, the section of `.malac/MALAC.md` it is listed in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub scope: Scope,
     pub body: String,
     pub path: PathBuf,
@@ -129,8 +133,13 @@ impl Memory {
     }
 
     /// Short index for the system prompt; bodies are read on demand.
-    pub fn prompt_index(&self) -> String {
-        let entries = self.list();
+    /// `scope` limits it to one scope.
+    pub fn prompt_index(&self, scope: Option<Scope>) -> String {
+        let entries: Vec<Entry> = self
+            .list()
+            .into_iter()
+            .filter(|e| scope.is_none_or(|s| e.scope == s))
+            .collect();
         if entries.is_empty() {
             return String::new();
         }
@@ -154,6 +163,7 @@ impl Memory {
         scope: Scope,
         name: &str,
         description: &str,
+        kind: Option<&str>,
         body: &str,
     ) -> Result<Entry> {
         let name = slug(name);
@@ -164,8 +174,10 @@ impl Memory {
         tokio::fs::create_dir_all(dir).await?;
         let path = dir.join(format!("{name}.md"));
         let description = description.lines().next().unwrap_or_default().trim();
+        let kind = kind.map(str::trim).filter(|k| !k.is_empty());
+        let kind_line = kind.map(|k| format!("kind: {k}\n")).unwrap_or_default();
         let text = format!(
-            "---\nname: {name}\ndescription: {description}\nupdated: {}\n---\n\n{}\n",
+            "---\nname: {name}\ndescription: {description}\n{kind_line}updated: {}\n---\n\n{}\n",
             Utc::now().to_rfc3339(),
             body.trim()
         );
@@ -174,6 +186,7 @@ impl Memory {
         let entry = Entry {
             name,
             description: description.to_owned(),
+            kind: kind.map(str::to_owned),
             scope,
             body: body.trim().to_owned(),
             path,
@@ -236,8 +249,25 @@ impl Memory {
         Ok(entries.len())
     }
 
+    /// Project memories are listed in `.malac/MALAC.md`, which replaces
+    /// the `MEMORY.md` index earlier versions wrote; global ones in
+    /// `~/.malac/memory/MEMORY.md`.
     fn write_index(&self, scope: Scope) -> Result<()> {
         let dir = self.dir(scope);
+        if scope == Scope::Project {
+            let entries: Vec<Entry> = self
+                .list()
+                .into_iter()
+                .filter(|e| e.scope == scope)
+                .collect();
+            let malac_dir = dir.parent().unwrap_or(dir);
+            crate::context::knowledge::write(malac_dir, &entries)?;
+            let legacy = dir.join(INDEX_FILE);
+            if legacy.exists() {
+                std::fs::remove_file(legacy)?;
+            }
+            return Ok(());
+        }
         let mut lines = vec!["# Memory".to_owned(), String::new()];
         for entry in self.list().into_iter().filter(|e| e.scope == scope) {
             lines.push(format!(
@@ -265,6 +295,7 @@ fn parse_entry(text: &str, scope: Scope, path: PathBuf) -> Entry {
     Entry {
         name: field("name").unwrap_or(fallback_name),
         description: field("description").unwrap_or_default(),
+        kind: field("kind").or_else(|| field("type")),
         scope,
         body: body.trim().to_owned(),
         path,
@@ -466,6 +497,7 @@ mod tests {
                 Scope::Project,
                 "Build command",
                 "how to build",
+                Some("command"),
                 "Run `make release` for builds.",
             )
             .await
@@ -475,21 +507,31 @@ mod tests {
                 Scope::Global,
                 "editor",
                 "user editor preference",
+                None,
                 "Uses Helix.",
             )
             .await
             .unwrap();
         assert_eq!(memory.list().len(), 2);
-        assert!(memory.prompt_index().contains("build-command"));
+        assert!(memory.prompt_index(None).contains("build-command"));
+        assert!(
+            !memory
+                .prompt_index(Some(Scope::Global))
+                .contains("build-command")
+        );
         let hits = memory.search("how do I build a release", 5).await.unwrap();
         assert_eq!(hits[0].entry.name, "build-command");
-        let index =
-            std::fs::read_to_string(project.path().join(".malac/memory/MEMORY.md")).unwrap();
-        assert!(index.contains("build-command"));
+        assert_eq!(hits[0].entry.kind.as_deref(), Some("command"));
+        let knowledge = std::fs::read_to_string(project.path().join(".malac/MALAC.md")).unwrap();
+        assert!(knowledge.contains("## Commands\n\n- **build-command** — how to build"));
+        assert!(!project.path().join(".malac/memory/MEMORY.md").exists());
+        assert!(home.path().join("memory/MEMORY.md").exists());
         memory
             .forget(Scope::Project, "build-command")
             .await
             .unwrap();
         assert_eq!(memory.list().len(), 1);
+        let knowledge = std::fs::read_to_string(project.path().join(".malac/MALAC.md")).unwrap();
+        assert!(!knowledge.contains("build-command"));
     }
 }

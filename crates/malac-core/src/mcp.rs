@@ -174,13 +174,20 @@ async fn connect(server: &McpServerConfig) -> Result<(Client, Vec<malac_mcp::Too
         .and_then(|var| std::env::var(var).ok());
     let client = match (&server.command, &server.url) {
         (Some(command), _) => {
-            let args: Vec<String> = server.args.iter().map(|a| expand_env(a)).collect();
+            let expand = |value: &str| {
+                if server.literal {
+                    value.to_owned()
+                } else {
+                    expand_env(value)
+                }
+            };
+            let args: Vec<String> = server.args.iter().map(|a| expand(a)).collect();
             let env: HashMap<String, String> = server
                 .env
                 .iter()
-                .map(|(k, v)| (k.clone(), expand_env(v)))
+                .map(|(k, v)| (k.clone(), expand(v)))
                 .collect();
-            Client::stdio(&expand_env(command), &args, &env, None).await?
+            Client::stdio(&expand(command), &args, &env, server.cwd.as_deref()).await?
         }
         (None, Some(url)) if url.starts_with("ws://") || url.starts_with("wss://") => {
             Client::websocket(url, token.as_deref()).await?
@@ -189,7 +196,14 @@ async fn connect(server: &McpServerConfig) -> Result<(Client, Vec<malac_mcp::Too
             let mut headers: HashMap<String, String> = server
                 .headers
                 .iter()
-                .map(|(k, v)| (k.clone(), expand_env(v)))
+                .map(|(k, v)| {
+                    let value = if server.literal {
+                        v.clone()
+                    } else {
+                        expand_env(v)
+                    };
+                    (k.clone(), value)
+                })
                 .collect();
             if let Some(token) = token {
                 headers.insert("Authorization".into(), format!("Bearer {token}"));

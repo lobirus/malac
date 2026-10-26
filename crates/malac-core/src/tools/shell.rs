@@ -111,12 +111,15 @@ async fn run_foreground(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> 
         .unwrap_or(DEFAULT_TIMEOUT)
         .clamp(1, MAX_TIMEOUT);
 
-    let mut child = shell_command(&format!("exec 2>&1\n{script}"), &ctx.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to start shell")?;
+    let mut child = shell_command(
+        &format!("exec 2>&1\n{}{script}", ctx.env.exports()),
+        &ctx.cwd,
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true)
+    .spawn()
+    .context("failed to start shell")?;
     let pid = child.id();
 
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -182,7 +185,11 @@ enum Outcome {
 
 async fn run_background(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let script = str_arg(input, "command")?;
-    let job = ctx.runtime.jobs.start(script, &ctx.cwd, Some(&ctx.agent))?;
+    let script = format!("{}{script}", ctx.env.exports());
+    let job = ctx
+        .runtime
+        .jobs
+        .start(&script, &ctx.cwd, Some(&ctx.agent))?;
     // Front ends read the pid and the log path, which comes last, from this text.
     Ok(ToolOutput::text(format!(
         "Started job {} in the background (pid {}). Check on it with job_output and stop it \

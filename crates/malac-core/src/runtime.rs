@@ -9,13 +9,17 @@ use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 
 use crate::agent::{self, AgentHandle, AgentSnapshot};
-use crate::catalog::{self, AgentType, Instructions, Skill};
+use crate::catalog::{self, AgentType, Skill};
+use crate::commands::{self, Command};
 use crate::config::{self, Config};
+use crate::context::instructions::Instructions;
+use crate::context::{self, ProjectContext};
 use crate::event::{AgentId, Event, EventBus};
 use crate::jobs::Jobs;
 use crate::mcp::{McpPool, ServerStatus};
 use crate::memory::Memory;
 use crate::permission::{Approver, DenyAll, Policy};
+use crate::plugins::{self, Plugin, hooks::Hooks};
 use crate::provider::{self, Provider};
 use crate::session;
 use crate::tools::{self, Tool};
@@ -28,9 +32,20 @@ pub struct Runtime {
     pub bus: EventBus,
     pub memory: Memory,
     pub policy: Policy,
+    /// The instruction files in the system prompt, from `context`.
     pub instructions: Vec<Instructions>,
+    /// Instruction files, docs, the project index and knowledge.
+    pub context: ProjectContext,
     pub agent_types: Vec<AgentType>,
     pub skills: Vec<Skill>,
+    /// Custom slash commands, skills among them.
+    pub commands: Vec<Command>,
+    /// The enabled plugins.
+    pub plugins: Vec<Plugin>,
+    /// Their approved hooks.
+    pub hooks: Hooks,
+    /// Problems with plugins and skills found while loading.
+    pub warnings: Vec<String>,
     /// Background processes started by agents.
     pub jobs: Arc<Jobs>,
     /// Limits how many subagents run at once.
@@ -108,7 +123,7 @@ impl Runtime {
     }
 
     fn build(
-        config: Config,
+        mut config: Config,
         cwd: PathBuf,
         bus: EventBus,
         jobs: Arc<Jobs>,
@@ -118,6 +133,25 @@ impl Runtime {
         let home = config::home_dir();
         let project_root = config::project_root(&cwd);
         let policy = Policy::new(config.mode, &config.permissions)?;
+
+        let loaded = plugins::load(&home, &project_root, &config.plugins);
+        for (name, server) in loaded.mcp {
+            // A server the user configured under the same name wins.
+            config.mcp.entry(name).or_insert(server);
+        }
+        let user_home = dirs::home_dir();
+        let context = ProjectContext::load(&config.context, &home, &project_root, &cwd);
+        let (skills, skill_warnings) =
+            catalog::skills(&home, user_home.as_deref(), &project_root, &loaded.plugins);
+        let commands = commands::discover(
+            &home,
+            user_home.as_deref(),
+            &project_root,
+            &loaded.plugins,
+            &skills,
+        );
+        let mut warnings = loaded.warnings;
+        warnings.extend(skill_warnings);
 
         let embedder = match &config.memory.embeddings {
             Some(embeddings) if config.memory.vector.is_some() => {
@@ -130,9 +164,14 @@ impl Runtime {
         let memory = Memory::new(config.memory.clone(), &home, &project_root, embedder);
 
         Ok(Arc::new(Self {
-            instructions: catalog::instructions(&home, &project_root, &cwd),
-            agent_types: catalog::agent_types(&home, &project_root),
-            skills: catalog::skills(&home, &project_root),
+            instructions: context.instructions.loaded.clone(),
+            agent_types: catalog::agent_types(&home, &project_root, &loaded.plugins),
+            context,
+            skills,
+            commands,
+            plugins: loaded.plugins,
+            hooks: loaded.hooks,
+            warnings,
             agent_slots: Semaphore::new(config.agents.max_concurrent.max(1)),
             providers: Mutex::new(HashMap::new()),
             tools: RwLock::new(tools::builtin()),
@@ -272,8 +311,68 @@ impl Runtime {
             .insert(name.to_owned(), provider);
     }
 
+    /// An agent type by name, or by the part after `plugin:` when that is unique.
     pub fn agent_type(&self, name: &str) -> Option<&AgentType> {
-        self.agent_types.iter().find(|t| t.name == name)
+        if let Some(exact) = self.agent_types.iter().find(|t| t.name == name) {
+            return Some(exact);
+        }
+        let mut matches = self
+            .agent_types
+            .iter()
+            .filter(|t| t.name.rsplit(':').next() == Some(name));
+        match (matches.next(), matches.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The custom command `/name` runs; `Err` when the name is ambiguous.
+    pub fn command(&self, name: &str) -> Result<Option<&Command>, String> {
+        commands::find(&self.commands, name)
+    }
+
+    /// What `/context` shows: instruction files, docs, index, knowledge,
+    /// skills, commands, agent types and plugins.
+    pub fn context_report(&self) -> context::Report {
+        let manager = plugins::Manager::new(
+            &config::home_dir(),
+            Some(&self.project_root),
+            &self.cwd,
+            self.config.plugins.defaults,
+        );
+        let mut warnings = self.warnings.clone();
+        let plugins = match manager.list() {
+            Ok(list) => list,
+            Err(err) => {
+                warnings.push(format!("plugins: {err:#}"));
+                Vec::new()
+            }
+        };
+        context::Report {
+            layout: self.context.layout.clone(),
+            instructions: self.context.instructions.clone(),
+            docs: self.context.docs.clone(),
+            index: self.context.index.as_ref().map(|i| i.status()),
+            knowledge: context::KnowledgeStatus::of(&self.project_root),
+            skills: self.skills.clone(),
+            commands: self.commands.iter().map(|c| c.info.clone()).collect(),
+            agent_types: self.agent_types.clone(),
+            plugins: if self.config.plugins.enabled {
+                plugins
+            } else {
+                Vec::new()
+            },
+            warnings,
+        }
+    }
+
+    /// The small part of the context front ends show with a tab: where it
+    /// sits in its repository, and its custom commands for completion.
+    pub fn project_summary(&self) -> context::Summary {
+        context::Summary {
+            layout: self.context.layout.clone(),
+            commands: self.commands.iter().map(|c| c.info.clone()).collect(),
+        }
     }
 
     pub fn spawn_agent(self: &Arc<Self>, spec: AgentSpec) -> Result<AgentHandle> {

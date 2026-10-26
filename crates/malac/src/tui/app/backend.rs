@@ -11,16 +11,23 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::client::{self, DaemonFile};
+use crate::client::{self, DaemonFile, Launched};
+use crate::connections::{Connections, Endpoint};
 use crate::daemon::ServeArgs;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::protocol::{AttachmentInput, Command, ImageInput};
+use crate::protocol::{AttachmentInput, Command, ImageInput, Launch, WorkspaceChoice};
 
 /// A connection the event loop takes over: the client, its events and the
-/// snapshot that opened it.
-pub type Connection = (Client, Events, Snapshot);
+/// snapshot that opened it. `switched` is set when it is to another daemon,
+/// with what was opened there.
+pub struct Connection {
+    pub client: Client,
+    pub events: Events,
+    pub snapshot: Snapshot,
+    pub switched: Option<(Endpoint, Launched)>,
+}
 
 /// What a command's reply is for.
 #[derive(Debug, Clone)]
@@ -65,10 +72,15 @@ pub enum Rest {
     UpdateChecked,
     UpdateInstalled,
     DaemonStopped,
+    Devices,
+    Pairing,
+    Revoked,
 }
 
 pub struct Backend {
     client: Option<Arc<Client>>,
+    /// The daemon this terminal talks to.
+    endpoint: Endpoint,
     updates: mpsc::UnboundedSender<Update>,
     connections: mpsc::UnboundedSender<Connection>,
     /// Commands and REST calls made without a daemon, for tests.
@@ -81,11 +93,13 @@ pub struct Backend {
 impl Backend {
     pub fn new(
         client: Client,
+        endpoint: Endpoint,
         updates: mpsc::UnboundedSender<Update>,
         connections: mpsc::UnboundedSender<Connection>,
     ) -> Self {
         Self {
             client: Some(Arc::new(client)),
+            endpoint,
             updates,
             connections,
             #[cfg(test)]
@@ -102,6 +116,7 @@ impl Backend {
         let (connections, _) = mpsc::unbounded_channel();
         let backend = Self {
             client: None,
+            endpoint: Endpoint::Local,
             updates,
             connections,
             sent: Arc::default(),
@@ -125,6 +140,16 @@ impl Backend {
 
     pub fn connect(&mut self, client: Client) {
         self.client = Some(Arc::new(client));
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// Talks to another daemon from now on.
+    pub fn switch_to(&mut self, client: Client, endpoint: Endpoint) {
+        self.client = Some(Arc::new(client));
+        self.endpoint = endpoint;
     }
 
     pub fn disconnect(&mut self) {
@@ -172,6 +197,99 @@ impl Backend {
                 .await
                 .map_err(|e| format!("{e:#}"));
             let _ = updates.send(Update::Rest(rest, result));
+        });
+    }
+
+    fn delete(&self, path: String, rest: Rest) {
+        let Some(client) = self.client.clone() else {
+            #[cfg(test)]
+            self.rests.lock().unwrap().push(rest);
+            return;
+        };
+        let updates = self.updates.clone();
+        tokio::spawn(async move {
+            let result = client
+                .delete::<Value>(&path)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            let _ = updates.send(Update::Rest(rest, result));
+        });
+    }
+
+    pub fn devices(&self) {
+        self.get("/api/devices".into(), Rest::Devices);
+    }
+
+    pub fn create_pairing(&self) {
+        self.post("/api/pair/codes", json!({}), Rest::Pairing);
+    }
+
+    pub fn revoke(&self, id: &str) {
+        self.delete(format!("/api/devices/{id}"), Rest::Revoked);
+    }
+
+    /// Asks every other known daemon for its workspaces, for the switcher.
+    pub fn other_workspaces(&self) {
+        let mut others: Vec<Endpoint> = Connections::load()
+            .map(|saved| saved.connections.into_iter().map(Endpoint::Saved).collect())
+            .unwrap_or_default();
+        others.insert(0, Endpoint::Local);
+        others.retain(|e| e != &self.endpoint);
+        for endpoint in others {
+            let updates = self.updates.clone();
+            tokio::spawn(async move {
+                let file = match &endpoint {
+                    Endpoint::Local => client::running().await,
+                    Endpoint::Saved(c) => Some(c.file()),
+                };
+                let result = match file {
+                    None => Err("not running".to_owned()),
+                    Some(file) => {
+                        let ask = client::get::<Value>(&file, "/api/workspaces");
+                        match tokio::time::timeout(std::time::Duration::from_secs(4), ask).await {
+                            Ok(Ok(value)) => serde_json::from_value(value["workspaces"].clone())
+                                .map_err(|e| e.to_string()),
+                            Ok(Err(err)) => Err(text::first_line(&format!("{err:#}")).to_owned()),
+                            Err(_) => Err("no answer".to_owned()),
+                        }
+                    }
+                };
+                let _ = updates.send(Update::OtherWorkspaces(endpoint, result));
+            });
+        }
+    }
+
+    /// Connects to another daemon and opens a workspace there: `workspace`,
+    /// else the one it used last. The event loop takes the connection over.
+    pub fn switch(&self, endpoint: Endpoint, workspace: Option<String>, cwd: PathBuf) {
+        let connections = self.connections.clone();
+        let updates = self.updates.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let (client, events, snapshot) = endpoint.connect().await?;
+                let launched = client
+                    .launch(Launch {
+                        workspace: workspace.map_or(WorkspaceChoice::Last, WorkspaceChoice::Open),
+                        cwd,
+                        ..Default::default()
+                    })
+                    .await?;
+                anyhow::Ok(Connection {
+                    client,
+                    events,
+                    snapshot,
+                    switched: Some((endpoint, launched)),
+                })
+            }
+            .await;
+            match result {
+                Ok(connection) => {
+                    let _ = connections.send(connection);
+                }
+                Err(err) => {
+                    let _ = updates.send(Update::SwitchFailed(format!("{err:#}")));
+                }
+            }
         });
     }
 
@@ -237,29 +355,40 @@ impl Backend {
         );
     }
 
-    /// Connects again in the background. With `start`, a daemon is started
-    /// if none runs; otherwise it waits for one to appear.
+    /// Connects again in the background. With `start`, a local daemon is
+    /// started if none runs; otherwise it waits for one to appear. A daemon
+    /// elsewhere is retried for a minute.
     pub fn reconnect(&self, start: bool) {
         let connections = self.connections.clone();
         let updates = self.updates.clone();
+        let endpoint = self.endpoint.clone();
         tokio::spawn(async move {
             let mut last_error = String::new();
             for attempt in 0.. {
                 if attempt > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
-                let connected = match start {
+                let connected = match (&endpoint, start) {
+                    (Endpoint::Saved(_), _) if attempt >= 30 => break,
+                    (Endpoint::Saved(c), _) => Client::connect(&c.file()).await,
                     // A stopping daemon may still hold the lock for a moment.
-                    true if attempt < 5 => Client::connect_or_start(&ServeArgs::default()).await,
-                    true => break,
-                    false => match client::running().await {
+                    (Endpoint::Local, true) if attempt < 5 => {
+                        Client::connect_or_start(&ServeArgs::default()).await
+                    }
+                    (Endpoint::Local, true) => break,
+                    (Endpoint::Local, false) => match client::running().await {
                         Some(file) => Client::connect(&file).await,
                         None => continue,
                     },
                 };
                 match connected {
-                    Ok(connection) => {
-                        let _ = connections.send(connection);
+                    Ok((client, events, snapshot)) => {
+                        let _ = connections.send(Connection {
+                            client,
+                            events,
+                            snapshot,
+                            switched: None,
+                        });
                         return;
                     }
                     Err(err) => last_error = format!("{err:#}"),
@@ -541,6 +670,30 @@ impl App {
                 }
             }
             (Rest::Tools | Rest::Memory, Err(err)) => self.notice(Level::Error, err),
+            (Rest::Devices, result) => {
+                let devices = result.and_then(|v| {
+                    serde_json::from_value::<Vec<crate::protocol::DeviceView>>(v["devices"].clone())
+                        .map_err(|e| e.to_string())
+                });
+                if let Some(Overlay::Remote(dialog)) = &mut self.overlay {
+                    if let Ok(list) = &devices {
+                        dialog.selected = dialog.selected.min(list.len().saturating_sub(1));
+                    }
+                    dialog.devices = Some(devices);
+                }
+            }
+            (Rest::Pairing, result) => {
+                let pairing =
+                    result.and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
+                if let Some(Overlay::Remote(dialog)) = &mut self.overlay {
+                    dialog.pairing = Some(pairing);
+                }
+            }
+            (Rest::Revoked, Ok(value)) => {
+                let name = value["revoked"]["name"].as_str().unwrap_or("the device");
+                self.flash_ok(format!("revoked {name}"));
+            }
+            (Rest::Revoked, Err(err)) => self.flash(format!("cannot revoke: {err}")),
         }
     }
 

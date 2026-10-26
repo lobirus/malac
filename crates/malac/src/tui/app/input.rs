@@ -148,6 +148,7 @@ impl App {
             Overlay::Rename(rename) => rename.key(key),
             Overlay::Confirm(confirm) => confirm.key(key),
             Overlay::Update(dialog) => dialog.key(key, &self.update),
+            Overlay::Remote(dialog) => dialog.key(key),
         };
         self.outcome(outcome)
     }
@@ -166,6 +167,9 @@ impl App {
                         | Action::CheckUpdate
                         | Action::StopAgent(_)
                         | Action::StopJob(_)
+                        | Action::PairDevice
+                        | Action::RemoteDialog
+                        | Action::RevokeDevice(_)
                 );
                 if !keep {
                     self.overlay = None;
@@ -389,7 +393,10 @@ impl App {
             "cd" if arg.is_empty() => Some(Action::FolderDialog),
             "cd" => {
                 let home = dirs_home().map(PathBuf::from);
+                let remote = self.connection_name().is_some();
                 let path = match (arg.strip_prefix('~'), home) {
+                    // A daemon elsewhere resolves `~` to its own home.
+                    (Some(_), _) if remote => PathBuf::from(arg),
                     (Some(rest), Some(home)) => home.join(rest.trim_start_matches('/')),
                     _ => self.tab_cwd().join(arg),
                 };
@@ -440,6 +447,14 @@ impl App {
             Slash::Mcp => Action::ShowMcp,
             Slash::Memory => Action::ShowMemory,
             Slash::Web(_) => Action::ShowWeb,
+            Slash::Forward(command) => {
+                let attachments = std::mem::take(&mut self.attachments);
+                self.send(Prompt {
+                    text: format!("/{command}"),
+                    attachments,
+                });
+                return None;
+            }
         })
     }
 

@@ -64,11 +64,14 @@ pub struct DaemonFile {
     pub token: String,
     pub pid: u32,
     pub version: String,
-    /// The UI URLs with the token, including the LAN one when remote.
+    /// The UI URL with the token. It works on the daemon's machine only.
     #[serde(default)]
     pub urls: Vec<String>,
     #[serde(default)]
     pub started: Option<DateTime<Utc>>,
+    /// The saved connection this describes, for a daemon on another machine.
+    #[serde(skip)]
+    pub connection: Option<String>,
 }
 
 impl DaemonFile {
@@ -96,21 +99,43 @@ impl DaemonFile {
         }
     }
 
-    /// The web UI address with the token.
-    pub fn web_url(&self) -> String {
-        format!("{}/?token={}", self.url, self.token)
+    /// A daemon elsewhere, reached with a device token.
+    pub fn remote(name: &str, url: &str, token: &str) -> Self {
+        Self {
+            url: url.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            pid: 0,
+            version: String::new(),
+            urls: vec![url.to_owned()],
+            started: None,
+            connection: Some(name.to_owned()),
+        }
     }
 
-    fn ws_url(&self) -> String {
+    /// The web UI address: with the master token for the local daemon. A
+    /// browser pairs on its own with a daemon elsewhere.
+    pub fn web_url(&self) -> String {
+        match self.connection {
+            Some(_) => format!("{}/", self.url),
+            None => format!("{}/?token={}", self.url, self.token),
+        }
+    }
+
+    /// The WebSocket request. The token goes in a header, so proxy and
+    /// tunnel logs never see it in a URL.
+    fn ws_request(&self) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let base = self
             .url
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
-        format!(
-            "{base}/api/ws?token={}&version={}",
-            self.token,
-            update::CURRENT
-        )
+        let mut request =
+            format!("{base}/api/ws?version={}", update::CURRENT).into_client_request()?;
+        request.headers_mut().insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.token).parse()?,
+        );
+        Ok(request)
     }
 }
 
@@ -181,7 +206,7 @@ pub struct Client {
 impl Client {
     /// Connects to the daemon described by `file`.
     pub async fn connect(file: &DaemonFile) -> Result<(Self, Events, Snapshot)> {
-        let (socket, _) = tokio_tungstenite::connect_async(file.ws_url())
+        let (socket, _) = tokio_tungstenite::connect_async(file.ws_request()?)
             .await
             .with_context(|| format!("cannot connect to the malac daemon at {}", file.url))?;
         let (mut sink, mut stream) = socket.split();
@@ -347,6 +372,17 @@ impl Client {
         decode(response).await
     }
 
+    /// `DELETE /api/...`.
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .http
+            .delete(format!("{}{path}", self.file.url))
+            .bearer_auth(&self.file.token)
+            .send()
+            .await?;
+        decode(response).await
+    }
+
     /// The daemon's status, as `malac daemon status` shows it.
     pub async fn info(&self) -> Result<DaemonInfo> {
         self.get("/api/daemon").await
@@ -388,6 +424,19 @@ pub async fn get<T: DeserializeOwned>(file: &DaemonFile, path: &str) -> Result<T
         .build()?;
     let response = http
         .get(format!("{}{path}", file.url))
+        .bearer_auth(&file.token)
+        .send()
+        .await?;
+    decode(response).await
+}
+
+/// One-off REST `DELETE`.
+pub async fn delete<T: DeserializeOwned>(file: &DaemonFile, path: &str) -> Result<T> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = http
+        .delete(format!("{}{path}", file.url))
         .bearer_auth(&file.token)
         .send()
         .await?;

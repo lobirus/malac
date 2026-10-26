@@ -158,6 +158,10 @@ impl App {
                     browser.click(*index, count)
                 }
                 (Overlay::Jobs(view), Some(Target::Pick(index))) => view.click(*index),
+                (Overlay::Remote(dialog), Some(Target::Pick(index))) => {
+                    dialog.selected = *index;
+                    Outcome::Stay
+                }
                 (_, Some(Target::Do(action))) => Outcome::Run(action.clone()),
                 (Overlay::Menu(menu), Some(Target::MenuTitle(index))) => {
                     if menu.place == Place::Bar(*index) {

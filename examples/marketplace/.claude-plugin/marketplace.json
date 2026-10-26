@@ -1,0 +1,16 @@
+{
+  "name": "malac-examples",
+  "description": "An example marketplace that Claude Code, malac and Agent Plugins clients can all read",
+  "owner": {
+    "name": "malac",
+    "url": "https://github.com/lobirus/malac"
+  },
+  "plugins": [
+    {
+      "name": "release-tools",
+      "source": "./plugins/release-tools",
+      "description": "Changelog entries, release notes and a guard against force pushes",
+      "category": "release"
+    }
+  ]
+}

@@ -3,16 +3,18 @@
 //! The web server hands it each command; it publishes each change.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use malac_core::agent::AgentInfo;
 use malac_core::attach;
-use malac_core::config::{self, Config};
+use malac_core::config::{self, Config, KeepAwake, Tunnel};
 use malac_core::event::{AgentId, Event, Level};
 use malac_core::jobs::{DEFAULT_TAIL_LINES, JobEvent, JobInfo};
 use malac_core::mcp::CONTROL_SERVER;
@@ -24,14 +26,18 @@ use malac_core::{
     AgentHandle, AgentSnapshot, AgentSpec, AgentStatus, Block, Envelope, Host, Runtime, session,
     update,
 };
-use tokio::sync::{OnceCell, broadcast, oneshot, watch};
+use tokio::sync::{Notify, OnceCell, broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use super::access::Access;
+use super::awake::{self, Awake, Runner, SystemRunner, Work};
 use super::store::{Store, Tab, Workspace};
+use super::tunnel;
 use crate::protocol::{
-    AgentView, AttachmentInput, Command, ControlStatus, DaemonInfo, DaemonStatus, ImageInput,
-    JobView, Launch, PendingApproval, ServerMessage, Snapshot, TabId, TabOptions, TabSpec, TabView,
-    WorkspaceChoice, WorkspaceId, WorkspaceSummary, WorkspaceView,
+    AgentView, AttachmentInput, AwakeStatus, Command, ControlStatus, DaemonInfo, DaemonStatus,
+    ImageInput, JobView, Launch, PairLink, Pairing, PendingApproval, RemoteStatus, RemoteUrl,
+    ServerMessage, Snapshot, TabId, TabOptions, TabSpec, TabView, TunnelState, TunnelStatus,
+    UrlKind, WorkspaceChoice, WorkspaceId, WorkspaceSummary, WorkspaceView,
 };
 
 const DEFAULT_WORKSPACE: &str = "default";
@@ -42,11 +48,23 @@ const OUTBOX: usize = 8192;
 /// Settings fixed when the daemon starts.
 #[derive(Debug, Clone)]
 pub struct HubOptions {
-    /// Whether the server listens on other interfaces too.
+    /// Whether paired devices on other machines may connect.
     pub remote: bool,
     pub idle_minutes: u64,
     /// Root of the directory picker.
     pub browse_root: PathBuf,
+    /// When to keep the machine awake, until a client changes it.
+    pub keep_awake: KeepAwake,
+    /// `remote.public_url`, offered in pairing links.
+    pub public_url: Option<String>,
+}
+
+/// Where the server listens, once it is bound.
+#[derive(Debug, Clone, Default)]
+struct Listen {
+    addr: Option<SocketAddr>,
+    /// This machine's address on the local network, when listening on all interfaces.
+    lan: Option<String>,
 }
 
 /// One client connection's view: the workspace it has open and the malac
@@ -76,6 +94,14 @@ pub struct Hub {
     control: Mutex<ControlStatus>,
     stop: watch::Sender<Option<String>>,
     reload_lock: tokio::sync::Mutex<()>,
+    access: Access,
+    awake: Mutex<Awake>,
+    /// Woken when agents or jobs start or finish, to update `awake`.
+    activity: Notify,
+    tunnel: tokio::sync::Mutex<Option<tunnel::Running>>,
+    /// The tunnel's last status, readable without waiting.
+    tunnel_status: Mutex<Option<TunnelStatus>>,
+    listen: Mutex<Listen>,
 }
 
 struct State {
@@ -93,7 +119,16 @@ impl Hub {
             .last()
             .filter(|id| workspaces.iter().any(|w| &w.id == id));
         let base = base_config()?;
-        let hub = Self::build(Host::new(), Some(store), options, base, workspaces, last);
+        let access = Access::load(config::home_dir().join("devices.json"));
+        let runner: Arc<dyn Runner> = Arc::new(SystemRunner::detect());
+        let hub = Self::build(
+            Host::new(),
+            Some(store),
+            options,
+            base,
+            (workspaces, last),
+            (access, runner),
+        );
         if let Err(err) = hub.host.jobs.restore() {
             tracing::warn!("cannot restore jobs: {err:#}");
         }
@@ -119,13 +154,18 @@ impl Hub {
             jobs: runtime.jobs.clone(),
             mcp: Arc::default(),
         };
+        let options = HubOptions {
+            keep_awake: KeepAwake::Off,
+            ..options
+        };
+        let runner: Arc<dyn Runner> = Arc::new(SystemRunner::detect());
         let hub = Self::build(
             host,
             None,
             options,
             runtime.config.clone(),
-            vec![workspace],
-            Some(ATTACHED_ID.into()),
+            (vec![workspace], Some(ATTACHED_ID.into())),
+            (Access::in_memory(), runner),
         );
         let cell = Arc::new(OnceCell::new_with(Some(runtime.clone())));
         hub.runtimes
@@ -142,8 +182,8 @@ impl Hub {
         store: Option<Store>,
         options: HubOptions,
         base: Config,
-        workspaces: Vec<Workspace>,
-        last: Option<WorkspaceId>,
+        (workspaces, last): (Vec<Workspace>, Option<WorkspaceId>),
+        (access, runner): (Access, Arc<dyn Runner>),
     ) -> Arc<Self> {
         let (out, _) = broadcast::channel(OUTBOX);
         let (stop, _) = watch::channel(None);
@@ -151,6 +191,7 @@ impl Hub {
             enabled: base.control.enabled,
             ..Default::default()
         };
+        let awake = Awake::new(options.keep_awake, runner, awake::GRACE);
         Arc::new(Self {
             host,
             store,
@@ -168,6 +209,12 @@ impl Hub {
             control: Mutex::new(control),
             stop,
             reload_lock: tokio::sync::Mutex::new(()),
+            access,
+            awake: Mutex::new(awake),
+            activity: Notify::new(),
+            tunnel: tokio::sync::Mutex::new(None),
+            tunnel_status: Mutex::new(None),
+            listen: Mutex::default(),
         })
     }
 
@@ -176,6 +223,7 @@ impl Hub {
         self.forward_host_events();
         self.start_update_checks();
         self.start_control();
+        self.watch_awake();
     }
 
     pub fn is_attached(&self) -> bool {
@@ -235,14 +283,20 @@ impl Hub {
         self.stop.send_replace(Some(reason.to_owned()));
     }
 
-    /// Cancels every agent and closes MCP connections.
+    /// Cancels every agent, closes MCP connections, stops the tunnel and
+    /// lets the machine sleep again.
     pub async fn close(&self) {
+        if let Some(running) = self.tunnel.lock().await.take() {
+            running.stop().await;
+        }
         for runtime in self.loaded() {
             runtime.shutdown().await;
         }
         if !self.is_attached() {
             self.host.mcp.close().await;
         }
+        let mut awake = self.awake.lock().unwrap();
+        awake.set_mode(KeepAwake::Off, Work::default(), Instant::now());
     }
 
     /// Counts a client while the guard lives, announcing every change.
@@ -276,6 +330,8 @@ impl Hub {
             jobs_running: self.host.jobs.running(),
             pending_approvals: self.approvals.pending().len(),
             idle_minutes: self.options.idle_minutes,
+            remote_access: self.remote_status(),
+            awake: self.awake_status(),
         }
     }
 
@@ -324,6 +380,222 @@ impl Hub {
         });
     }
 
+    // Remote access, tunnels and keep-awake
+
+    /// Paired devices and pairing codes.
+    pub fn access(&self) -> &Access {
+        &self.access
+    }
+
+    /// Records where the server listens, for status and pairing links.
+    /// `lan` is this machine's address on the network, when listening on
+    /// every interface.
+    pub fn set_listen(&self, addr: SocketAddr, lan: Option<String>) {
+        *self.listen.lock().unwrap() = Listen {
+            addr: Some(addr),
+            lan,
+        };
+    }
+
+    pub fn remote_status(&self) -> RemoteStatus {
+        let listen = self.listen.lock().unwrap().clone();
+        let tunnel = self.tunnel_status.lock().unwrap().clone();
+        let mut urls = Vec::new();
+        if self.options.remote {
+            let running = tunnel
+                .as_ref()
+                .filter(|t| t.state == TunnelState::Running)
+                .and_then(|t| t.url.clone());
+            if let Some(url) = running {
+                urls.push(RemoteUrl {
+                    kind: UrlKind::Tunnel,
+                    url,
+                });
+            }
+            if let Some(url) = &self.options.public_url {
+                urls.push(RemoteUrl {
+                    kind: UrlKind::Public,
+                    url: url.trim_end_matches('/').to_owned(),
+                });
+            }
+            if let Some(url) = listen.lan.clone() {
+                urls.push(RemoteUrl {
+                    kind: UrlKind::Lan,
+                    url,
+                });
+            }
+        }
+        if let Some(addr) = listen.addr {
+            let ip = match addr.ip() {
+                ip if ip.is_unspecified() => "127.0.0.1".to_owned(),
+                ip => ip.to_string(),
+            };
+            urls.push(RemoteUrl {
+                kind: UrlKind::Local,
+                url: format!("http://{ip}:{}", addr.port()),
+            });
+        }
+        RemoteStatus {
+            enabled: self.options.remote,
+            listen: listen.addr.map(|a| a.to_string()).unwrap_or_default(),
+            urls,
+            tunnel,
+            devices: self.access.device_count(),
+        }
+    }
+
+    /// Tells clients that remote access changed.
+    pub fn remote_changed(&self) {
+        self.publish(&ServerMessage::Remote {
+            remote: self.remote_status(),
+        });
+    }
+
+    /// A one-time pairing code and a link with it for every address.
+    pub fn pairing(&self) -> Pairing {
+        let (code, expires) = self.access.create_code();
+        let links = self
+            .remote_status()
+            .urls
+            .into_iter()
+            .map(|address| {
+                let url = format!("{}/#pair={code}", address.url);
+                let svg = crate::qr::QrCode::encode(&url)
+                    .map(|qr| qr.svg())
+                    .unwrap_or_default();
+                PairLink {
+                    kind: address.kind,
+                    base: address.url,
+                    url,
+                    svg,
+                }
+            })
+            .collect();
+        Pairing {
+            code,
+            expires,
+            links,
+        }
+    }
+
+    /// Starts a tunnel to this daemon, replacing one that runs.
+    pub async fn start_tunnel(self: &Arc<Self>, provider: Tunnel) -> Result<TunnelStatus> {
+        let port = self
+            .listen
+            .lock()
+            .unwrap()
+            .addr
+            .map(|a| a.port())
+            .context("the daemon is not listening yet")?;
+        let spec = tunnel::Spec::new(provider, port).map_err(anyhow::Error::msg)?;
+        self.start_tunnel_with(spec).await
+    }
+
+    /// Starts a tunnel from a given command, e.g. a stand-in in tests.
+    pub async fn start_tunnel_with(self: &Arc<Self>, spec: tunnel::Spec) -> Result<TunnelStatus> {
+        if self.is_attached() {
+            bail!("tunnels belong to the daemon; this server is a terminal session's");
+        }
+        if !self.options.remote {
+            bail!(
+                "remote access is off, so the daemon would refuse everything that comes through \
+                 a tunnel; restart it with `malac daemon restart --remote` or set web.remote = true"
+            );
+        }
+        let mut slot = self.tunnel.lock().await;
+        if let Some(old) = slot.take() {
+            old.stop().await;
+        }
+        let hub = Arc::downgrade(self);
+        let program = spec.program.display().to_string();
+        let running = tunnel::Running::start(spec, move |status| {
+            if let Some(hub) = hub.upgrade() {
+                *hub.tunnel_status.lock().unwrap() = Some(status);
+                hub.remote_changed();
+            }
+        })
+        .with_context(|| format!("cannot run {program}"))?;
+        let status = running.status();
+        *self.tunnel_status.lock().unwrap() = Some(status.clone());
+        *slot = Some(running);
+        drop(slot);
+        self.remote_changed();
+        Ok(status)
+    }
+
+    /// Stops the tunnel; `false` when none runs.
+    pub async fn stop_tunnel(&self) -> bool {
+        let running = self.tunnel.lock().await.take();
+        match running {
+            Some(running) => {
+                running.stop().await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn awake_status(&self) -> AwakeStatus {
+        self.awake.lock().unwrap().status().clone()
+    }
+
+    /// Replaces how keep-awake holds its assertion, for embedding and tests.
+    pub fn set_awake_runner(&self, runner: Arc<dyn Runner>, grace: Duration) {
+        let mode = self.awake_status().mode;
+        *self.awake.lock().unwrap() = Awake::new(mode, runner, grace);
+        self.update_awake(None);
+    }
+
+    /// Agents and jobs running anywhere in the daemon.
+    fn work(&self) -> Work {
+        Work {
+            agents: self
+                .loaded()
+                .iter()
+                .flat_map(|r| r.agents())
+                .filter(|a| a.status == AgentStatus::Running)
+                .count(),
+            jobs: self.host.jobs.running(),
+        }
+    }
+
+    /// Brings keep-awake in line with the work, changing its mode first
+    /// when given one. It may start a process, so call it off the runtime.
+    fn update_awake(&self, mode: Option<KeepAwake>) {
+        let work = self.work();
+        let changed = {
+            let mut awake = self.awake.lock().unwrap();
+            match mode {
+                Some(mode) => awake.set_mode(mode, work, Instant::now()),
+                None => awake.update(work, Instant::now()),
+            }
+        };
+        if changed {
+            self.publish(&ServerMessage::Awake {
+                awake: self.awake_status(),
+            });
+        }
+    }
+
+    /// Updates keep-awake when work starts or ends, and every few seconds.
+    fn watch_awake(self: &Arc<Self>) {
+        let hub = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let Some(strong) = hub.upgrade() else { break };
+                if strong.stop.borrow().is_some() {
+                    break;
+                }
+                let checking = strong.clone();
+                let _ = tokio::task::spawn_blocking(move || checking.update_awake(None)).await;
+                tokio::select! {
+                    _ = strong.activity.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+        });
+    }
+
     // Snapshots and views
 
     pub fn snapshot(&self, conn: &Conn) -> Snapshot {
@@ -346,6 +618,8 @@ impl Hub {
             control: self.control.lock().unwrap().clone(),
             models,
             default_model,
+            remote: self.remote_status(),
+            awake: self.awake_status(),
         }
     }
 
@@ -499,6 +773,7 @@ impl Hub {
             mode,
             options: tab.options.clone(),
             loaded: runtime.is_some(),
+            project: runtime.as_ref().map(|r| r.project_summary()),
             snapshots,
         }
     }
@@ -671,6 +946,9 @@ impl Hub {
         let config = apply_options(loaded.config, &tab.options);
         config.main_model()?;
         let runtime = Runtime::hosted(config, tab.cwd.clone(), &self.host)?;
+        for warning in &runtime.warnings {
+            self.notice(Level::Warning, warning.clone(), Some(tab_id));
+        }
         runtime.set_approver(self.approvals.clone());
         for (name, provider) in self.providers.lock().unwrap().iter() {
             runtime.insert_provider(name, provider.clone());
@@ -724,6 +1002,7 @@ impl Hub {
                 hub.publish(&message);
                 if turn {
                     hub.running_changed(&workspace);
+                    hub.activity.notify_one();
                 }
             }
         });
@@ -769,6 +1048,7 @@ impl Hub {
                     },
                 };
                 hub.publish(&message);
+                hub.activity.notify_one();
             }
         });
     }
@@ -1099,6 +1379,14 @@ impl Hub {
                     control,
                 }
             }
+            Command::KeepAwake { mode } => {
+                if self.is_attached() {
+                    bail!("only the daemon keeps the machine awake");
+                }
+                let hub = self.clone();
+                tokio::task::spawn_blocking(move || hub.update_awake(Some(mode))).await?;
+                self.ack(None, None)
+            }
             Command::Ping => ServerMessage::Pong { client_ref: None },
         };
         Ok(Some(reply))
@@ -1298,10 +1586,7 @@ impl Hub {
 
     async fn launch(self: &Arc<Self>, conn: &mut Conn, launch: Launch) -> Result<ServerMessage> {
         self.refuse_attached()?;
-        let cwd = launch
-            .cwd
-            .canonicalize()
-            .with_context(|| format!("cannot open {}", launch.cwd.display()))?;
+        let cwd = resolve_dir(&launch.cwd)?;
         let mut workspace = match &launch.workspace {
             WorkspaceChoice::New => {
                 let name = match &launch.name {
@@ -1520,13 +1805,7 @@ impl Hub {
             None => self.ensure_workspace(conn)?,
         };
         conn.workspace = Some(workspace.clone());
-        let cwd = spec
-            .cwd
-            .canonicalize()
-            .with_context(|| format!("cannot open {}", spec.cwd.display()))?;
-        if !cwd.is_dir() {
-            bail!("{} is not a directory", cwd.display());
-        }
+        let cwd = resolve_dir(&spec.cwd)?;
         if spec.reuse {
             let existing = self
                 .workspace(&workspace)
@@ -1746,6 +2025,23 @@ fn base_config() -> Result<Config> {
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// A directory on the daemon's machine. Clients elsewhere send `~`, `~/…`
+/// or a path relative to the home directory, since theirs means nothing here.
+fn resolve_dir(dir: &Path) -> Result<PathBuf> {
+    let text = dir.to_string_lossy();
+    let path = match text.as_ref() {
+        "" | "~" => home(),
+        text => attach::resolve(text, &home()),
+    };
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("cannot open {} on the daemon's machine", dir.display()))?;
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    Ok(path)
 }
 
 fn apply_options(mut config: Config, options: &TabOptions) -> Config {

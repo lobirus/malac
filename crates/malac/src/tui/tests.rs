@@ -30,6 +30,7 @@ use super::text;
 use super::theme::theme;
 use super::ui::draw;
 use crate::client::{Client, DaemonFile, Events};
+use crate::connections::Endpoint;
 use crate::daemon::{Daemon, ServeArgs};
 use crate::protocol::{
     AgentView, Command, ControlStatus, DaemonStatus, JobView, Launch, ServerMessage, Snapshot,
@@ -74,6 +75,7 @@ enabled = false
 
 [daemon]
 idle_minutes = 0
+keep_awake = "off"
 "#,
         )
         .unwrap();
@@ -120,6 +122,7 @@ fn tab(id: &str, name: &str, agents: &[&str]) -> TabView {
         options: TabOptions::default(),
         loaded: true,
         snapshots: agents.iter().map(|a| agent(a, "main", None)).collect(),
+        project: None,
     }
 }
 
@@ -176,6 +179,8 @@ fn snapshot() -> Snapshot {
         control: ControlStatus::default(),
         models: vec!["lora/smart".into(), "lora/fast".into()],
         default_model: Some("lora/smart".into()),
+        remote: Default::default(),
+        awake: Default::default(),
     }
 }
 
@@ -1284,6 +1289,105 @@ async fn prompts_queue_while_busy_and_stop_drops_them() {
 }
 
 #[tokio::test]
+async fn remote_access_dialog_pairing_and_keep_awake() {
+    use crate::protocol::{AwakeStatus, RemoteStatus, RemoteUrl, UrlKind};
+    use malac_core::config::KeepAwake;
+    let mut app = app();
+    let url = |kind, url: &str| RemoteUrl {
+        kind,
+        url: url.into(),
+    };
+    app.remote = RemoteStatus {
+        enabled: true,
+        listen: "0.0.0.0:7790".into(),
+        urls: vec![
+            url(UrlKind::Lan, "http://192.168.1.5:7790"),
+            url(UrlKind::Local, "http://127.0.0.1:7790"),
+        ],
+        tunnel: None,
+        devices: 1,
+    };
+    app.awake = AwakeStatus {
+        mode: KeepAwake::Busy,
+        awake: true,
+        reason: "2 agents running".into(),
+        method: Some("caffeinate".into()),
+        error: None,
+        since: None,
+    };
+    let frame = render(&mut app, 140, 30);
+    assert!(
+        frame.lines().nth(28).unwrap().contains("│ awake │"),
+        "{frame}"
+    );
+
+    key(&mut app, KeyCode::F(9)).await;
+    key(&mut app, KeyCode::Char('c')).await;
+    let frame = render(&mut app, 140, 30);
+    assert!(frame.contains("✓ This computer"), "{frame}");
+    assert!(frame.contains("Remote access…"));
+    let action = app.on_key(press(KeyCode::Char('r')), false).unwrap();
+    assert_eq!(action, Action::RemoteDialog);
+    app.perform(action).await;
+    let asked = std::mem::take(&mut *app.backend.rests.lock().unwrap());
+    assert!(asked.iter().any(|r| matches!(r, Rest::Devices)));
+    let devices = json!({ "devices": [{
+        "id": "a1b2c3d4", "name": "laptop", "kind": "cli", "created": "2026-10-26T07:00:00Z",
+        "last_seen": null, "address": "192.168.1.20", "current": false
+    }]});
+    app.on_update(Update::Rest(Rest::Devices, Ok(devices)));
+    let frame = render(&mut app, 140, 44);
+    for text in [
+        "Remote access",
+        "allowed · listening on 0.0.0.0:7790",
+        "http://192.168.1.5:7790  network address",
+        "awake · 2 agents running · mode busy (caffeinate)",
+        "laptop",
+        "from 192.168.1.20",
+        "ssh -N -L 7790:127.0.0.1:7790",
+        "malac tunnel cloudflare",
+    ] {
+        assert!(frame.contains(text), "`{text}` missing:\n{frame}");
+    }
+    let action = app.on_key(press(KeyCode::Char('x')), false).unwrap();
+    assert_eq!(action, Action::RevokeDevice("a1b2c3d4".into()));
+    app.perform(action).await;
+    assert!(render(&mut app, 140, 44).contains("Revoke laptop?"));
+    app.perform(Action::RevokeNow("a1b2c3d4".into())).await;
+    let asked = std::mem::take(&mut *app.backend.rests.lock().unwrap());
+    assert!(asked.iter().any(|r| matches!(r, Rest::Revoked)));
+
+    app.perform(Action::PairDevice).await;
+    let pairing = json!({
+        "code": "ABCDE-FGHJK", "expires": "2099-01-01T00:00:00Z",
+        "links": [{ "kind": "lan", "base": "http://192.168.1.5:7790",
+                    "url": "http://192.168.1.5:7790/#pair=ABCDE-FGHJK" }]
+    });
+    app.on_update(Update::Rest(Rest::Pairing, Ok(pairing)));
+    let frame = render(&mut app, 140, 44);
+    assert!(frame.contains("ABCDE-FGHJK"), "{frame}");
+    assert!(frame.contains("▀▀▀▀▀▀▀"), "the QR code: {frame}");
+    assert!(frame.contains("malac remote add <name> http://192.168.1.5:7790 --pair ABCDE-FGHJK"));
+    key(&mut app, KeyCode::Esc).await;
+    assert!(
+        render(&mut app, 140, 44).contains("How to connect"),
+        "back to the overview"
+    );
+
+    app.overlay = None;
+    app.perform(Action::KeepAwake(KeepAwake::Always)).await;
+    assert_eq!(
+        sent_json(&app),
+        [json!({"type": "keep_awake", "mode": "always"})]
+    );
+    app.on_message(ServerMessage::Awake {
+        awake: AwakeStatus::default(),
+    });
+    let frame = render(&mut app, 140, 30);
+    assert!(!frame.lines().nth(28).unwrap().contains("│ awake │"));
+}
+
+#[tokio::test]
 async fn update_segment_opens_the_dialog() {
     let mut app = app();
     app.update = update::Status {
@@ -1397,7 +1501,7 @@ impl Term {
         let launched = client.launch(launch).await.unwrap();
         let (updates_tx, updates) = mpsc::unbounded_channel();
         let (connections, _) = mpsc::unbounded_channel();
-        let backend = Backend::new(client, updates_tx, connections);
+        let backend = Backend::new(client, Endpoint::Local, updates_tx, connections);
         let app = App::new(
             backend,
             Config::default(),

@@ -1,7 +1,7 @@
 {
   "name": "malac",
   "displayName": "malac",
-  "description": "Multi-Agent Loop for Autonomous Coding: watch and steer malac agents from VS Code",
+  "description": "Multi-Agent Loop for Autonomous Coding: chat with malac agents, approve their tool calls and follow workspaces, jobs and sessions from VS Code",
   "version": "1.0.1",
   "publisher": "lobirus",
   "license": "MIT",
@@ -16,40 +16,531 @@
     "vscode": "^1.90.0"
   },
   "categories": [
+    "AI",
+    "Chat",
     "Other"
   ],
-  "main": "./out/extension.js",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding agent",
+    "malac",
+    "chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "malac agents run commands in the folder; the chat works, but trust the folder before letting agents act."
+    }
+  },
+  "main": "./out/src/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "malac",
+          "title": "malac",
+          "icon": "media/malac.svg"
+        }
+      ]
+    },
+    "views": {
+      "malac": [
+        {
+          "type": "webview",
+          "id": "malac.chat",
+          "name": "Chat",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac"
+        },
+        {
+          "id": "malac.workspaces",
+          "name": "Workspaces",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "malac.jobs",
+          "name": "Jobs",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "malac.sessions",
+          "name": "Sessions",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac",
+          "visibility": "collapsed"
+        },
+        {
+          "type": "webview",
+          "id": "malac.usage",
+          "name": "Usage",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac",
+          "visibility": "collapsed"
+        }
+      ]
+    },
     "commands": [
       {
-        "command": "malac.open",
-        "title": "Malac: Open"
+        "command": "malac.focusChat",
+        "title": "Focus Chat",
+        "category": "malac",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "malac.askAboutSelection",
-        "title": "Malac: Ask About Selection"
+        "title": "Ask About Selection",
+        "category": "malac",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "malac.addFileToContext",
+        "title": "Add File to Context",
+        "category": "malac",
+        "icon": "$(add)"
+      },
+      {
+        "command": "malac.newAgent",
+        "title": "New Agent",
+        "category": "malac",
+        "icon": "$(add)"
+      },
+      {
+        "command": "malac.newTabForFolder",
+        "title": "New Tab for This Folder",
+        "category": "malac",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "malac.stop",
+        "title": "Stop Agent",
+        "category": "malac",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "malac.openFullUi",
+        "title": "Open Full UI",
+        "category": "malac",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "malac.restartDaemon",
+        "title": "Restart Daemon",
+        "category": "malac",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "malac.reconnect",
+        "title": "Reconnect to Daemon",
+        "category": "malac",
+        "icon": "$(plug)"
       },
       {
         "command": "malac.runInTerminal",
-        "title": "Malac: Run in Terminal"
+        "title": "Run in Terminal",
+        "category": "malac",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "malac.showLog",
+        "title": "Show Log",
+        "category": "malac",
+        "icon": "$(output)"
+      },
+      {
+        "command": "malac.open",
+        "title": "Open (Full UI)",
+        "category": "malac"
+      },
+      {
+        "command": "malac.agent.open",
+        "title": "Open in Chat",
+        "category": "malac",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "malac.agent.stop",
+        "title": "Stop",
+        "category": "malac",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "malac.agent.close",
+        "title": "Close Agent",
+        "category": "malac",
+        "icon": "$(close)"
+      },
+      {
+        "command": "malac.tab.open",
+        "title": "Open in Chat",
+        "category": "malac",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "malac.tab.newAgent",
+        "title": "New Agent in Tab",
+        "category": "malac",
+        "icon": "$(add)"
+      },
+      {
+        "command": "malac.tab.close",
+        "title": "Close Tab",
+        "category": "malac",
+        "icon": "$(close)"
+      },
+      {
+        "command": "malac.workspace.open",
+        "title": "Open Workspace",
+        "category": "malac",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "malac.job.log",
+        "title": "Show Log",
+        "category": "malac",
+        "icon": "$(output)"
+      },
+      {
+        "command": "malac.job.kill",
+        "title": "Kill Job",
+        "category": "malac",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "malac.session.open",
+        "title": "Open in Chat",
+        "category": "malac",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "malac.sessions.showAll",
+        "title": "Show Sessions from All Folders",
+        "category": "malac",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "malac.sessions.showFolder",
+        "title": "Show Sessions from This Folder",
+        "category": "malac",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "malac.sessions.refresh",
+        "title": "Refresh Sessions",
+        "category": "malac",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "malac.workspaces.refresh",
+        "title": "Refresh",
+        "category": "malac",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "malac.jobs.refresh",
+        "title": "Refresh Jobs",
+        "category": "malac",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "malac.usage.refresh",
+        "title": "Refresh Usage",
+        "category": "malac",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "malac.folderTab.open",
+        "title": "Open Tab for Folder",
+        "category": "malac"
+      },
+      {
+        "command": "malac.folderTab.dismiss",
+        "title": "Dismiss Folder Tab Offer",
+        "category": "malac"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "malac.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.agent.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.agent.stop",
+          "when": "false"
+        },
+        {
+          "command": "malac.agent.close",
+          "when": "false"
+        },
+        {
+          "command": "malac.tab.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.tab.newAgent",
+          "when": "false"
+        },
+        {
+          "command": "malac.tab.close",
+          "when": "false"
+        },
+        {
+          "command": "malac.workspace.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.job.log",
+          "when": "false"
+        },
+        {
+          "command": "malac.job.kill",
+          "when": "false"
+        },
+        {
+          "command": "malac.session.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.sessions.showAll",
+          "when": "false"
+        },
+        {
+          "command": "malac.sessions.showFolder",
+          "when": "false"
+        },
+        {
+          "command": "malac.sessions.refresh",
+          "when": "false"
+        },
+        {
+          "command": "malac.workspaces.refresh",
+          "when": "false"
+        },
+        {
+          "command": "malac.jobs.refresh",
+          "when": "false"
+        },
+        {
+          "command": "malac.usage.refresh",
+          "when": "false"
+        },
+        {
+          "command": "malac.folderTab.open",
+          "when": "false"
+        },
+        {
+          "command": "malac.folderTab.dismiss",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "malac.newAgent",
+          "when": "view == malac.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "malac.openFullUi",
+          "when": "view == malac.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "malac.newTabForFolder",
+          "when": "view == malac.chat",
+          "group": "1_tabs@1"
+        },
+        {
+          "command": "malac.restartDaemon",
+          "when": "view == malac.chat",
+          "group": "2_daemon@1"
+        },
+        {
+          "command": "malac.reconnect",
+          "when": "view == malac.chat",
+          "group": "2_daemon@2"
+        },
+        {
+          "command": "malac.showLog",
+          "when": "view == malac.chat",
+          "group": "2_daemon@3"
+        },
+        {
+          "command": "malac.newTabForFolder",
+          "when": "view == malac.workspaces",
+          "group": "navigation@1"
+        },
+        {
+          "command": "malac.workspaces.refresh",
+          "when": "view == malac.workspaces",
+          "group": "navigation@2"
+        },
+        {
+          "command": "malac.jobs.refresh",
+          "when": "view == malac.jobs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "malac.sessions.showAll",
+          "when": "view == malac.sessions && malac.sessionsScope == folder",
+          "group": "navigation@1"
+        },
+        {
+          "command": "malac.sessions.showFolder",
+          "when": "view == malac.sessions && malac.sessionsScope == all",
+          "group": "navigation@1"
+        },
+        {
+          "command": "malac.sessions.refresh",
+          "when": "view == malac.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "malac.usage.refresh",
+          "when": "view == malac.usage",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "malac.agent.stop",
+          "when": "view == malac.workspaces && viewItem =~ /^agent\\.running/",
+          "group": "inline@1"
+        },
+        {
+          "command": "malac.agent.open",
+          "when": "view == malac.workspaces && viewItem =~ /^agent/",
+          "group": "inline@2"
+        },
+        {
+          "command": "malac.agent.open",
+          "when": "view == malac.workspaces && viewItem =~ /^agent/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "malac.agent.stop",
+          "when": "view == malac.workspaces && viewItem =~ /^agent\\.running/",
+          "group": "2_run@1"
+        },
+        {
+          "command": "malac.agent.close",
+          "when": "view == malac.workspaces && viewItem == agent.idle",
+          "group": "2_run@2"
+        },
+        {
+          "command": "malac.tab.newAgent",
+          "when": "view == malac.workspaces && viewItem == tab",
+          "group": "inline@1"
+        },
+        {
+          "command": "malac.tab.open",
+          "when": "view == malac.workspaces && viewItem == tab",
+          "group": "1_open@1"
+        },
+        {
+          "command": "malac.tab.newAgent",
+          "when": "view == malac.workspaces && viewItem == tab",
+          "group": "1_open@2"
+        },
+        {
+          "command": "malac.tab.close",
+          "when": "view == malac.workspaces && viewItem == tab",
+          "group": "3_close@1"
+        },
+        {
+          "command": "malac.workspace.open",
+          "when": "view == malac.workspaces && viewItem == workspace",
+          "group": "inline@1"
+        },
+        {
+          "command": "malac.workspace.open",
+          "when": "view == malac.workspaces && viewItem == workspace",
+          "group": "1_open@1"
+        },
+        {
+          "command": "malac.job.kill",
+          "when": "view == malac.jobs && viewItem == job.running",
+          "group": "inline@1"
+        },
+        {
+          "command": "malac.job.log",
+          "when": "view == malac.jobs && viewItem =~ /^job/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "malac.job.kill",
+          "when": "view == malac.jobs && viewItem == job.running",
+          "group": "2_run@1"
+        },
+        {
+          "command": "malac.session.open",
+          "when": "view == malac.sessions && viewItem == session",
+          "group": "inline@1"
+        },
+        {
+          "command": "malac.session.open",
+          "when": "view == malac.sessions && viewItem == session",
+          "group": "1_open@1"
+        }
+      ],
       "editor/context": [
         {
           "command": "malac.askAboutSelection",
           "when": "editorHasSelection",
-          "group": "malac"
+          "group": "malac@1"
+        },
+        {
+          "command": "malac.addFileToContext",
+          "when": "resourceScheme == file || resourceScheme == vscode-remote",
+          "group": "malac@2"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "malac.addFileToContext",
+          "when": "resourceScheme == file || resourceScheme == vscode-remote",
+          "group": "malac@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "malac.addFileToContext",
+          "when": "resourceScheme == file || resourceScheme == vscode-remote",
+          "group": "malac@1"
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "malac.focusChat",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
+      },
+      {
+        "command": "malac.addFileToContext",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      }
+    ],
     "configuration": {
-      "title": "Malac",
+      "title": "malac",
       "properties": {
         "malac.path": {
           "type": "string",
           "default": "malac",
-          "description": "Path to the malac binary."
+          "markdownDescription": "Path to the malac binary. With the default, `malac` is looked up on `PATH`, then in `~/.local/bin`, `~/.cargo/bin` and Homebrew."
         },
         "malac.extraArgs": {
           "type": "array",
@@ -57,7 +548,49 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra arguments for `malac web`, for example [\"-y\"]."
+          "markdownDescription": "Extra arguments for `malac web` when the extension starts the daemon, for example `[\"-y\"]`."
+        },
+        "malac.connection": {
+          "type": "string",
+          "default": "local",
+          "markdownDescription": "Which daemon to use. `local` (this machine) reads `daemon.json` in the malac home and starts the daemon with `malac web` when none runs. The name of a saved connection (as with `malac --connect <name>`) will select a paired daemon on another machine once the extension supports it; until then such names report that they are unavailable."
+        },
+        "malac.home": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The malac home directory (`daemon.json`, sessions). Empty means `$MALAC_HOME`, else `~/.malac`."
+        },
+        "malac.startDaemonOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Start the daemon when VS Code starts. Otherwise the extension connects to a running daemon and starts one when you open malac or run one of its commands."
+        },
+        "malac.folderTab": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "folder",
+            "repositoryRoot",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Offer to open a tab for the folder; suggest the repository root when the folder is inside a larger repository.",
+            "Open a tab for the folder without asking.",
+            "Open a tab at the repository root without asking (the full stack).",
+            "Never open a tab on its own."
+          ],
+          "default": "ask",
+          "description": "What to do when the workspace folder has no malac tab."
+        },
+        "malac.approvalNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show approval requests as notifications (Allow / Always / Deny) when the chat cannot show them."
+        },
+        "malac.chat.includeCurrentFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start with the current-file chip turned on: the open file (or the selected lines) goes with each message."
         }
       }
     }
@@ -65,7 +598,11 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "vscode:prepublish": "npm run compile"
+    "test": "tsc -p . && node --test \"out/test/**/*.test.js\" \"out/test/**/*.test.mjs\"",
+    "harness": "tsc -p . && node out/harness/serve.js",
+    "package": "npx --yes @vscode/vsce@3 package",
+    "vscode:prepublish": "npm run compile",
+    "smoke": "tsc -p . && node out/harness/activate.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

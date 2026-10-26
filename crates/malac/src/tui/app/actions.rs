@@ -1,7 +1,9 @@
 //! Everything the user can ask for, and the menus and lists that offer it.
 
 use super::*;
+use crate::connections::{self, Connections};
 use crate::protocol::{Command, TabSpec};
+use malac_core::config::KeepAwake;
 
 /// Everything the user can ask for, from a key, a click, a menu or a command.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +81,17 @@ pub enum Action {
     ToggleEntry(usize),
     JumpBottom,
     CloseDialog,
+    /// Opens a menu bar title's drop-down.
+    OpenMenu(usize),
+    /// Controls another daemon: a saved connection, or `None` for this machine's.
+    Connect(Option<String>),
+    /// Opens the Remote access dialog, or refreshes it when open.
+    RemoteDialog,
+    PairDevice,
+    /// Asks before revoking a paired device.
+    RevokeDevice(String),
+    RevokeNow(String),
+    KeepAwake(KeepAwake),
 }
 
 impl App {
@@ -154,6 +167,33 @@ impl App {
                     Item::new("MCP servers", 'c', Action::ShowMcp),
                     Item::new("Memories", 'e', Action::ShowMemory),
                 ];
+                items.push(Item::separator());
+                let mode = self.awake.mode;
+                items.push(
+                    Item::new(
+                        "Keep awake while working",
+                        'k',
+                        Action::KeepAwake(KeepAwake::Busy),
+                    )
+                    .checked(mode == KeepAwake::Busy),
+                );
+                items.push(
+                    Item::new(
+                        "Keep awake always",
+                        'l',
+                        Action::KeepAwake(KeepAwake::Always),
+                    )
+                    .checked(mode == KeepAwake::Always),
+                );
+                items.push(
+                    Item::new(
+                        "Let the machine sleep",
+                        'z',
+                        Action::KeepAwake(KeepAwake::Off),
+                    )
+                    .checked(mode == KeepAwake::Off),
+                );
+                items.push(Item::note(self.awake_summary()));
                 if self.control.enabled {
                     items.push(Item::separator());
                     items.push(Item::note(self.control_summary()));
@@ -165,20 +205,7 @@ impl App {
                 }
                 items
             }
-            5 => {
-                let urls = self.backend.web_urls();
-                let mut items = vec![
-                    Item::new("Show the address", 's', Action::ShowWeb),
-                    Item::new("Copy URL", 'c', Action::CopyWebUrl).enabled(!urls.is_empty()),
-                ];
-                if let Some(url) = urls.first() {
-                    items.push(Item::separator());
-                    items.push(Item::note(
-                        text::truncate(&text::hide_token(url), 48).into_owned(),
-                    ));
-                }
-                items
-            }
+            5 => self.connection_menu(),
             _ => {
                 let mut items = vec![
                     Item::new("Keys and commands", 'k', Action::Help).hint("F1"),
@@ -200,6 +227,55 @@ impl App {
                 )));
                 items
             }
+        }
+    }
+
+    /// The daemons this terminal can control, remote access and the web UI.
+    fn connection_menu(&self) -> Vec<Item> {
+        let current = self.connection_name().map(str::to_owned);
+        let saved = Connections::load().unwrap_or_default();
+        let mut items = vec![
+            Item::plain("This computer", Action::Connect(None))
+                .hint("local")
+                .checked(current.is_none()),
+        ];
+        for connection in &saved.connections {
+            let address = connection
+                .url
+                .split_once("://")
+                .map_or(connection.url.as_str(), |(_, rest)| rest);
+            items.push(
+                Item::plain(
+                    connection.name.clone(),
+                    Action::Connect(Some(connection.name.clone())),
+                )
+                .hint(&text::truncate(address, 34))
+                .checked(current.as_deref() == Some(connection.name.as_str())),
+            );
+        }
+        items.push(Item::separator());
+        items.push(Item::new("Remote access…", 'r', Action::RemoteDialog));
+        items.push(Item::new("Pair a device…", 'p', Action::PairDevice));
+        let urls = self.backend.web_urls();
+        items.push(Item::new("Show the web UI address", 's', Action::ShowWeb));
+        items.push(
+            Item::new("Copy the web UI address", 'c', Action::CopyWebUrl).enabled(!urls.is_empty()),
+        );
+        items.push(Item::separator());
+        items.push(Item::note(match saved.connections.is_empty() {
+            true => "add a daemon: malac remote add <name> <url> --pair <code>",
+            false => "more: malac remote add <name> <url> --pair <code>",
+        }));
+        items
+    }
+
+    /// One line on keep-awake for the View menu.
+    fn awake_summary(&self) -> String {
+        let a = &self.awake;
+        match (a.awake, &a.error) {
+            (_, Some(err)) => format!("not awake: {}", text::truncate(text::first_line(err), 40)),
+            (true, None) => format!("awake: {}", a.reason),
+            (false, None) => a.reason.clone(),
         }
     }
 
@@ -414,30 +490,65 @@ impl App {
             .collect()
     }
 
+    /// Workspaces of this daemon and, under their own headers, of the
+    /// others this terminal knows. A row's value is the workspace id, or
+    /// `<connection>:<id>` on another daemon (`local` for this machine's).
     pub fn workspace_rows(&self) -> Vec<Row> {
-        let mut workspaces = self.workspaces.clone();
-        workspaces.sort_by(|a, b| b.updated.cmp(&a.updated));
-        workspaces
-            .into_iter()
-            .map(|w| {
-                let tabs = if w.tabs == 1 { "tab" } else { "tabs" };
-                let running = match w.running {
-                    0 => String::new(),
-                    n => format!(" · {n} running"),
-                };
-                let when = w
-                    .updated
-                    .with_timezone(&chrono::Local)
-                    .format("%m-%d %H:%M");
-                Row {
-                    group: String::new(),
-                    current: self.is_ours(&w.id),
-                    label: w.name,
-                    detail: format!("{} {tabs}{running} · {when}", w.tabs),
-                    value: w.id,
+        let row = |group: &str, w: &WorkspaceSummary, value: String, current: bool| {
+            let tabs = if w.tabs == 1 { "tab" } else { "tabs" };
+            let running = match w.running {
+                0 => String::new(),
+                n => format!(" · {n} running"),
+            };
+            let when = w
+                .updated
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
+            Row {
+                group: group.to_owned(),
+                current,
+                label: w.name.clone(),
+                detail: format!("{} {tabs}{running} · {when}", w.tabs),
+                value,
+            }
+        };
+        let sorted = |list: &[WorkspaceSummary]| {
+            let mut list = list.to_vec();
+            list.sort_by(|a, b| b.updated.cmp(&a.updated));
+            list
+        };
+        let others = !self.other_workspaces.is_empty();
+        let here = match others {
+            true => format!("{} (here)", self.backend.endpoint().label()),
+            false => String::new(),
+        };
+        let mut rows: Vec<Row> = sorted(&self.workspaces)
+            .iter()
+            .map(|w| row(&here, w, w.id.clone(), self.is_ours(&w.id)))
+            .collect();
+        for (endpoint, result) in &self.other_workspaces {
+            let name = endpoint.name().unwrap_or(connections::LOCAL);
+            match result {
+                Ok(list) => {
+                    for w in sorted(list) {
+                        rows.push(row(
+                            &endpoint.label(),
+                            &w,
+                            format!("{name}:{}", w.id),
+                            false,
+                        ));
+                    }
                 }
-            })
-            .collect()
+                Err(err) => rows.push(Row {
+                    group: format!("{} · {}", endpoint.label(), text::truncate(err, 40)),
+                    label: "connect anyway".into(),
+                    detail: String::new(),
+                    value: format!("{name}:"),
+                    current: false,
+                }),
+            }
+        }
+        rows
     }
 
     pub fn agent_rows(&self) -> Vec<Row> {
@@ -631,10 +742,16 @@ impl App {
             },
             Action::AgentList => self.open_agent_list(),
             Action::AgentMap => self.open_agent_map(),
-            Action::FolderDialog => {
-                let browser = FolderBrowser::new(&self.tab_cwd(), self.recent_dirs());
-                self.overlay = Some(Overlay::Folder(browser));
-            }
+            Action::FolderDialog => match self.connection_name() {
+                // The browser lists this computer's folders, not the daemon's.
+                Some(name) => {
+                    self.flash(format!("type /cd <folder on {name}>, e.g. /cd ~/src/app"))
+                }
+                None => {
+                    let browser = FolderBrowser::new(&self.tab_cwd(), self.recent_dirs());
+                    self.overlay = Some(Overlay::Folder(browser));
+                }
+            },
             Action::OpenFolder(dir) => self.open_folder(&dir),
             Action::Jobs => {
                 self.overlay = Some(Overlay::Jobs(JobsView::default()));
@@ -789,15 +906,22 @@ impl App {
                 self.overlay = Some(Overlay::Workspaces(picker));
                 self.backend
                     .request(Command::WorkspaceList, Reply::Workspaces);
+                self.backend.other_workspaces();
             }
-            Action::OpenWorkspace(id) => {
-                if !self.is_ours(&id) {
+            Action::OpenWorkspace(value) => match value.split_once(':') {
+                Some((name, id)) => {
+                    let name = (name != connections::LOCAL).then(|| name.to_owned());
+                    let workspace = (!id.is_empty()).then(|| id.to_owned());
+                    self.connect(name, workspace);
+                }
+                None if !self.is_ours(&value) => {
                     self.backend.request(
-                        Command::WorkspaceOpen { workspace: id },
+                        Command::WorkspaceOpen { workspace: value },
                         Reply::WorkspaceOpened { fresh: false },
                     );
                 }
-            }
+                None => {}
+            },
             Action::RenameWorkspace => {
                 self.overlay = Some(Overlay::Rename(Rename {
                     ask: Ask::WorkspaceName,
@@ -970,7 +1094,91 @@ impl App {
             }
             Action::JumpBottom => self.tab_mut().scroll = None,
             Action::CloseDialog => self.overlay = None,
+            Action::OpenMenu(index) => self.open_menu(index, true),
+            Action::Connect(name) => {
+                if name.as_deref() == self.connection_name() {
+                    self.flash(format!("already on {}", self.backend.endpoint().label()));
+                } else {
+                    self.connect(name, None);
+                }
+            }
+            Action::RemoteDialog => {
+                if !matches!(self.overlay, Some(Overlay::Remote(_))) {
+                    self.overlay = Some(Overlay::Remote(RemoteDialog::new()));
+                }
+                // Remote status and keep-awake arrive as broadcasts; devices are asked for.
+                self.backend.devices();
+            }
+            Action::PairDevice => {
+                match &mut self.overlay {
+                    Some(Overlay::Remote(dialog)) => {
+                        dialog.page = RemotePage::Pair;
+                        dialog.pairing = None;
+                    }
+                    _ => {
+                        let mut dialog = RemoteDialog::new();
+                        dialog.page = RemotePage::Pair;
+                        self.overlay = Some(Overlay::Remote(dialog));
+                    }
+                }
+                self.backend.create_pairing();
+            }
+            Action::RevokeDevice(id) => {
+                let name = match &self.overlay {
+                    Some(Overlay::Remote(dialog)) => dialog
+                        .devices
+                        .as_ref()
+                        .and_then(|d| d.as_ref().ok())
+                        .and_then(|list| list.iter().find(|d| d.id == id))
+                        .map(|d| (d.name.clone(), d.current)),
+                    _ => None,
+                };
+                let (name, current) = name.unwrap_or_else(|| (id.clone(), false));
+                let message = match current {
+                    true => {
+                        format!("Revoke {name}? That is this terminal: it disconnects at once.")
+                    }
+                    false => format!("Revoke {name}? Its token stops working and it disconnects."),
+                };
+                self.overlay = Some(Overlay::Confirm(Confirm {
+                    title: "Revoke device".into(),
+                    message,
+                    label: " Revoke  y ",
+                    yes: Action::RevokeNow(id),
+                }));
+            }
+            Action::RevokeNow(id) => {
+                self.backend.revoke(&id);
+                self.overlay = Some(Overlay::Remote(RemoteDialog::new()));
+                self.backend.devices();
+            }
+            Action::KeepAwake(mode) => {
+                self.backend.command(Command::KeepAwake { mode });
+                self.flash(match mode {
+                    KeepAwake::Busy => "keeping the machine awake while agents or jobs run",
+                    KeepAwake::Always => "keeping the machine awake while the daemon runs",
+                    KeepAwake::Off => "letting the machine sleep",
+                });
+            }
         }
+    }
+
+    /// Switches this terminal to another daemon, opening `workspace` there
+    /// (else the one it used last).
+    fn connect(&mut self, name: Option<String>, workspace: Option<String>) {
+        let endpoint = match connections::resolve(name.as_deref()) {
+            Ok(endpoint) => endpoint,
+            Err(err) => return self.flash(format!("{err:#}")),
+        };
+        if workspace.is_none() && endpoint == *self.backend.endpoint() {
+            return;
+        }
+        let cwd = match &endpoint {
+            Endpoint::Local => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("~")),
+            Endpoint::Saved(_) => PathBuf::from("~"),
+        };
+        self.flash(format!("connecting to {}…", endpoint.label()));
+        self.backend.switch(endpoint, workspace, cwd);
     }
 
     /// Closes a tab, asking first when its agents work.
@@ -1032,7 +1240,8 @@ impl App {
     /// Works in `dir`: a tab for it in this workspace, the existing one if
     /// there is one.
     pub fn open_folder(&mut self, dir: &Path) {
-        if !dir.is_dir() {
+        // A daemon elsewhere checks its own folders.
+        if self.connection_name().is_none() && !dir.is_dir() {
             self.flash(format!("{} is not a folder", short_path(dir)));
             return;
         }

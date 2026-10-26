@@ -10,7 +10,7 @@ Configuration is TOML, merged in this order (later wins, tables merge key by key
 
 `MALAC_HOME` moves `~/.malac` elsewhere. `malac config show` prints the merged result; `malac config path` prints the file locations.
 
-A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web`, `update`, `daemon` or `profiles`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
+A project file cannot set `mode`, `providers`, `mcp`, `control`, `permissions`, `memory`, `web`, `update`, `daemon`, `remote` or `profiles`, because cloning a repository should never be enough to run commands, widen permissions or send your credentials elsewhere. Set `trust_project_config = true` in your user config to lift this.
 
 See [`examples/config.toml`](../examples/config.toml) for a complete example.
 
@@ -78,11 +78,12 @@ headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/notes"]
 env = { DEBUG = "0" }
+cwd = "/tmp"    # working directory of a command server (default: malac's)
 prefix = true   # expose tools as files__<tool> (default)
 enabled = true
 ```
 
-`${VAR}` is expanded in `command`, `args`, `env` and `headers`. `token_env` names a variable sent as a bearer token.
+`${VAR}` is expanded in `command`, `args`, `env` and `headers`. `token_env` names a variable sent as a bearer token. Enabled plugins add their MCP servers here as `<plugin>` or `<plugin>-<server>`; a server you configure under the same name wins.
 
 ## `[control]`
 
@@ -122,7 +123,7 @@ model = "embed"
 | `max_depth` | `3` | How deep subagents may nest; agents at the limit get no delegation tools |
 | `max_concurrent` | `4` | Subagents running at the same time |
 
-Agent types live in `~/.malac/agents/*.md` and `<project>/.malac/agents/*.md`:
+Agent types live in `~/.malac/agents/*.md`, `<project>/.malac/agents/*.md` and plugins' `agents/` (named `<plugin>:<agent>`). Claude Code's tool names (`Read`, `Bash`, …) are understood, and a `model` that is not `provider/model` (such as `sonnet`) is ignored:
 
 ```markdown
 ---
@@ -134,11 +135,53 @@ tools: read, grep, glob, bash
 You review code changes. Report concrete problems with file:line references...
 ```
 
-## Instructions and skills
+## `[context]`
 
-`AGENTS.md`, `MALAC.md` or `CLAUDE.md` (first found per directory) are read from `~/.malac/` and from every directory between the project root and the working directory.
+What a session knows about its project before the first prompt. `malac context` (or `/context` in a session) shows what was loaded and why something was skipped.
 
-Skills are `SKILL.md` files in `~/.malac/skills/<name>/`, `~/.claude/skills/<name>/`, `<project>/.malac/skills/<name>/` or `<project>/.claude/skills/<name>/`, with `name` and `description` frontmatter. Their descriptions are listed in the system prompt and the agent reads the file when a skill applies.
+| Key | Default | Meaning |
+|---|---|---|
+| `instruction_files` | `[]` | More instruction files, after the standard ones: relative to the project root, or absolute or `~/…` in the user config. A project config may name only files inside the project |
+| `max_instruction_chars` | `40000` | Characters of instruction files in the system prompt, all together |
+| `docs` | `true` | List the project's Markdown docs (path, title, first sentence) in the prompt |
+| `index` | `true` | Keep `.malac/index.md`, the structural index, in a repository |
+| `index_max_files` | `5000` | Files whose symbols the index lists |
+| `knowledge` | `true` | Include `.malac/MALAC.md`, the project knowledge malac keeps |
+
+**Instruction files** are read from `~/.malac/` (`AGENTS.md`, `MALAC.md`, `CLAUDE.md`), from `~/.claude/CLAUDE.md`, and from every directory between the project root and the working directory: `AGENTS.md` (the standard, and first), `MALAC.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursorrules`, `.windsurfrules`, and the rule folders `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.github/instructions/*.instructions.md` and `.clinerules/`. Lines that are only `@path` (CLAUDE.md and GEMINI.md imports) pull in that file when it is inside the project. A file whose text another one already has, such as a `CLAUDE.md` symlinked to `AGENTS.md`, is read once. When the files exceed `max_instruction_chars`, configured files and `AGENTS.md` keep their text first, then `MALAC.md`, `CLAUDE.md`, `GEMINI.md`, Copilot's, Cursor's, Windsurf's and Cline's; deeper directories before shallower ones; the rest is cut from the middle or skipped.
+
+Rules with frontmatter apply as their tool defines them: a Cursor rule with `alwaysApply: true` is part of the prompt, one with `globs` (or a Copilot file with `applyTo`, a Windsurf rule with `trigger: glob`) is listed with its patterns for the agent to read before touching matching files, one with only a `description` is listed for the agent to read when it fits, and the rest apply only when mentioned.
+
+**The project index**, `.malac/index.md`, maps the repository without a model: the directory tree with file counts, languages, manifests (with package names, workspace members and scripts) and entry points, every source file's top-level symbols (found with per-language patterns for Rust, TypeScript and JavaScript, Python, Go, Java, Kotlin, Swift, C#, C and C++, Ruby, PHP, shell, Elixir and Lua), the headings of Markdown files, and a Notes section the agent adds to. It follows `.gitignore`, rereads only files whose modification time or size changed (`.malac/index.cache.json`), and is refreshed in the background when a session starts and it is older than five minutes. The system prompt tells the agent to look there before searching broadly, through the `project_index` tool. `malac index` updates it now, `--rebuild` from scratch. Both files are regenerable, so `.malac/.gitignore` keeps them out of git.
+
+**Project knowledge**, `.malac/MALAC.md`, is what malac learned about the project: commands, conventions, gotchas and decisions. Each entry is a project memory in `.malac/memory/` (saved with `memory_save`, scope `project`, and a `kind`), and MALAC.md lists them by kind between two markers that malac rewrites; text outside them is yours. Both are meant to be committed, so knowledge travels between machines and teammates. Instructions for agents stay in `AGENTS.md`, which malac proposes changes to but does not write unasked. There is no `MALAC.json`: structured project settings belong in `.malac/config.toml`, plugins in `.malac/plugins.toml`.
+
+When the working directory is one part of a larger repository (`frontend/` with `backend/` beside it), the prompt says so and names the other parts, and the UIs offer to open the repository root (`project.suggest_root` in the [protocol](protocol.md)). Open the root for work across the stack; a subdirectory still sees the root's instruction files, index and knowledge.
+
+## Skills
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) format: a folder with a `SKILL.md` (`name` and `description` frontmatter, then instructions) and optionally `scripts/`, `references/` and `assets/`. malac reads them from `~/.malac/skills/`, `~/.claude/skills/`, `~/.agents/skills/`, `<project>/.agents/skills/`, `<project>/.claude/skills/` and `<project>/.malac/skills/` (later ones win on a name), and from enabled plugins, named `<plugin>:<skill>`.
+
+The system prompt lists each skill's name and description. The `skill` tool loads one: its instructions with `$SKILL_DIR` (and `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PLUGIN_ROOT}`) written in as paths, and the list of its files. From then on the agent's `bash` commands have `SKILL_DIR` set, so a skill's scripts run as `sh "$SKILL_DIR/scripts/x.sh"`, through the usual permission checks. Every skill also runs as a slash command, `/<name> arguments`, which fills in `$ARGUMENTS`. `disable-model-invocation: true` keeps a skill out of the prompt so only `/<name>` runs it; `user-invocable: false` keeps it from being a command. `allowed-tools` is not used: approvals work as for any tool call.
+
+## Slash commands
+
+Besides the built-in ones (`/help` lists them), `/name arguments` runs a custom command:
+
+- Markdown commands in Claude Code's format, from `~/.malac/commands/`, `~/.claude/commands/`, `<project>/.claude/commands/`, `<project>/.malac/commands/` and plugins' `commands/`: frontmatter `description` and `argument-hint`, a body with `$ARGUMENTS` or `$1`…`$9`
+- TOML commands in Gemini CLI's format (`description`, `prompt` with `{{args}}`) from `~/.gemini/commands/`, `<project>/.gemini/commands/` and plugins; folders become namespaces (`git/commit.toml` is `/git:commit`)
+- skills, as above
+
+Plugin commands are named `<plugin>:<command>`; the part after `:` works alone when no other command has it. The command's text goes to the agent after what you typed. `` !`command` `` lines and `@file` references in commands are not expanded.
+
+## `[plugins]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Load installed and enabled plugins |
+| `defaults` | `true` | Enable the plugins that ship with malac: [ponytail](https://ponytail.dev) (`ponytail@malac`) |
+
+Plugins, marketplaces and their files are described in [plugins.md](plugins.md). Turn one built-in plugin off with `malac plugin disable ponytail@malac`, all of them with `defaults = false`.
 
 ## `[update]`
 
@@ -151,7 +194,7 @@ Updates replace the binaries with an atomic rename, so running sessions and thei
 
 ## Configuring malac by asking it
 
-The agent has two tools for its own configuration. `malac_settings` shows the config files, this reference, the available models and the update status, and switches the current session's model. `malac_configure` sets or removes keys (comments in the file are kept and every change is validated), stores API keys and installs updates. `malac_configure` asks for approval unless you are in autopilot. Rules such as `malac_configure(set:ui.*)` pre-approve specific edits.
+The agent has two tools for its own configuration. `malac_settings` shows the config files, this reference, the available models, the update status, the session's context (`context`) and the plugins and marketplaces (`plugins`), and switches the current session's model. `malac_configure` sets or removes keys (comments in the file are kept and every change is validated), stores API keys, installs updates, and adds marketplaces and installs, enables, disables, updates and removes plugins. `malac_configure` asks for approval unless you are in autopilot; enabling a plugin that runs code asks you even in autopilot. Rules such as `malac_configure(set:ui.*)` pre-approve specific edits.
 
 ## `[daemon]`
 
@@ -159,8 +202,9 @@ The agent has two tools for its own configuration. `malac_settings` shows the co
 |---|---|---|
 | `idle_minutes` | `120` | Exit after this long with no clients, running agents, jobs or pending approvals; `0` never exits |
 | `browse_root` | home directory | The folder and file pickers (`GET /api/fs`) list only what is below this (`~/` allowed) |
+| `keep_awake` | `"busy"` | Keep the machine from sleeping: `"busy"` while agents or jobs run (released a minute after), `"always"` while the daemon runs, `"off"`. macOS uses `caffeinate`, Linux `systemd-inhibit`; see [remote.md](remote.md#keeping-the-machine-awake). The terminal UI's View menu and the web UI change it until the daemon restarts. |
 
-The daemon reads `[daemon]`, `[web]`, `[update]` and `[control]` from the user config only. Each tab loads the full configuration for its own directory. The daemon keeps the environment it was started with, so after changing an API key variable, restart it (`malac daemon restart`) or store the key with `malac provider add --api-key-stdin`.
+The daemon reads `[daemon]`, `[web]`, `[remote]`, `[update]` and `[control]` from the user config only. Each tab loads the full configuration for its own directory. The daemon keeps the environment it was started with, so after changing an API key variable, restart it (`malac daemon restart`) or store the key with `malac provider add --api-key-stdin`.
 
 ## `[ui]` and `[web]`
 
@@ -170,6 +214,27 @@ The daemon always serves the web UI; `malac web` prints or opens its address.
 |---|---|---|
 | `ui.show_thinking` | `false` | Stream model reasoning in the terminal (`-v`) |
 | `ui.tui` | `true` | Full-screen terminal UI; `false` uses the line-based interface (`--plain`) |
-| `web.remote` | `false` | The daemon listens on all interfaces instead of `web.host` (or start it with `malac daemon start --remote`) |
-| `web.host` | `127.0.0.1` | Bind address when not remote |
+| `web.remote` | `false` | Remote access: paired devices on other machines and through tunnels may connect (or start the daemon with `--remote`). Off, only local requests get in. See [remote.md](remote.md). |
+| `web.host` | `127.0.0.1`, or `0.0.0.0` with `web.remote` | Bind address. `127.0.0.1` with `web.remote` allows tunnels and SSH but keeps the daemon off the network. |
 | `web.port` | `7700` | Port of the daemon and its web UI; any free port when it is taken |
+
+## `[remote]`
+
+How other devices reach the daemon when `web.remote` allows them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tunnel` | none | Start this tunnel with the daemon and stop it with it: `"cloudflare"`, `"ngrok"`, `"tailscale"` (your tailnet) or `"tailscale-funnel"` (public). `malac tunnel <name>` starts one by hand. |
+| `public_url` | none | An address in front of the daemon, such as a reverse proxy with TLS (`https://malac.example.com`); offered first in pairing links after a running tunnel |
+
+```toml
+[web]
+remote = true
+host = "127.0.0.1"   # tunnels and SSH only
+
+[remote]
+tunnel = "cloudflare"
+
+[daemon]
+keep_awake = "busy"
+```

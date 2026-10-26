@@ -11,6 +11,7 @@ import { markdownNode } from "./markdown.js";
 import { api, checkControl, markAllStale, refresh, resource, state } from "./store.js";
 import { TAGLINE, controlSummary, updatePanel } from "./views.js";
 import { modelPicker, toggle } from "./widgets.js";
+import { remoteSection } from "./remote.js";
 
 export const SECTIONS = [
   { id: "general", title: "General", icon: "settings", blurb: "Models, permission mode and limits for new sessions." },
@@ -23,6 +24,7 @@ export const SECTIONS = [
   { id: "agents", title: "Agents", icon: "agents", blurb: "Subagent limits, agent types and skills." },
   { id: "profiles", title: "Profiles", icon: "layers", blurb: "Named overlays selected with malac --profile <name>." },
   { id: "interface", title: "Interface", icon: "eye", blurb: "Terminal and web interface options." },
+  { id: "remote", title: "Remote access", icon: "globe", blurb: "Other devices, pairing, tunnels and keeping the machine awake." },
   { id: "advanced", title: "Advanced", icon: "code", blurb: "Edit the configuration files as TOML." },
   { id: "about", title: "About", icon: "info", blurb: "Version, updates and where malac keeps its files." },
 ];
@@ -58,7 +60,7 @@ const DEFAULTS = {
 };
 const NAME = /^[A-Za-z0-9_-]+$/;
 const RULE = /^[\w*?.\-]+(\(.*\))?$/;
-const TOP_SECTIONS = ["permissions", "control", "memory", "agents", "ui", "web", "update", "daemon"];
+const TOP_SECTIONS = ["permissions", "control", "memory", "agents", "ui", "web", "update", "daemon", "remote"];
 
 // Paths and values
 
@@ -878,6 +880,8 @@ export class SettingsPage {
         return this.profiles();
       case "interface":
         return this.interfaceSection();
+      case "remote":
+        return remoteSection(this);
       case "advanced":
         return this.advanced();
       case "about":
@@ -2263,26 +2267,17 @@ export class SettingsPage {
         ],
         { description: "Applies the next time the daemon starts." },
       ),
-      this.group(
-        "Web",
-        [
-          this.field(["web", "remote"], {
-            type: "toggle",
-            label: "Allow other machines",
-            help: "Listen on all interfaces over plain HTTP. Anyone with the link and token can control malac.",
-            default: false,
-          }),
-          this.field(["web", "host"], { label: "Bind address", help: "Used when remote access is off.", placeholder: "127.0.0.1" }),
-          this.field(["web", "port"], { type: "int", label: "Port", help: "0 picks a free port.", placeholder: "7700" }),
-          h(
-            "p",
-            { class: "field-note" },
-            icon("info", 14),
-            state.web.remote ? "This server accepts connections from other machines." : "This server only accepts local connections.",
-            " Changes to the web server apply the next time it starts.",
-          ),
-        ],
-      ),
+      this.group("Web", [
+        h(
+          "p",
+          { class: "field-note" },
+          icon("info", 14),
+          state.web.remote ? "This daemon accepts paired devices from other machines." : "This daemon only accepts this machine and SSH tunnels.",
+          " Its address, port and remote access are under ",
+          h("a", { href: "#settings=remote" }, "Remote access"),
+          ".",
+        ),
+      ]),
     ];
   }
 

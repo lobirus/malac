@@ -14,11 +14,13 @@ import {
   plural,
   popover,
   relativeTime,
+  sessionStore,
   setChildren,
   toast,
 } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { jobsView } from "./jobs.js";
+import { pairScreen, takePairCode } from "./remote.js";
 import { SettingsPage } from "./settings.js";
 import {
   STATUS_TEXT,
@@ -35,6 +37,7 @@ import {
   displayName,
   ensure,
   ensureAgent,
+  forgetToken,
   invalidate,
   lineage,
   params,
@@ -46,6 +49,7 @@ import {
   resumeSession,
   selectTab,
   selectedAgent,
+  setAuthFailedHandler,
   setNavigator,
   setResyncHandler,
   setTabLostHandler,
@@ -1409,18 +1413,6 @@ function registerRenderers() {
   });
 }
 
-function fatal(message) {
-  els.composerDock.hidden = true;
-  setChildren(
-    els.content,
-    h(
-      "div",
-      { class: "view-scroll" },
-      h("div", { class: "fatal" }, pigLogo(40), h("h1", { class: "page-title" }, "Cannot connect"), h("p", { class: "muted" }, message)),
-    ),
-  );
-}
-
 let shown = false;
 
 function init() {
@@ -1432,9 +1424,13 @@ function init() {
   els.app.classList.toggle("embed", embedded);
   setSidebar(!narrowScreen.matches && ui.sidebarOpen);
   setNavigator(go);
+  const code = takePairCode();
   state.token = readToken();
+  setAuthFailedHandler(() => pair(null, "This browser's access was revoked, or its token is not valid here. Pair it again."));
   if (!state.token) {
-    fatal("Open the address printed by malac web; it includes the access token.");
+    const reason = sessionStore.get(PAIR_REASON) ?? "";
+    sessionStore.set(PAIR_REASON, null);
+    pair(code, reason);
     return;
   }
   // After every snapshot (first connect, reconnect, workspace switch) the
@@ -1461,10 +1457,30 @@ function init() {
 async function api401Check() {
   try {
     const response = await fetch("/api/daemon", { headers: { Authorization: `Bearer ${state.token}` } });
-    if (response.status === 401) fatal("The access token was not accepted. Open the address printed by malac again.");
+    if (response.status === 401) {
+      const why = await response.text();
+      pair(null, why.includes("master token") ? "The address's token works only on the machine running malac. Pair this browser instead." : "The access token was not accepted. Pair this browser, or open the address printed by malac again.");
+    }
   } catch {
     // Offline; the socket keeps retrying.
   }
+}
+
+const PAIR_REASON = "malac.pair-reason";
+
+/** Shows the pairing form; a paired browser reloads into the app. */
+function pair(code, reason = "") {
+  forgetToken();
+  if (state.loaded) {
+    // The app was showing: start over so nothing of it stays behind the form.
+    sessionStore.set(PAIR_REASON, reason);
+    location.reload();
+    return;
+  }
+  els.composerDock.hidden = true;
+  // Nothing else works before pairing: show the form on its own.
+  els.app.classList.add("unpaired");
+  pairScreen(els.content, { code: code ?? "", reason, onPaired: () => location.reload() });
 }
 
 init();

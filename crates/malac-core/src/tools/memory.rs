@@ -14,10 +14,11 @@ impl Tool for Save {
     }
 
     fn description(&self) -> String {
-        "Save a durable fact for future sessions: user preferences, project conventions, decisions and \
-         their reasons, pointers to external resources. One fact per memory; saving an existing name \
-         replaces it. Do not save what the code or git history already records. Scope `global` follows \
-         the user everywhere, `project` stays with this repository."
+        "Save a durable fact for future sessions: user preferences, project commands, conventions, gotchas, \
+         decisions and their reasons, pointers to external resources. One fact per memory; saving an existing \
+         name replaces it. Do not save what the code or git history already records. Scope `global` follows \
+         the user everywhere. Scope `project` is committed with the repository in `.malac/memory/` and listed \
+         in `.malac/MALAC.md` under its `kind`, so teammates and other machines get it too."
             .into()
     }
 
@@ -28,7 +29,12 @@ impl Tool for Save {
                 "name": { "type": "string", "description": "Short kebab-case identifier" },
                 "description": { "type": "string", "description": "One line used to decide relevance later" },
                 "content": { "type": "string" },
-                "scope": { "type": "string", "enum": ["global", "project"] }
+                "scope": { "type": "string", "enum": ["global", "project"] },
+                "kind": {
+                    "type": "string",
+                    "enum": ["command", "convention", "gotcha", "decision", "note"],
+                    "description": "For project memories: the section of MALAC.md it belongs to"
+                }
             },
             "required": ["name", "description", "content", "scope"]
         })
@@ -56,6 +62,7 @@ async fn save(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
             scope,
             str_arg(input, "name")?,
             str_arg(input, "description")?,
+            input["kind"].as_str(),
             str_arg(input, "content")?,
         )
         .await?;

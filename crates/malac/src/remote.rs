@@ -3,6 +3,7 @@
 //! when the terminal closes and every other client sees it.
 
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -23,7 +24,7 @@ use crate::approve::{TerminalApprover, TerminalLock};
 use crate::client::{Client, Events};
 use crate::protocol::{Command, ServerMessage, Snapshot, TabId, TabView};
 use crate::render::Renderer;
-use crate::repl::{PIG, Slash, TAGLINE, print_help, print_sessions, update_notice};
+use crate::repl::{PIG, Slash, TAGLINE, print_help, update_notice};
 
 struct Remote {
     client: Arc<Client>,
@@ -64,7 +65,11 @@ pub async fn run(
     let relay = relay(events, bus, client.clone(), tab.clone(), lock, main.clone());
 
     let view = launched.workspace.tab(&tab).cloned();
-    print_banner(&snapshot, &launched.workspace.name, view.as_ref(), &client);
+    let interactive =
+        !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive {
+        print_banner(&snapshot, &launched.workspace.name, view.as_ref(), &client);
+    }
     let mut remote = Remote {
         client,
         tab,
@@ -77,15 +82,46 @@ pub async fn run(
         remote.wait_for_turn().await;
         println!();
     }
+    if !interactive {
+        relay.abort();
+        return Ok(0);
+    }
     let result = remote.repl().await;
     relay.abort();
     if result.is_ok() {
+        let again = match &client_file_connection(&remote.client) {
+            Some(name) => format!("`malac -C {name} --plain`"),
+            None => "`malac --plain`".to_owned(),
+        };
         println!(
             "{}",
-            "the session keeps running in the daemon; `malac --plain` returns to it".dark_grey()
+            format!("the session keeps running in the daemon; {again} returns to it").dark_grey()
         );
     }
     result.map(|_| 0)
+}
+
+fn client_file_connection(client: &Client) -> Option<String> {
+    client.file().connection.clone()
+}
+
+/// Saved sessions as the daemon lists them, wherever it runs.
+async fn print_sessions(client: &Client, limit: usize) -> Result<()> {
+    let reply: Value = client.get(&format!("/api/sessions?limit={limit}")).await?;
+    let sessions: Vec<malac_core::session::SessionSummary> =
+        serde_json::from_value(reply["sessions"].clone())?;
+    for summary in sessions {
+        println!(
+            "{}  {}  {}",
+            summary.meta.id.as_str().dark_grey(),
+            summary
+                .updated
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M"),
+            summary.title
+        );
+    }
+    Ok(())
 }
 
 async fn start_agent(client: &Client, tab: &str) -> Result<AgentId> {
@@ -219,7 +255,11 @@ fn print_banner(snapshot: &Snapshot, workspace: &str, tab: Option<&TabView>, cli
         "/help for commands · Ctrl-C interrupts · Ctrl-D detaches"
             .to_owned()
             .dark_grey(),
-        format!("web UI: {}", client.file().web_url()).dark_grey(),
+        match &client.file().connection {
+            Some(name) => format!("connected to {name} · web UI: {}", client.file().web_url()),
+            None => format!("web UI: {}", client.file().web_url()),
+        }
+        .dark_grey(),
     ];
     for (art, text) in PIG.iter().zip(info) {
         println!("{}{text}", art.bold());
@@ -405,7 +445,7 @@ impl Remote {
                 *self.main.write().unwrap() = agent;
                 println!("{}", "started a new agent in this tab".dark_grey());
             }
-            Slash::Resume("") => print_sessions(10)?,
+            Slash::Resume("") => print_sessions(&self.client, 10).await?,
             Slash::Resume(id) => {
                 let reply = self
                     .client
@@ -422,7 +462,7 @@ impl Remote {
                 }
                 println!("{}", format!("resumed {id}").dark_grey());
             }
-            Slash::Sessions => print_sessions(20)?,
+            Slash::Sessions => print_sessions(&self.client, 20).await?,
             Slash::Agents => {
                 let view = self.tab_view().await?;
                 let main = self.main();
@@ -500,6 +540,7 @@ impl Remote {
                     println!("web UI: {url}");
                 }
             }
+            Slash::Forward(command) => self.turn(format!("/{command}")).await?,
         }
         Ok(Flow::Continue)
     }

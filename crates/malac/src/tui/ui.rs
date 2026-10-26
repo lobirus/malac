@@ -107,13 +107,11 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
             mark: app.tab_mark(i),
         })
         .collect();
-    let (line, spots) = bars::header(
-        highlighted,
-        &tabs,
-        app.active,
-        &app.workspace_name,
-        area.width,
-    );
+    let right = match app.connection_name() {
+        Some(name) => format!("{name} › {}", app.workspace_name),
+        None => app.workspace_name.clone(),
+    };
+    let (line, spots) = bars::header(highlighted, &tabs, app.active, &right, area.width);
     frame.render_widget(Paragraph::new(line), area);
     app.geometry.titles = spots
         .iter()
@@ -159,6 +157,8 @@ fn status_info(app: &App) -> bars::Status {
         update: app.update_segment(),
         daemon: app.daemon_segment(),
         control: app.control_issue(),
+        connection: app.connection_name().map(str::to_owned),
+        awake: app.awake.awake,
         branch: app.branch.clone(),
         clock: app.clock().to_owned(),
     }
@@ -961,6 +961,20 @@ fn draw_overlay(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Rename(rename)) => rename.draw(frame, hits),
         Some(Overlay::Confirm(confirm)) => confirm.draw(frame, hits),
         Some(Overlay::Update(dialog)) => dialog.draw(frame, &app.update, hits),
+        Some(Overlay::Remote(dialog)) => {
+            let shown = super::remote::Shown {
+                connection: app.backend.endpoint().label(),
+                url: app
+                    .backend
+                    .file()
+                    .map(|f| f.url.clone())
+                    .unwrap_or_default(),
+                version: &app.daemon.version,
+                remote: &app.remote,
+                awake: &app.awake,
+            };
+            dialog.draw(frame, &shown, hits);
+        }
         None => {}
     }
 }

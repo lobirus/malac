@@ -1,5 +1,9 @@
 .vscode/**
 src/**
+test/**
+harness/**
 node_modules/**
+out/test/**
+out/harness/**
 out/**/*.map
 tsconfig.json

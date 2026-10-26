@@ -1,12 +1,16 @@
 //! Web UI and daemon API: an HTTP server with a WebSocket message stream.
 //!
-//! Every API call needs the token (bearer header or `token` query
-//! parameter). Requests from this machine must name a loopback host, which
-//! blocks DNS rebinding; other machines can connect only when the server
-//! listens on all interfaces. The protocol is described in `docs/protocol.md`.
+//! Every API call needs a token (bearer header or `token` query
+//! parameter): the master token, which works only for local requests
+//! (from this machine, naming a loopback host, not through a proxy), or a
+//! paired device's token. Anything else is remote: refused outright unless
+//! remote access is on, which also keeps DNS rebinding out. The protocol
+//! is described in `docs/protocol.md`.
 
 mod fs;
+mod remote;
 mod settings;
+mod usage;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -30,6 +34,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::SessionOptions;
 use crate::client::{self, Client};
+use crate::daemon::access::{self, Caller, Reach};
 use crate::daemon::hub::Conn;
 use crate::daemon::{Hub, HubOptions, ServeArgs};
 use crate::protocol::{Command, Request as ClientRequest, ServerMessage, TabSpec};
@@ -48,6 +53,7 @@ const VIEWS_JS: &str = include_str!("../../../../web/views.js");
 const SETTINGS_JS: &str = include_str!("../../../../web/settings.js");
 const WORKSPACE_JS: &str = include_str!("../../../../web/workspace.js");
 const JOBS_JS: &str = include_str!("../../../../web/jobs.js");
+const REMOTE_JS: &str = include_str!("../../../../web/remote.js");
 const STYLE_CSS: &str = include_str!("../../../../web/style.css");
 const FAVICON_SVG: &str = include_str!("../../../../web/favicon.svg");
 const GEIST_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/Geist-Variable.woff2");
@@ -91,24 +97,25 @@ pub async fn run(args: WebArgs) -> Result<()> {
         };
         client.request(Command::TabCreate(spec)).await?;
     }
-    let urls = if file.urls.is_empty() {
-        vec![file.web_url()]
-    } else {
-        file.urls.clone()
-    };
+    let urls = vec![file.web_url()];
     if args.json_ready {
         println!(
             "{}",
             json!({ "url": file.url, "token": file.token, "urls": urls })
         );
     } else {
-        for url in &urls {
-            eprintln!("malac web UI: {url}");
+        eprintln!("malac web UI: {}", urls[0]);
+        let others: Vec<_> = snapshot
+            .remote
+            .urls
+            .iter()
+            .filter(|u| u.kind != crate::protocol::UrlKind::Local)
+            .collect();
+        for url in &others {
+            eprintln!("  other devices ({}): {}", url.kind.label(), url.url);
         }
-        if snapshot.daemon.remote {
-            eprintln!(
-                "! listening on all interfaces over plain HTTP: anyone with the URL can control malac"
-            );
+        if !others.is_empty() {
+            eprintln!("  they pair first: run `malac remote pair` for a code");
         }
     }
     if args.open {
@@ -140,11 +147,20 @@ pub async fn spawn_for(
             remote,
             idle_minutes: 0,
             browse_root: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            keep_awake: Default::default(),
+            public_url: None,
         },
     );
     let approver = hub.approver();
-    let server = Server::bind(hub, host, port, true, random_token()).await?;
-    let urls = server.urls();
+    let server = Server::bind(hub.clone(), host, port, true, random_token()).await?;
+    let lan = remote.then(|| server.lan_url()).flatten();
+    hub.set_listen(server.addr(), lan.clone());
+    let mut urls = server.urls();
+    if let Some(lan) = lan {
+        // Other machines pair: the code is in the link, valid once, for ten minutes.
+        let (code, _) = hub.access().create_code();
+        urls.push(format!("{lan}/#pair={code}"));
+    }
     tokio::spawn(async move {
         if let Err(err) = server.serve().await {
             tracing::error!("web server stopped: {err:#}");
@@ -198,8 +214,11 @@ impl Server {
             .route("/api/jobs", get(api_jobs))
             .route("/api/jobs/{id}/output", get(api_job_output))
             .route("/api/fs", get(fs::list))
+            .route("/api/usage", get(usage::summary))
             .merge(settings::routes())
-            .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
+            .merge(remote::routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+            .merge(remote::public_routes());
         let router = Router::new()
             .route(
                 "/",
@@ -228,6 +247,10 @@ impl Server {
             )
             .route("/jobs.js", get(|| async { script("jobs.js", JOBS_JS) }))
             .route(
+                "/remote.js",
+                get(|| async { script("remote.js", REMOTE_JS) }),
+            )
+            .route(
                 "/settings.js",
                 get(|| async { script("settings.js", SETTINGS_JS) }),
             )
@@ -248,7 +271,7 @@ impl Server {
                 get(|| async { font("fonts/GeistMono-Regular.woff2", GEIST_MONO_WOFF2) }),
             )
             .merge(api)
-            .layer(middleware::from_fn(check_host))
+            .layer(middleware::from_fn_with_state(state.clone(), check_reach))
             .with_state(state);
         Ok(Self {
             listener,
@@ -263,19 +286,21 @@ impl Server {
         base_url(self.addr)
     }
 
-    /// The local URL, plus the LAN URL when listening on all interfaces.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The UI address with the master token, which works on this machine only.
     pub fn urls(&self) -> Vec<String> {
-        let mut urls = vec![format!("{}/?token={}", self.base_url(), self.token)];
-        if self.addr.ip().is_unspecified() {
-            if let Some(ip) = lan_address() {
-                urls.push(format!(
-                    "http://{ip}:{}/?token={}",
-                    self.addr.port(),
-                    self.token
-                ));
-            }
+        vec![format!("{}/?token={}", self.base_url(), self.token)]
+    }
+
+    /// This machine's address on the network, when listening on every interface.
+    pub fn lan_url(&self) -> Option<String> {
+        if !self.addr.ip().is_unspecified() {
+            return (!self.addr.ip().is_loopback()).then(|| format!("http://{}", self.addr));
         }
-        urls
+        lan_address().map(|ip| format!("http://{ip}:{}", self.addr.port()))
     }
 
     /// Serves until the future is dropped. Open WebSockets would hold a
@@ -349,24 +374,22 @@ fn font(name: &str, embedded: &'static [u8]) -> Response {
         .into_response()
 }
 
-/// Connections from this machine must name a loopback host, so a web page
-/// on another origin cannot reach the API through DNS rebinding.
-async fn check_host(
+/// Sorts requests into local and remote, refusing remote ones while
+/// remote access is off. A page that rebinds its own name to this machine
+/// is remote too, so it gets nothing without a device token.
+async fn check_reach(
+    State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    if peer.ip().is_loopback() {
-        let host = request
-            .headers()
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or_default();
-        let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
-        if !matches!(name, "localhost" | "127.0.0.1" | "[::1]") {
-            return (StatusCode::FORBIDDEN, "unexpected Host header").into_response();
-        }
+    let reach = access::reach(peer.ip(), request.headers());
+    if reach == Reach::Remote && !state.hub.options().remote {
+        let message = "remote access is off: start the daemon with --remote (or set web.remote = \
+                       true) to let paired devices connect";
+        return (StatusCode::FORBIDDEN, message).into_response();
     }
+    request.extensions_mut().insert(reach);
     next.run(request).await
 }
 
@@ -375,21 +398,44 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+/// The master token from local requests, or a device token from anywhere.
 async fn authorize(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<TokenQuery>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let presented = bearer.or(query.token.as_deref());
-    if presented != Some(state.token.as_str()) {
-        return (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response();
-    }
+    let Some(presented) = bearer.or(query.token.as_deref()) else {
+        return (StatusCode::UNAUTHORIZED, "missing token").into_response();
+    };
+    let local = request.extensions().get::<Reach>() == Some(&Reach::Local);
+    let caller = if local && access::same_secret(presented, &state.token) {
+        Some(Caller::Owner)
+    } else {
+        let address = access::display_address(peer.ip(), &headers);
+        state
+            .hub
+            .access()
+            .authenticate(presented, Some(address))
+            .map(Caller::Device)
+    };
+    let Some(caller) = caller else {
+        let message = match access::same_secret(presented, &state.token) {
+            true => {
+                "the master token works only on the daemon's machine; pair this device with \
+                     `malac remote pair`"
+            }
+            false => "missing or invalid token",
+        };
+        return (StatusCode::UNAUTHORIZED, message).into_response();
+    };
+    request.extensions_mut().insert(caller);
     next.run(request).await
 }
 
@@ -563,32 +609,48 @@ struct WsQuery {
 async fn api_ws(
     State(state): Shared,
     Query(query): Query<WsQuery>,
+    axum::Extension(caller): axum::Extension<Caller>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    let allowed = match origin {
-        None => true,
-        Some(origin) => {
-            origin == format!("http://{host}")
-                || origin.starts_with("vscode-webview://")
-                || origin.starts_with("vscode-file://")
-        }
-    };
-    if !allowed {
+    if !origin.is_none_or(|origin| origin_allowed(origin, &headers)) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    ws.on_upgrade(move |socket| client_socket(state, socket, query.version))
+    let device = caller.device().map(str::to_owned);
+    ws.on_upgrade(move |socket| client_socket(state, socket, query.version, device))
+}
+
+/// Browsers may open the socket from the page's own origin, as the daemon
+/// or a proxy in front of it sees it, and from VS Code webviews. Clients
+/// that are not browsers send no `Origin`.
+fn origin_allowed(origin: &str, headers: &HeaderMap) -> bool {
+    if origin.starts_with("vscode-webview://") || origin.starts_with("vscode-file://") {
+        return true;
+    }
+    let Some(origin_host) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    [header::HOST.as_str(), "x-forwarded-host"]
+        .iter()
+        .filter_map(|name| headers.get(*name)?.to_str().ok())
+        .any(|host| host.eq_ignore_ascii_case(origin_host))
 }
 
 /// One client: the snapshot first, then every broadcast message and the
-/// replies to its own commands, which run one at a time in order.
-async fn client_socket(state: Arc<AppState>, socket: WebSocket, version: Option<String>) {
+/// replies to its own commands, which run one at a time in order. A paired
+/// device's socket closes when the device is revoked.
+async fn client_socket(
+    state: Arc<AppState>,
+    socket: WebSocket,
+    version: Option<String>,
+    device: Option<String>,
+) {
     let hub = state.hub.clone();
+    let mut revoked = hub.access().subscribe();
     let _client = hub.connected();
     let (mut sink, mut source) = socket.split();
     let mut conn = Conn {
@@ -635,6 +697,11 @@ async fn client_socket(state: Arc<AppState>, socket: WebSocket, version: Option<
         let frame = tokio::select! {
             frame = source.next() => frame,
             _ = &mut stopped => break,
+            id = revoked.recv(), if device.is_some() => match id {
+                Ok(id) if Some(&id) == device.as_ref() => break,
+                Err(broadcast::error::RecvError::Closed) => break,
+                _ => continue,
+            },
         };
         let Some(Ok(frame)) = frame else { break };
         let WsMessage::Text(text) = frame else {

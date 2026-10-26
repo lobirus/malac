@@ -19,9 +19,9 @@ The daemon writes `~/.malac/daemon.json` (mode 0600) when it starts and removes 
 
 A file can outlive a crashed daemon, so a client treats the daemon as running only when `pid` is alive and `GET {url}/api/daemon` answers. To start one, run `malac daemon start` (or spawn `malac daemon run` detached) and wait for the file; `client::ensure_daemon` does both. `~/.malac/daemon.lock` keeps two daemons from serving one home.
 
-- **Token.** Every `/api` request needs it, as `Authorization: Bearer <token>` or a `token` query parameter. It is kept in `~/.malac/daemon.token` across restarts, so open pages reconnect; delete the file to rotate it. `--token` or `MALAC_WEB_TOKEN` override it.
-- **Host check.** A request from this machine must name a loopback host (`127.0.0.1`, `localhost` or `[::1]`) in `Host`, which defeats DNS rebinding. With `web.remote` the daemon listens on all interfaces and other machines may connect with the token.
-- **Origin.** WebSocket upgrades are accepted without an `Origin`, from the daemon's own origin and from VS Code webviews.
+- **Local and remote.** A request is local when it comes from a loopback address, names a loopback host (`127.0.0.1`, `localhost` or `[::1]`) in `Host` and carries no proxy header (`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `CF-Connecting-IP`). Everything else is remote: other machines, tunnels and proxies, and pages that rebind their own name to this machine. Without remote access (`web.remote`, `--remote`) remote requests get `403`, the web page included.
+- **Tokens.** Every `/api` request needs a token, as `Authorization: Bearer <token>` or a `token` query parameter. The master token (`daemon.json`, kept in `~/.malac/daemon.token` across restarts; delete the file to rotate it, `--token` or `MALAC_WEB_TOKEN` override it) works on local requests only. Paired devices use their own token, local or remote; see [pairing](#pairing-and-devices). A `401` says which.
+- **Origin.** WebSocket upgrades are accepted without an `Origin` (apps, the CLI), from the page's own origin (`Origin` equals `http://` or `https://` plus `Host`, or plus `X-Forwarded-Host` behind a proxy) and from VS Code webviews.
 
 ## Concepts
 
@@ -37,7 +37,7 @@ Tabs load lazily: a tab's runtime is built (configuration read, MCP servers conn
 
 ## WebSocket
 
-Connect to `ws://127.0.0.1:<port>/api/ws?token=<token>&version=<client version>`. The `version` parameter is optional; when it differs from the daemon's, the snapshot sets `daemon.version_mismatch` so the client can suggest `malac daemon restart`. Updating malac never touches a running daemon: it keeps its version until it restarts.
+Connect to `ws://127.0.0.1:<port>/api/ws?version=<client version>` with `Authorization: Bearer <token>` (`wss://` for a daemon behind TLS). Browsers, which cannot set headers on a WebSocket, pass `token=<token>` in the query instead. The `version` parameter is optional; when it differs from the daemon's, the snapshot sets `daemon.version_mismatch` so the client can suggest `malac daemon restart`. Updating malac never touches a running daemon: it keeps its version until it restarts.
 
 The first message is always a `snapshot`. Everything after it is either a broadcast (every client gets it) or a reply to one of this client's commands. A client applies broadcasts to the snapshot to stay current. If it falls behind, it gets `{"type": "lagged", "skipped": n}` and should send `snapshot` to resync.
 
@@ -129,6 +129,7 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
 | `job_output` | `job`; `tail`? (lines, default 100, max 2000) | `job_output` |
 | `job_kill` | `job` | `ack`. SIGTERM to its process group, SIGKILL after 3 s; `job_finished` follows. |
 | `control_permissions` | `request`? | `control`; also broadcast. With `request`, macOS shows its Screen Recording and Accessibility prompts and System Settings opens at the missing ones. |
+| `keep_awake` | `mode`: `busy`, `always` or `off` | `ack`; broadcasts `awake` when it changes. Lasts until the daemon restarts; `daemon.keep_awake` is the default. |
 | `ping` | | `pong` |
 
 ### Server messages
@@ -147,7 +148,9 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
   "update": { "current": "0.1.2", "latest": null, "available": false, "installed": null, … },
   "control": ControlStatus,
   "models": ["lora/default", "lora/smart", "lora/fast"],
-  "default_model": "lora/fast"
+  "default_model": "lora/fast",
+  "remote": RemoteStatus,
+  "awake": AwakeStatus
 }
 ```
 
@@ -181,6 +184,8 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `control` | `control`: ControlStatus | the control service connected or its permissions were checked |
 | `mode` | `mode`, `tab`, `workspace` | a mode changed: one tab's, or with `tab` null every tab of `workspace` |
 | `clients` | `clients` | a client connected or left |
+| `remote` | `remote`: RemoteStatus | a tunnel started, stopped or got its address; a device paired or was revoked |
+| `awake` | `awake`: AwakeStatus | keep-awake took or released its assertion, or its mode or reason changed |
 | `notice` | `level` (`info`, `warning`, `error`), `message`, `tab`? | e.g. a configuration warning or an unavailable MCP server while a tab loads |
 | `reloaded` | | settings were applied; idle tabs reload on next use |
 | `shutdown` | `reason` | the daemon is stopping (`signal`, `idle`, `stopped by a client`, …) |
@@ -218,11 +223,25 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
   "mode": "ask",
   "options": { "model": "lora/smart", "mode": "ask" },
   "loaded": true,
-  "snapshots": [ AgentView, … ]
+  "snapshots": [ AgentView, … ],
+  "project": ProjectView
 }
 ```
 
-`agents` lists the top-level agents in order; `mode` is the mode in effect; `options` holds what the tab was opened with (`model`, `mode`, `profile`, `no_control`, all optional). `snapshots` has one AgentView per top-level agent plus the live subagents.
+`agents` lists the top-level agents in order; `mode` is the mode in effect; `options` holds what the tab was opened with (`model`, `mode`, `profile`, `no_control`, all optional). `snapshots` has one AgentView per top-level agent plus the live subagents. `project` is there once the tab is loaded.
+
+**ProjectView** says where the tab sits in its repository and which custom slash commands it has:
+
+```json
+{ "root": "/src/shop", "subdir": "frontend", "siblings": ["backend", "infra"],
+  "suggest_root": "/src/shop",
+  "commands": [ { "name": "ponytail:ponytail-review", "description": "Quality review of a change…",
+                  "source": "skill" },
+                { "name": "release-tools:release-notes", "description": "Draft release notes for a version",
+                  "argument_hint": "<version>", "source": "plugin release-tools@malac-examples" } ] }
+```
+
+`subdir`, `siblings` and `suggest_root` are present only when the tab's directory is below the repository root. `suggest_root` is set when the repository has other parts that are projects of their own (`backend/` next to `frontend/`): show something like "This is part of a larger repository: open /src/shop to work across all of it", whose action is `tab_create` with that `cwd`. `commands` are what `/name args` runs besides the built-in commands, for completion and `/help`: plugin commands (`plugin:name`), command files and skills; `source` is `user`, `project`, `plugin <id>` or `skill`. Send them as ordinary `prompt` text; the agent expands them, and answers `/context` itself without a model call.
 
 **AgentView** is the runtime's agent snapshot plus `live` and, for saved sessions, `title` (the first prompt):
 
@@ -239,15 +258,21 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 
 **JobView** `{id, command, cwd, pid, log, started, finished, exit_code, status, agent, tab}`, `status` being `running`, `exited` (see `exit_code`), `killed` or `unknown` (it ended while no daemon watched). `tab` is the tab of the agent that started it, when known.
 
+**RemoteStatus** `{enabled, listen, urls: [{kind, url}], tunnel: TunnelStatus | null, devices}`. `enabled` is whether remote access is on; `listen` the bound address (`0.0.0.0:7700`); `urls` the addresses other devices can use, best first, `kind` being `tunnel`, `public` (`remote.public_url`), `lan` (this machine's network address) or `local` (loopback, for SSH tunnels); `devices` the number of paired devices.
+
+**TunnelStatus** `{provider, state, url, error, notes, started}`: `provider` is `cloudflare`, `ngrok`, `tailscale` or `tailscale-funnel`; `state` is `starting`, `running` (with `url`), `failed` (with `error`, the tool's last lines) or `stopped`; `notes` are what to know about that kind of tunnel.
+
+**AwakeStatus** `{mode, awake, reason, method, error, since}`: `mode` is `busy`, `always` or `off`; `awake` whether a power assertion is held; `reason` why, for people (`2 agents running`, `nothing is running`, `idle only: …`); `method` `caffeinate` or `systemd-inhibit` (null where neither exists); `error` why taking it failed; `since` when `awake` last changed.
+
 **ControlStatus** `{enabled, connected, tools, error, permissions}`. `permissions` is the control service's report: `{platform, screen_recording, accessibility, app: {name, path}, requested, hint}`, where the two permissions are `true`, `false` or `null` (not needed on this platform) and `app` is the app macOS grants them to.
 
 ## REST
 
-All under the token. JSON in and out; failures are `{"error": "…"}` with status 400 (403 for `/api/fs` outside its root, 409 for a refused stop).
+All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out; failures are `{"error": "…"}` with status 400 (403 for `/api/fs` outside its root, 409 for a refused stop).
 
 | Endpoint | |
 |---|---|
-| `GET /api/daemon` | Version, pid, start time, clients, `workspaces`, `tabs_loaded`, `agents_running`, `jobs_running`, `pending_approvals`, `idle_minutes`, `url` |
+| `GET /api/daemon` | Version, pid, start time, clients, `workspaces`, `tabs_loaded`, `agents_running`, `jobs_running`, `pending_approvals`, `idle_minutes`, `url`, `remote_access` (RemoteStatus), `awake` (AwakeStatus) |
 | `POST /api/daemon/stop` `{force?}` | Stops the daemon; 409 while agents or jobs run, unless `force` |
 | `GET /api/snapshot?workspace=` | The snapshot, as on the WebSocket |
 | `POST /api/command` | Any command above, same JSON; returns its reply (or an `ack`) |
@@ -257,8 +282,77 @@ All under the token. JSON in and out; failures are `{"error": "…"}` with statu
 | `GET /api/fs?path=&hidden=&files=` | A directory's contents for folder and file pickers: `{path, parent, root, markers, entries: [{name, path, kind, size?, markers}], truncated}`. Entries are its subdirectories (`kind: "directory"`) and, with `files=true`, its files (`kind: "file"`, `size` in bytes) after them. `markers` names what a directory holds among `.git`, `.malac`, `AGENTS.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`. `path` is absolute, `~/…` or relative to the root; only what is below `daemon.browse_root` (default: the home directory) is listed, at most 1000 entries. `hidden=true` includes dot entries. |
 | `GET /api/sessions?cwd=&limit=&subagents=` | Saved sessions, newest first: `{sessions: [{id, label, parent, cwd, model, created, title, updated}]}`. `cwd` keeps those started in that directory; `limit` defaults to 50; `subagents=true` includes subagent sessions. `title` is the first prompt's typed text. Clients use this rather than reading `~/.malac/sessions`, so it works with a daemon on another machine. |
 | `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | A transcript (`meta`, `history`, `usage`); deleting also removes it from its tabs |
+| `GET /api/usage?days=` | Token and cost totals from the session transcripts, see [below](#usage). Read-only. |
 | `GET /api/state` | The original web UI's state: the active tab's `cwd`, `mode`, `models` and `servers`, every live agent, recent sessions, pending requests |
-| `/api/settings`, `/api/models`, `/api/tools`, `/api/memory`, `/api/update`, `/api/providers/{name}/key` | Settings, as before. They act on the active tab's runtime; `POST /api/settings/apply` reloads idle tabs. |
+| `/api/settings`, `/api/models`, `/api/tools`, `/api/memory`, `/api/update`, `/api/providers/{name}/key` | Settings, as before. They act on the active tab's runtime; `POST /api/settings/apply` reloads idle tabs. `GET /api/settings` includes `context`, a ContextReport. |
+
+**ContextReport** is what `/context`, `malac context --json` and `malac_settings` (`show: "context"`) report:
+
+```json
+{
+  "layout": { "root": "/src/shop", "subdir": "frontend", "siblings": ["backend"], "suggest_root": "/src/shop" },
+  "instructions": {
+    "loaded": [ { "path": "/src/shop/AGENTS.md", "kind": "AGENTS.md", "chars": 263, "truncated": false } ],
+    "rules": [ { "path": "/src/shop/.cursor/rules/go.mdc", "kind": "Cursor rule", "description": "Go conventions", "globs": ["backend/**/*.go"] } ],
+    "skipped": [ { "path": "/src/shop/CLAUDE.md", "reason": "same text as /src/shop/AGENTS.md" } ]
+  },
+  "docs": [ { "path": "README.md", "title": "Shop", "summary": "A small web shop." } ],
+  "index": { "path": "/src/shop/.malac/index.md", "exists": true, "updated": "…", "files": 412 },
+  "knowledge": { "path": "/src/shop/.malac/MALAC.md", "exists": true, "chars": 1200 },
+  "skills": [ { "name": "ponytail:ponytail-review", "description": "…", "path": "…/SKILL.md", "source": "plugin ponytail@malac",
+                "model_invocable": true, "user_invocable": true } ],
+  "commands": [ CommandInfo, … ],
+  "agent_types": [ { "name": "release-tools:release-reviewer", "description": "…", "model": null, "tools": ["read", "grep"], "source": "plugin release-tools@malac-examples" } ],
+  "plugins": [ PluginInfo, … ],
+  "warnings": [ "plugin guard@team: hooks not approved, so they do not run; `malac plugin enable guard@team` reviews them" ]
+}
+```
+
+`index` is absent outside a repository or with `[context] index = false`. **PluginInfo** (also `malac plugin list --json`):
+
+```json
+{ "id": "ponytail@ponytail", "name": "ponytail", "marketplace": "ponytail", "version": "5.3.2",
+  "description": "…", "enabled": true, "scope": "user", "installed": true, "path": "…",
+  "formats": ["claude-code"], "skills": ["ponytail", "ponytail-review"], "commands": ["ponytail-review"],
+  "agents": [], "mcp": [], "hooks": ["SessionStart", "UserPromptSubmit"], "scripts": true,
+  "approved": ["hooks", "scripts"], "pending": [], "unsupported": ["userConfig"], "warnings": [] }
+```
+
+`scope` is `user`, `project` or `builtin` (which file turns it on or off), absent when no file mentions it; `pending` names hooks or MCP servers that are not approved and so do not run; `error`, when present, says why a listed plugin could not be loaded (for example, enabled by the project but not installed here). Optional fields (`argument_hint`, `version`, `description`, `scope`, `error`) are left out when empty.
+
+### Pairing and devices
+
+| Endpoint | |
+|---|---|
+| `GET /api/hello` | No token. `{app: "malac", version, remote, pairing: true}`, so a client can tell it found a daemon. |
+| `POST /api/pair` `{code, name, kind?}` | No token. Trades a pairing code for a device token: `{token, device: DeviceView, version}`. `kind` is `cli`, `browser`, `app` or anything short (default `client`). `403` for a wrong, used or expired code; `429` after ten wrong codes, until a new code is made. |
+| `POST /api/pair/codes` | A new code: `{code: "ABCDE-FGHJK", expires, links: [{kind, base, url, svg}]}`, valid ten minutes for one device. `links` has one entry per address in RemoteStatus `urls`: `url` is `<base>/#pair=<code>`, `svg` its QR code. |
+| `GET /api/devices` | `{devices: [DeviceView]}`, oldest first |
+| `DELETE /api/devices/{id}` | `{revoked: DeviceView}`. The token stops working and the device's WebSockets close; broadcasts `remote`. |
+| `GET /api/remote` | RemoteStatus |
+| `POST /api/tunnel` `{provider}` | Starts a tunnel (replacing a running one): TunnelStatus, usually `starting`; `remote` broadcasts follow. Refused without remote access, or with an install hint when the tool is missing. |
+| `DELETE /api/tunnel` | `{stopped: bool}` |
+
+**DeviceView** `{id, name, kind, created, last_seen, address, current}`: `address` is where it last connected from (the client's address a proxy forwarded, for display); `current` marks the device making the request.
+
+A code is ten characters of Crockford base32, shown as `XXXXX-XXXXX`; case, dashes and spaces do not matter, and `O`, `I` and `L` read as `0`, `1`, `1`. Device tokens are stored as SHA-256 hashes in `~/.malac/devices.json`. [remote.md](remote.md#for-apps) walks through pairing from an app.
+
+### Usage
+
+`GET /api/usage?days=30` adds up the `usage` records of every transcript in `~/.malac/sessions`, subagents included, over the last `days` local days (today included; default 30, at most 366). The editor extension's Usage view calls it with `days=7`.
+
+```json
+{
+  "days": 7, "since": "2026-10-20",
+  "today": { "input_tokens": 51200, "output_tokens": 1830, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": 0.012, "sessions": 3 },
+  "week":  { …the last 7 days, today included… },
+  "total": { …the whole window… },
+  "by_model": [{ "model": "lora/default", "input_tokens": 51200, …, "sessions": 3 }],
+  "by_day":   [{ "date": "2026-10-26", "input_tokens": 51200, …, "sessions": 3 }]
+}
+```
+
+Each bucket is a [Usage](../crates/malac-core/src/message.rs) plus `sessions`, the number of transcripts in it. `by_model` is sorted by tokens, largest first; `by_day` by date and lists only days with usage. Usage records carry no timestamp or model, so a transcript counts on the day it was last written, under the model it started with. Only the metadata and usage lines of each file are decoded.
 
 ## The original web UI
 
@@ -296,5 +390,6 @@ while let Some(message) = events.recv().await {
 - `client::running()` returns the live daemon's `DaemonFile`, if any; `client::ensure_daemon(&ServeArgs)` starts one first; `Client::connect(&file)` connects; `Client::connect_or_start` does all three.
 - `Client::request` sends a command with a fresh `client_ref` and resolves with its reply; an `error` reply becomes `Err`. `Client::send` does not wait.
 - `Client::launch` wraps `launch`; `RunArgs::launch(cwd, prompt)` builds the `Launch` from the command line (`-n`, `-w`, `--name`, `-c`, `-r`, `-m`, `--mode`, `-y`, `--profile`, `--no-control`).
-- `Client::get`/`Client::post` call the REST API with the token; `Client::info` is `GET /api/daemon`.
+- `Client::get`/`Client::post`/`Client::delete` call the REST API with the token; `Client::info` is `GET /api/daemon`.
+- A daemon elsewhere: `DaemonFile::remote(name, url, token)` describes it, and `connections::resolve(Some(name))` returns the saved connection as an `Endpoint` whose `connect()` connects (`local` and `None` are this machine's daemon, started if needed).
 - `Events` is an unbounded receiver of every message that is not a reply; it ends when the daemon disconnects (`shutdown` comes first when it stops on purpose).

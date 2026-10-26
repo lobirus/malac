@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use malac_core::attach::Attachment;
+use malac_core::config::{KeepAwake, Tunnel};
 use malac_core::event::{AgentId, Level};
 use malac_core::jobs::{JobInfo, JobOutput};
 use malac_core::permission::{Decision, Mode, PermissionRequest};
@@ -156,6 +157,10 @@ pub enum Command {
     ControlPermissions {
         #[serde(default)]
         request: bool,
+    },
+    /// Changes when the daemon keeps the machine awake, until it restarts.
+    KeepAwake {
+        mode: KeepAwake,
     },
     Ping,
 }
@@ -366,6 +371,15 @@ pub enum ServerMessage {
     Clients {
         clients: usize,
     },
+    /// Remote access changed: a tunnel started or stopped, a device was
+    /// paired or revoked.
+    Remote {
+        remote: RemoteStatus,
+    },
+    /// The daemon started or stopped keeping the machine awake.
+    Awake {
+        awake: AwakeStatus,
+    },
     /// Settings were applied; refetch cached resources.
     Reloaded,
     /// The connection fell behind and missed `skipped` messages; resync.
@@ -432,6 +446,10 @@ pub struct Snapshot {
     /// Every configured `provider/model`.
     pub models: Vec<String>,
     pub default_model: Option<String>,
+    #[serde(default)]
+    pub remote: RemoteStatus,
+    #[serde(default)]
+    pub awake: AwakeStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,6 +517,11 @@ pub struct TabView {
     /// Every known agent of the tab: the top-level ones, live or saved, and
     /// the live subagents (which have a `parent`).
     pub snapshots: Vec<AgentView>,
+    /// Once loaded: where the tab sits in its repository (with a
+    /// `suggest_root` when it is one part of a larger one) and its custom
+    /// slash commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<malac_core::context::Summary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +561,154 @@ pub struct ControlStatus {
     pub permissions: Option<Value>,
 }
 
+/// How other machines reach the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RemoteStatus {
+    /// Paired devices on other machines may connect (`web.remote`).
+    pub enabled: bool,
+    /// The address and port the daemon listens on, e.g. `0.0.0.0:7700`.
+    pub listen: String,
+    /// Addresses other devices can use, best first.
+    pub urls: Vec<RemoteUrl>,
+    pub tunnel: Option<TunnelStatus>,
+    /// Paired devices.
+    pub devices: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteUrl {
+    pub kind: UrlKind,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UrlKind {
+    /// The public address of a running tunnel.
+    Tunnel,
+    /// `remote.public_url`, e.g. a reverse proxy.
+    Public,
+    /// This machine's address on its network (on a server, possibly public).
+    Lan,
+    /// The loopback address, for this machine and SSH tunnels.
+    Local,
+}
+
+impl UrlKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            UrlKind::Tunnel => "tunnel",
+            UrlKind::Public => "public",
+            UrlKind::Lan => "network address",
+            UrlKind::Local => "this machine or an SSH tunnel",
+        }
+    }
+
+    /// A label for a column of addresses.
+    pub fn short(self) -> &'static str {
+        match self {
+            UrlKind::Tunnel => "tunnel",
+            UrlKind::Public => "public",
+            UrlKind::Lan => "network",
+            UrlKind::Local => "SSH tunnel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TunnelStatus {
+    pub provider: Tunnel,
+    pub state: TunnelState,
+    /// The public address, once the tunnel reports it.
+    pub url: Option<String>,
+    pub error: Option<String>,
+    /// What to know about this kind of tunnel.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    pub started: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelState {
+    Starting,
+    Running,
+    Failed,
+    Stopped,
+}
+
+/// Whether the daemon keeps the machine from sleeping, and why.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AwakeStatus {
+    pub mode: KeepAwake,
+    /// A power assertion is held right now.
+    pub awake: bool,
+    /// Why it is held or not, e.g. "2 agents running".
+    pub reason: String,
+    /// `caffeinate` or `systemd-inhibit`.
+    pub method: Option<String>,
+    pub error: Option<String>,
+    /// When the current state began.
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// A paired device, as `GET /api/devices` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// `cli`, `browser`, `app` or what the device said it is.
+    pub kind: String,
+    pub created: DateTime<Utc>,
+    pub last_seen: Option<DateTime<Utc>>,
+    /// The address it last connected from, as the daemon saw it.
+    pub address: Option<String>,
+    /// The device making this request.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// A fresh pairing code and the links that carry it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pairing {
+    /// `XXXXX-XXXXX`, valid once.
+    pub code: String,
+    pub expires: DateTime<Utc>,
+    /// `<url>/#pair=<code>` for each address in `RemoteStatus::urls`, and
+    /// the loopback one.
+    pub links: Vec<PairLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairLink {
+    pub kind: UrlKind,
+    /// The daemon's address.
+    pub base: String,
+    /// The address with the code, for a browser or a QR code.
+    pub url: String,
+    /// The link as a QR code.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub svg: String,
+}
+
+/// `POST /api/pair`: a device trades a pairing code for its token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRequest {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Paired {
+    /// The device token; send it like the master token.
+    pub token: String,
+    pub device: DeviceView,
+    /// The daemon's version.
+    pub version: String,
+}
+
 /// `GET /api/daemon`: what `malac daemon status` shows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -550,6 +721,11 @@ pub struct DaemonInfo {
     pub jobs_running: usize,
     pub pending_approvals: usize,
     pub idle_minutes: u64,
+    /// Named apart from `remote`, the flag in the status above.
+    #[serde(default)]
+    pub remote_access: RemoteStatus,
+    #[serde(default)]
+    pub awake: AwakeStatus,
 }
 
 impl DaemonInfo {
@@ -632,6 +808,7 @@ mod tests {
             },
             loaded: false,
             snapshots: Vec::new(),
+            project: None,
         };
         let text = serde_json::to_string(&view).unwrap();
         let back: TabView = serde_json::from_str(&text).unwrap();

@@ -33,15 +33,17 @@ use super::files;
 use super::folder::FolderBrowser;
 use super::jobs::JobsView;
 use super::menu::{Item, Menu, Place};
+use super::remote::{Page as RemotePage, RemoteDialog};
 use super::select::{self, Point, Selection};
 use super::term;
 use super::text;
 use super::theme::theme;
 use super::transcript::{AgentView, Agents, Entry, SPINNER, duration};
-use crate::client::{Client, Events};
+use crate::client::{Client, Events, Launched};
+use crate::connections::Endpoint;
 use crate::protocol::{
-    ControlStatus, DaemonStatus, JobView, ServerMessage, Snapshot, TabId, TabView,
-    WorkspaceSummary, WorkspaceView,
+    AwakeStatus, ControlStatus, DaemonStatus, JobView, RemoteStatus, ServerMessage, Snapshot,
+    TabId, TabView, WorkspaceSummary, WorkspaceView,
 };
 use crate::render::tokens;
 use crate::repl::{COMMANDS, Slash};
@@ -249,6 +251,7 @@ pub enum Overlay {
     Rename(Rename),
     Confirm(Confirm),
     Update(UpdateDialog),
+    Remote(RemoteDialog),
 }
 
 /// Results of work done in the background.
@@ -265,6 +268,10 @@ pub enum Update {
     Pasted(Result<Attachment, String>),
     /// Reconnecting gave up, with why.
     Unreachable(String),
+    /// Another daemon's workspaces, for the switcher.
+    OtherWorkspaces(Endpoint, Result<Vec<WorkspaceSummary>, String>),
+    /// Switching to another daemon failed.
+    SwitchFailed(String),
 }
 
 /// Where things were drawn in the last frame, for keys that depend on layout.
@@ -391,6 +398,10 @@ pub struct App {
     pub discovering: bool,
     pub update: Status,
     pub control: ControlStatus,
+    pub remote: RemoteStatus,
+    pub awake: AwakeStatus,
+    /// Workspaces of the other daemons, as they answered.
+    pub other_workspaces: Vec<(Endpoint, Result<Vec<WorkspaceSummary>, String>)>,
     pub hits: HitMap,
     pub geometry: Geometry,
     /// Every agent of the workspace as last reported, kept current from events.
@@ -484,6 +495,9 @@ impl App {
             discovering: false,
             update: snapshot.update.clone(),
             control: ControlStatus::default(),
+            remote: RemoteStatus::default(),
+            awake: AwakeStatus::default(),
+            other_workspaces: Vec::new(),
             hits: HitMap::default(),
             geometry: Geometry::default(),
             snapshots: HashMap::new(),
@@ -524,6 +538,47 @@ impl App {
         app.branch = git_branch(&app.tab_cwd());
         app.recent = recent_sessions(&app.tab_cwd(), &app.tabs, &app.sessions);
         app
+    }
+
+    /// The interface on another daemon, keeping how this one was set up:
+    /// the editor and its history, the sidebar, the mouse and the views.
+    pub fn switched(
+        self,
+        client: Client,
+        endpoint: Endpoint,
+        snapshot: Snapshot,
+        launched: Launched,
+    ) -> Self {
+        let mut backend = self.backend;
+        let label = endpoint.label();
+        backend.switch_to(client, endpoint);
+        let home_cwd = match backend.endpoint() {
+            Endpoint::Local => std::env::current_dir().unwrap_or_else(|_| self.home_cwd.clone()),
+            Endpoint::Saved(_) => PathBuf::from("~"),
+        };
+        let mut app = Self::new(
+            backend,
+            self.config,
+            snapshot,
+            &launched.workspace,
+            launched.tab.as_deref(),
+            home_cwd,
+        );
+        app.editor = self.editor;
+        app.attachments = self.attachments;
+        app.sidebar = self.sidebar;
+        app.mouse_capture = self.mouse_capture;
+        app.agents.show_thinking = self.agents.show_thinking;
+        app.agents_view = self.agents_view;
+        app.clear_screen = true;
+        crate::connections::remember(app.backend.endpoint().name());
+        app.flash_ok(format!("connected to {label}"));
+        app
+    }
+
+    /// The daemon's name when it is not this machine's.
+    pub fn connection_name(&self) -> Option<&str> {
+        self.backend.endpoint().name()
     }
 
     pub fn tab(&self) -> &Tab {
@@ -852,6 +907,13 @@ impl App {
                 }
             }
             ServerMessage::Clients { clients } => self.daemon.clients = clients,
+            ServerMessage::Remote { remote } => {
+                self.remote = remote;
+                if let Some(Overlay::Remote(_)) = &self.overlay {
+                    self.backend.devices();
+                }
+            }
+            ServerMessage::Awake { awake } => self.awake = awake,
             ServerMessage::Reloaded => self.flash_ok("settings applied"),
             ServerMessage::Lagged { skipped } => {
                 self.flash(format!("missed {skipped} updates; catching up"));
@@ -1040,6 +1102,8 @@ impl App {
         self.workspaces = snapshot.workspaces;
         self.update = snapshot.update;
         self.control = snapshot.control;
+        self.remote = snapshot.remote;
+        self.awake = snapshot.awake;
         self.models = snapshot.models;
         self.default_model = snapshot.default_model;
         self.jobs = snapshot.jobs;
@@ -1240,6 +1304,17 @@ impl App {
                 self.flash(format!(
                     "the daemon is unreachable: {err} · Ctrl-R tries again"
                 ));
+            }
+            Update::OtherWorkspaces(endpoint, result) => {
+                self.other_workspaces.retain(|(e, _)| *e != endpoint);
+                self.other_workspaces.push((endpoint, result));
+                let rows = self.workspace_rows();
+                if let Some(Overlay::Workspaces(picker)) = &mut self.overlay {
+                    picker.set_rows(rows);
+                }
+            }
+            Update::SwitchFailed(err) => {
+                self.flash(format!("cannot switch: {}", text::first_line(&err)));
             }
         }
     }

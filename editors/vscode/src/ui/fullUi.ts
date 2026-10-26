@@ -1,9 +1,14 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
-import type { ServerAddress } from "./server";
+
+/** Where the web UI is served: the daemon's base URL and token. */
+export interface ServerAddress {
+  url: string;
+  token: string;
+}
 
 /**
- * A webview that frames the malac web UI. Prompts are queued until the
+ * "Open full UI": a webview panel that frames the whole malac web UI. Prompts are queued until the
  * webview script reports that it is running, and the script holds them until
  * the frame has loaded.
  */
@@ -14,7 +19,7 @@ export class MalacPanel implements vscode.Disposable {
   private readonly outbox: string[] = [];
 
   constructor(onDispose: () => void) {
-    this.panel = vscode.window.createWebviewPanel("malac", "Malac", vscode.ViewColumn.Beside, {
+    this.panel = vscode.window.createWebviewPanel("malac.fullUi", "malac", vscode.ViewColumn.Beside, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [],

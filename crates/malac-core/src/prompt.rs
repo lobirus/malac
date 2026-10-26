@@ -5,6 +5,7 @@ use std::process::Command;
 
 use crate::catalog::AgentType;
 use crate::config;
+use crate::memory::Scope;
 use crate::permission::Mode;
 use crate::runtime::Runtime;
 
@@ -30,7 +31,7 @@ pub fn build(inputs: &PromptInputs<'_>) -> String {
     if let Some(agent) = inputs.agent_type {
         sections.push(format!("# Role: {}\n\n{}", agent.name, agent.instructions));
     }
-    sections.push(environment(inputs.cwd, &runtime.project_root, inputs.model));
+    sections.push(environment(inputs.cwd, runtime, inputs.model));
 
     for file in &runtime.instructions {
         sections.push(format!(
@@ -39,31 +40,88 @@ pub fn build(inputs: &PromptInputs<'_>) -> String {
             file.text
         ));
     }
+    let rules = &runtime.context.instructions.rules;
+    if !rules.is_empty() {
+        let list: Vec<String> = rules
+            .iter()
+            .map(|r| {
+                let applies = if r.globs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (for {})", r.globs.join(", "))
+                };
+                format!("- {}{applies}: {}", r.path.display(), r.description)
+            })
+            .collect();
+        sections.push(format!(
+            "# Rules for some files\n\nThe project has rules that apply only to some files or tasks. Read a rule \
+             before working on what it covers, and follow it like the instructions above.\n\n{}",
+            list.join("\n")
+        ));
+    }
+
+    if let Some(knowledge) = &runtime.context.knowledge {
+        sections.push(format!(
+            "# Project knowledge\n\nWhat earlier sessions learned about this project, from {} (each entry is a \
+             project memory).\n\n{knowledge}",
+            crate::context::knowledge::path(&runtime.project_root).display()
+        ));
+    }
+
+    if runtime.context.index.is_some() {
+        sections.push(
+            "# Project index\n\n`.malac/index.md` maps this repository: its tree with file counts, languages, \
+             manifests and entry points, the top-level symbols of each source file, doc headings, and notes. It is \
+             regenerated as files change. Before searching broadly, look there with `project_index` (or `query` it \
+             for a name) and go straight to the files it points at. When you learn something that would have saved \
+             you a search, add a `note`."
+                .to_owned(),
+        );
+    }
+
+    if !runtime.context.docs.is_empty() {
+        sections.push(format!(
+            "# Project docs\n\nThe project's documentation, not loaded. Read the ones that bear on the task.\n\n{}",
+            crate::context::docs::render(&runtime.context.docs)
+        ));
+    }
 
     if runtime.memory.enabled() {
-        let index = runtime.memory.prompt_index();
+        let project_in_knowledge = runtime.context.knowledge.is_some();
+        let scope = project_in_knowledge.then_some(Scope::Global);
+        let index = runtime.memory.prompt_index(scope);
         let mut memory = String::from(
-            "# Memory\n\nYou have persistent memory across sessions. Save durable facts with `memory_save` \
-             (user preferences, corrections, project decisions and why they were made); update or forget \
-             memories that turn out to be wrong. Read a memory's file when its description looks relevant.",
+            "# Memory\n\nYou have persistent memory across sessions. Save durable facts with `memory_save`: \
+             the user's preferences and corrections with scope `global`; what you learn about this project with \
+             scope `project` and a `kind` (`command` for how to build, test and run it, `convention`, `gotcha`, \
+             `decision` with its reason, or `note`). Project memories are committed in `.malac/` and listed in \
+             `.malac/MALAC.md`, so they reach the next session, other machines and teammates. Instructions for \
+             agents belong in AGENTS.md, which the user owns: suggest changes to it rather than writing it \
+             unasked. Update or forget memories that turn out wrong. Read a memory's file when its description \
+             looks relevant.",
         );
         if !index.is_empty() {
-            memory.push_str("\n\nSaved memories:\n");
+            memory.push_str(if project_in_knowledge {
+                "\n\nSaved global memories (project ones are under Project knowledge):\n"
+            } else {
+                "\n\nSaved memories:\n"
+            });
             memory.push_str(&index);
         }
         sections.push(memory);
     }
 
-    if !runtime.skills.is_empty() {
-        let list: Vec<String> = runtime
-            .skills
-            .iter()
-            .map(|s| format!("- {}: {} ({})", s.name, s.description, s.path.display()))
-            .collect();
+    let skills: Vec<String> = runtime
+        .skills
+        .iter()
+        .filter(|s| s.model_invocable)
+        .map(|s| format!("- {}: {}", s.name, s.description))
+        .collect();
+    if !skills.is_empty() {
         sections.push(format!(
-            "# Skills\n\nSkills are instruction packs for specific tasks. When one matches the task, read its file \
-             and follow it.\n\n{}",
-            list.join("\n")
+            "# Skills\n\nSkills are instruction packs for specific tasks. When one fits the task, load it with \
+             `skill` and follow it; it may come with scripts to run and references to read.\n\n{}",
+            skills.join("\n")
         ));
     }
 
@@ -148,7 +206,8 @@ pub fn autonomy(mode: Mode, depth: u32) -> String {
     format!("# Permissions\n\n{body}")
 }
 
-fn environment(cwd: &Path, project_root: &Path, model: &str) -> String {
+fn environment(cwd: &Path, runtime: &Runtime, model: &str) -> String {
+    let project_root = &runtime.project_root;
     let mut lines = vec![
         format!("- Working directory: {}", cwd.display()),
         format!(
@@ -175,6 +234,7 @@ fn environment(cwd: &Path, project_root: &Path, model: &str) -> String {
             }
         }
     }
+    lines.extend(runtime.context.layout.prompt_line());
     format!("# Environment\n\n{}", lines.join("\n"))
 }
 

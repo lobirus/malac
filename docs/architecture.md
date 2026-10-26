@@ -19,7 +19,8 @@ Front ends never talk to models or tools directly. Either they create a `Runtime
 - a provider cache (`provider/`), built lazily per provider name
 - the tool list: built-in tools plus tools from connected MCP servers
 - `Memory`, the permission `Policy` and the current `Approver`
-- instruction files, agent types and skills found on disk (`catalog.rs`)
+- the project context (`context/`): instruction files, the docs map, the project index and `.malac/MALAC.md`
+- the enabled plugins (`plugins/`) with their hooks, and the agent types, skills and slash commands found on disk and in plugins (`catalog.rs`, `commands.rs`)
 - the `EventBus` and the registry of live agents
 - the job table (`jobs.rs`)
 
@@ -31,10 +32,10 @@ An agent (`agent.rs`) is one conversation owned by a tokio task. Callers hold an
 
 A turn:
 
-1. Attach recalled memories (vector search on the prompt) and append the user message.
+1. Expand a slash command (`/context` is answered without the model), run the plugins' session-start hooks once and their prompt hooks, attach recalled memories (vector search on the prompt) and append the user message.
 2. Compact the conversation if the last request used more than 80% of the model's context window.
 3. Stream a completion from the provider, publishing text, reasoning and tool-call deltas. Failed requests are retried with backoff when the error is retryable and nothing has streamed yet.
-4. For each tool call, ask the `Policy`; if it says "ask", the `Approver` decides. Consecutive tools of kind `Safe` run in parallel; others run one at a time, in order.
+4. For each tool call, run the plugins' `PreToolUse` hooks (which may deny it, rewrite its input, or allow or force a question), then ask the `Policy`; if it says "ask", the `Approver` decides. `PostToolUse` hooks may add feedback to the results. Consecutive tools of kind `Safe` run in parallel; others run one at a time, in order.
 5. Append the tool results and loop until the model answers without tool calls.
 
 Subagents are ordinary agents with a `parent` and a `depth`. The `agent_spawn`, `agent_wait`, `agent_send` and `agent_list` tools create and steer them; a semaphore limits how many run at once, and agents at `max_depth` (default 3) do not get the delegation tools. Agents that may delegate see an "Available models" section in their system prompt, listing the configured models with their `description`, so they can give each subagent a model that fits its task. Cancelling an agent cancels its whole subtree.
@@ -64,9 +65,15 @@ For models marked `vision = false`, images are replaced by descriptions written 
 
 Each tool has a kind: `Safe` (never asks), `Edit` or `Execute`. The mode decides the default (`ask`, `edits`, `autopilot`); `allow` and `deny` rules (`tool` or `tool(glob)`) refine it. Shell commands are split on `&&`, `||`, `;`, `|` and newlines, and every segment must match an allow rule. Deny rules are checked first and apply in every mode, autopilot included.
 
+## Project context and plugins
+
+`context/` gathers what a session knows about its project when its runtime is built: instruction files in every form other agents use (`instructions.rs`, deduplicated and fitted into a budget by priority), a map of the Markdown docs (`docs.rs`), the structural index in `.malac/index.md` (`index.rs`: a gitignore-aware walk, per-language symbol patterns, incremental by modification time, refreshed in a background thread when stale), the knowledge file `.malac/MALAC.md` (`knowledge.rs`), and where the directory sits in its repository. `prompt.rs` turns it into sections of the system prompt; `Runtime::context_report` is what `/context`, `malac context` and the settings API show.
+
+`plugins/` reads plugins in the Claude Code and Agent Plugins formats (`manifest.rs`), catalogs (`marketplace.rs`), sources and git (`source.rs`, shelling out to `git`), and the state files (`store.rs`); `manage.rs` adds marketplaces and installs, enables and updates plugins; `hooks.rs` runs hooks; `builtin.rs` holds the plugins compiled into the binary. When a runtime is built, the enabled plugins' skills, commands and agents join the catalog, their approved MCP servers join `config.mcp`, and their approved hooks go to the agents. See [plugins.md](plugins.md).
+
 ## Memory
 
-Markdown files are the source of truth: `~/.malac/memory/*.md` (global) and `<project>/.malac/memory/*.md` (project), each with `name` and `description` frontmatter, plus a generated `MEMORY.md` index. The index is part of every system prompt.
+Markdown files are the source of truth: `~/.malac/memory/*.md` (global) and `<project>/.malac/memory/*.md` (project), each with `name` and `description` frontmatter (project ones also a `kind`), plus a generated index: `MEMORY.md` for global memories, `.malac/MALAC.md` for the project's, grouped by kind. The indexes are part of every system prompt.
 
 When `[memory.vector]` and `[memory.embeddings]` are configured, saving a memory also upserts its embedding into a Milvus collection (via the Milvus REST API, so self-hosted Milvus and Zilliz Cloud both work). Search returns the matching files' current text, so the index can never serve stale content. With `auto_recall`, every prompt is embedded and close matches are attached to it. `malac memory reindex` rebuilds the collection from the files.
 
@@ -86,13 +93,15 @@ macOS grants these permissions to the process tree's responsible app, which is f
 
 `malac daemon` (`daemon/`) is one long-lived process per user that holds every workspace, tab and agent, so agents outlive the terminal that started them and several clients share them.
 
-- **Process.** `malac daemon start` (and any client that needs it) runs `malac daemon run` in its own session (`setsid`) with output in `~/.malac/daemon.log`. It takes `~/.malac/daemon.lock`, listens on `web.port` (any free port if taken) on loopback, or on all interfaces with `web.remote`, and writes `~/.malac/daemon.json` (`url`, `token`, `pid`, `version`; mode 0600) for local clients. The token persists in `~/.malac/daemon.token`.
+- **Process.** `malac daemon start` (and any client that needs it) runs `malac daemon run` in its own session (`setsid`) with output in `~/.malac/daemon.log`. It takes `~/.malac/daemon.lock`, listens on `web.port` (any free port if taken) on loopback, or on all interfaces with `web.remote` unless `web.host` says otherwise, and writes `~/.malac/daemon.json` (`url`, `token`, `pid`, `version`; mode 0600) for local clients. The token persists in `~/.malac/daemon.token`.
 - **Hub** (`daemon/hub.rs`). The state: workspaces (`daemon/store.rs` persists them to `~/.malac/workspaces/<id>.json`, and `state.json` remembers the last one), one runtime per loaded tab, built lazily from the tab's directory and options on a shared `Host`, the pending approvals, and a broadcast of serialized messages. Each runtime's events are forwarded tagged with their tab; every change to workspaces, tabs, jobs and the control service is broadcast as a delta. Commands from all transports go through `Hub::execute`.
 - **Approvals.** Every tab runtime uses the hub's approver. Requests reach all clients as events and wait in the snapshot until one answers; the first answer wins.
 - **Restarts.** On start the hub loads the saved workspaces and restores jobs. Agents come back lazily: a tab loads its runtime when used, and a saved agent resumes from its transcript when prompted. `malac daemon restart` and `stop` refuse while agents or jobs run, unless `--force`.
 - **Idle exit.** With no clients, running agents, jobs or pending approvals for `daemon.idle_minutes` (default 120), the daemon exits.
 - **Versions.** The daemon keeps the version it started with; self-updates replace files only. Clients send their version and the snapshot flags a mismatch, so they can suggest `malac daemon restart`.
 - **Control service.** The daemon connects the control service once at start through the shared MCP pool, asks it for its macOS permission state (`computer_permissions`) and reports both in the snapshot.
+- **Remote access** (`daemon/access.rs`, `daemon/tunnel.rs`). Requests are local (loopback peer, loopback `Host`, no proxy headers) or remote; remote ones are refused unless `web.remote` is on. The master token works only locally; other devices pair with a one-time code for a device token, hashed in `~/.malac/devices.json` and revocable, which closes their sockets. A tunnel tool (cloudflared, ngrok, Tailscale) runs as the daemon's child and its public address joins the pairing links. See [remote.md](remote.md).
+- **Keep-awake** (`daemon/awake.rs`). A task follows the running agents and jobs and holds `caffeinate -i -s -w <pid>` (macOS) or `systemd-inhibit` (Linux) while there is work, per `daemon.keep_awake`; the platform command sits behind a `Runner` trait, which the tests replace.
 
 What runs where:
 
@@ -102,12 +111,13 @@ What runs where:
 | `malac` (full-screen UI) | a daemon client (`tui/`), starting the daemon if needed; it fails with a hint to use `--plain` or `-p` when the daemon cannot start |
 | `malac --plain` (or `ui.tui = false`) | a daemon client (`remote.rs`), starting the daemon if needed; in this process when it cannot be reached |
 | `malac web`, the editor extension, the web UI | daemon clients |
+| `malac -C <name>` (full-screen, `--plain`, `-p`, prompts) | a client of the daemon a saved connection names (`connections.rs`); it is never started from here |
 
 The protocol is described in [protocol.md](protocol.md); `client.rs` is a typed Rust client for it.
 
 ## Web UI and editor
 
-The daemon serves a single-page UI from the binary; `malac web` starts the daemon if needed and prints or opens its URL. API requests need the token, and requests from this machine must name a loopback host, which blocks DNS rebinding. The VS Code extension starts `malac web --port 0 --json-ready --cwd <dir>`, which prints one JSON line with the URL and token and then stays connected while the panel is open, and embeds the page in a webview. Only the line interface's in-process fallback (when the daemon cannot be reached) serves a separate UI, with `/web`, for its own runtime.
+The daemon serves a single-page UI from the binary; `malac web` starts the daemon if needed and prints or opens its URL. API requests need a token: the master token on local requests, a device token from pairing otherwise. Remote requests (another machine, a tunnel, a page that rebinds its name) are refused unless remote access is on, which also blocks DNS rebinding. Without a token the page shows a pairing form. The VS Code extension starts `malac web --port 0 --json-ready --cwd <dir>`, which prints one JSON line with the URL and token and then stays connected while the panel is open, and embeds the page in a webview. Only the line interface's in-process fallback (when the daemon cannot be reached) serves a separate UI, with `/web`, for its own runtime.
 
 ## Self-update
 
