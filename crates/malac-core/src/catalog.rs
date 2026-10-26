@@ -230,7 +230,7 @@ fn read_skill(path: &Path, source: &str) -> Option<Skill> {
         description: front.string("description").unwrap_or_default(),
         path: path.to_path_buf(),
         source: source.to_owned(),
-        argument_hint: front.string("argument-hint"),
+        argument_hint: front.text("argument-hint"),
         model_invocable: front.bool("disable-model-invocation") != Some(true),
         user_invocable: front.bool("user-invocable") != Some(false),
         plugin: None,

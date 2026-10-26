@@ -321,7 +321,7 @@ fn read(
         &stem,
         body,
         front.string("description"),
-        front.string("argument-hint"),
+        front.text("argument-hint"),
         source,
         plugin,
     ))

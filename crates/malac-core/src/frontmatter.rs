@@ -124,6 +124,15 @@ impl Frontmatter {
         self.str(key).map(str::to_owned)
     }
 
+    /// A string, or a list written back as `[a, b]`: an unquoted
+    /// `argument-hint: [patch|minor|major]` parses as a list.
+    pub fn text(&self, key: &str) -> Option<String> {
+        match self.0.get(key)? {
+            Value::List(items) if !items.is_empty() => Some(format!("[{}]", items.join(", "))),
+            _ => self.string(key),
+        }
+    }
+
     /// A list, also accepted as one string separated by commas (or, with
     /// `by_space`, whitespace).
     pub fn list(&self, key: &str, by_space: bool) -> Option<Vec<String>> {
@@ -250,6 +259,18 @@ mod tests {
         assert_eq!(front.str("argument-hint"), Some("[lite|full]"));
         assert_eq!(front.map("metadata").unwrap()["version"], "1.0");
         assert_eq!(body.trim(), "# Body");
+    }
+
+    #[test]
+    fn reads_an_unquoted_hint_as_text() {
+        let (front, _) =
+            parse("---\nargument-hint: [patch|minor|major]\nother: [file, line]\n---\n");
+        assert_eq!(
+            front.text("argument-hint").as_deref(),
+            Some("[patch|minor|major]")
+        );
+        assert_eq!(front.text("other").as_deref(), Some("[file, line]"));
+        assert_eq!(front.text("missing"), None);
     }
 
     #[test]
