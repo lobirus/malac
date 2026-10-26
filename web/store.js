@@ -950,7 +950,8 @@ export async function deleteWorkspace(id, force = false) {
   await request({ type: "workspace_delete", workspace: id, force });
 }
 
-export async function createTab(cwd, name) {
+/** Opens a tab for `cwd`; with `reuse`, an existing tab for it is activated instead. */
+export async function createTab(cwd, name, { reuse = false } = {}) {
   // A tab needs a workspace this connection has open: the latest one, or a new one.
   if (!state.workspace) {
     const latest = [...state.workspaces].sort((a, b) => String(b.updated).localeCompare(String(a.updated)))[0];
@@ -959,6 +960,7 @@ export async function createTab(cwd, name) {
   }
   const spec = { type: "tab_create", cwd };
   if (name) spec.name = name;
+  if (reuse) spec.reuse = true;
   if (state.workspace) spec.workspace = state.workspace.id;
   const reply = await request(spec);
   await waitForTab(reply.tab);

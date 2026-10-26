@@ -8,6 +8,8 @@ import {
   confirmDialog,
   dateGroup,
   dialog,
+  displayPath,
+  expandHome,
   fullTime,
   h,
   local,
@@ -16,7 +18,9 @@ import {
   relativeTime,
   sessionStore,
   setChildren,
+  shortPath,
   toast,
+  usageParts,
 } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { jobsView } from "./jobs.js";
@@ -31,6 +35,7 @@ import {
   closeAgent,
   compactAgent,
   connect,
+  createTab,
   currentTab,
   decide,
   deleteSession,
@@ -63,7 +68,7 @@ import {
   todoProgress,
   waitingAgents,
 } from "./store.js";
-import { TranscriptView } from "./transcript.js";
+import { TranscriptView, isPluginApproval, pluginApprovalDetails } from "./transcript.js";
 import { TAGLINE, agentsView, controlSummary, homeView, refreshUpdatePanels, updatePanel } from "./views.js";
 import { MODES, modeSwitch, modelPicker, statusDot, usageMeter } from "./widgets.js";
 import { openAttachPicker, openFolderPicker, openWorkspaceMenu, renderTabBar, workspaceButton } from "./workspace.js";
@@ -121,6 +126,9 @@ const els = {
   jump: $("jump"),
 };
 
+// Banners dismissed for good (a repository suggestion), per browser.
+const DISMISSED_KEY = "malac.dismissed";
+
 const ui = {
   view: null,
   transcript: null,
@@ -137,9 +145,23 @@ const ui = {
   sessionFilter: "",
   newModel: null,
   sidebarOpen: !embedded && local.get("malac.sidebar") !== "closed",
-  dismissed: new Set(),
+  dismissed: new Set(readDismissed()),
   sending: false,
 };
+
+function readDismissed() {
+  try {
+    const list = JSON.parse(local.get(DISMISSED_KEY) ?? "[]");
+    return Array.isArray(list) ? list.slice(-200) : [];
+  } catch {
+    return [];
+  }
+}
+
+function dismissForGood(key) {
+  ui.dismissed.add(key);
+  local.set(DISMISSED_KEY, JSON.stringify([...ui.dismissed].filter((k) => k.startsWith("repo:")).slice(-200)));
+}
 
 // Theme
 
@@ -801,7 +823,40 @@ function renderBanners() {
   } else if ((skew < 0 || d?.version_mismatch) && !ui.dismissed.has(`daemon:${d.version}`)) {
     items.push(banner("info", `Daemon ${d.version} is running; restart it when idle with malac daemon restart.`, null, `daemon:${d.version}`));
   }
+  const repo = repositoryBanner();
+  if (repo) items.push(repo);
   setChildren(els.banners, items);
+}
+
+// A tab opened in one part of a larger repository (say `frontend/` next to
+// `backend/`) suggests opening the repository root instead.
+function repositoryBanner() {
+  const tab = state.route.name === "tab" ? currentTab() : null;
+  const root = tab?.project?.suggest_root;
+  if (!root) return null;
+  const key = `repo:${tab.id}:${root}`;
+  if (ui.dismissed.has(key)) return null;
+  const siblings = tab.project.siblings ?? [];
+  const shown = siblings.slice(0, 3).map((part) => `${part}/`);
+  const more = siblings.length - shown.length;
+  const parts = [...shown, more > 0 ? plural(more, "other part") : null].filter(Boolean);
+  const also = parts.length ? `, which also holds ${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0]}` : "";
+  return banner(
+    "info",
+    h("span", {}, "This folder is part of ", h("span", { class: "path", title: displayPath(root) }, displayPath(root).length > 48 ? shortPath(root, 2) : displayPath(root)), `${also}.`),
+    { label: "Open repository", run: () => openRepository(root) },
+    key,
+    { persist: true },
+  );
+}
+
+async function openRepository(root) {
+  try {
+    const tab = await createTab(root, undefined, { reuse: true });
+    go({ name: "tab", tab });
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 /** Compares dotted versions: positive when `a` is newer. */
@@ -814,7 +869,7 @@ function compareVersions(a, b) {
   return 0;
 }
 
-function banner(level, text, action, dismissKey) {
+function banner(level, text, action, dismissKey, { persist = false } = {}) {
   return h(
     "div",
     { class: `top-banner ${level}`, role: level === "warning" ? "alert" : "status" },
@@ -829,8 +884,12 @@ function banner(level, text, action, dismissKey) {
             type: "button",
             "aria-label": "Dismiss",
             onclick: () => {
-              ui.dismissed.add(dismissKey);
+              if (persist) dismissForGood(dismissKey);
+              else ui.dismissed.add(dismissKey);
               renderBanners();
+              // The button is gone; keep keyboard focus in the page.
+              if (els.input.offsetParent) els.input.focus();
+              else document.getElementById("content")?.focus({ preventScroll: true });
             },
           },
           icon("x", 14),
@@ -882,15 +941,23 @@ function permissionCard(request) {
     if (!decide(request.id, decision)) return;
     for (const button of actions.querySelectorAll("button")) button.disabled = true;
   };
-  actions.append(
-    h("button", { class: "button primary small", type: "button", onclick: choose("allow") }, "Allow"),
-    h("button", { class: "button small", type: "button", title: "Allow this and similar calls for the rest of the session", onclick: choose("allow_session") }, "Always allow"),
-    h("button", { class: "button small danger", type: "button", onclick: choose("deny") }, "Deny"),
-  );
+  const plugin = isPluginApproval(request);
+  if (plugin) {
+    actions.append(
+      h("button", { class: "button primary small", type: "button", onclick: choose("allow") }, "Enable plugin"),
+      h("button", { class: "button small", type: "button", onclick: choose("deny") }, "Keep it off"),
+    );
+  } else {
+    actions.append(
+      h("button", { class: "button primary small", type: "button", onclick: choose("allow") }, "Allow"),
+      h("button", { class: "button small", type: "button", title: "Allow this and similar calls for the rest of the session", onclick: choose("allow_session") }, "Always allow"),
+      h("button", { class: "button small danger", type: "button", onclick: choose("deny") }, "Deny"),
+    );
+  }
   const href = tab ? `#tab=${tab.id}&agent=${request.agent}` : `#agent=${request.agent}`;
   return h(
     "div",
-    { class: "permission", role: "alert" },
+    { class: plugin ? "permission plugin" : "permission", role: "alert" },
     h(
       "div",
       { class: "permission-text" },
@@ -903,10 +970,13 @@ function permissionCard(request) {
           { class: "permission-title" },
           h("a", { href }, label),
           tab ? h("span", { class: "muted" }, ` in ${tab.name}`) : null,
-          " wants to run ",
-          h("strong", {}, request.tool),
+          plugin ? [" wants to enable the plugin ", h("strong", {}, request.input.plugin)] : [" wants to run ", h("strong", {}, request.tool)],
         ),
-        request.summary ? h("p", { class: "permission-summary", title: request.summary }, request.summary) : null,
+        plugin
+          ? pluginApprovalDetails(request.input)
+          : request.summary
+            ? h("p", { class: "permission-summary", title: request.summary }, request.summary)
+            : null,
       ),
     ),
     actions,
@@ -968,6 +1038,22 @@ function renderComposer() {
 async function submitComposer() {
   const text = els.input.value.trim();
   if ((!text && !ui.images.length && !ui.paths.length) || ui.sending) return;
+  hideSlash();
+  const command = parseCommand(text);
+  if (command && !ui.images.length && !ui.paths.length) {
+    const builtin = BUILTIN_COMMANDS.find((c) => c.name === command.name || c.aliases?.includes(command.name));
+    if (builtin) {
+      els.input.value = "";
+      autosize();
+      runBuiltin(builtin.name, command.args);
+      return;
+    }
+    // Custom commands are expanded by the agent; catch typos before sending.
+    if (!findProjectCommand(command.name) && !command.args) {
+      toast(`There is no /${command.name} command here. Type / to see the commands.`, "warning");
+      return;
+    }
+  }
   const agent = selectedAgent();
   const tab = currentTab();
   const images = ui.images.map(({ media_type, data }) => ({ media_type, data }));
@@ -1003,6 +1089,225 @@ async function submitComposer() {
   } finally {
     ui.sending = false;
     els.send.disabled = false;
+  }
+}
+
+// Slash commands. The built-ins act on this page; the project's custom
+// commands (tab.project.commands) are sent as the prompt, and the agent
+// expands them. Names follow the terminal UI.
+
+const BUILTIN_COMMANDS = [
+  { name: "model", argument_hint: "[provider/model]", description: "Show or switch the model" },
+  { name: "mode", argument_hint: "[ask|edits|autopilot]", description: "Show or change this tab's permission mode" },
+  { name: "agents", description: "Agents and subagents, and what they are doing" },
+  { name: "compact", description: "Summarize the conversation to free context" },
+  { name: "clear", aliases: ["new"], description: "Start a new agent in this tab" },
+  { name: "resume", description: "Find a saved session" },
+  { name: "cost", description: "Token usage and cost of this agent" },
+  { name: "context", description: "Instruction files, docs, index, skills, commands and plugins in use" },
+  { name: "cd", argument_hint: "[folder]", description: "Work in another folder, in a new tab" },
+  { name: "jobs", description: "Background processes the agents started" },
+  { name: "mcp", description: "Connected tool servers" },
+  { name: "memory", description: "Saved memories" },
+  { name: "help", description: "Commands and keyboard shortcuts" },
+];
+
+const COMMAND = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/;
+
+/** `/name args`, as the agent parses it: a name without `/`, so a path is not a command. */
+function parseCommand(text) {
+  const match = COMMAND.exec(text.trim());
+  return match ? { name: match[1], args: (match[2] ?? "").trim() } : null;
+}
+
+function projectCommands() {
+  return currentTab()?.project?.commands ?? [];
+}
+
+// An exact name, or the part after `plugin:` when only one command has it.
+function findProjectCommand(name) {
+  const commands = projectCommands();
+  const exact = commands.find((c) => c.name === name);
+  if (exact) return exact;
+  const short = commands.filter((c) => c.name.split(":").pop() === name);
+  return short.length === 1 ? short[0] : null;
+}
+
+function allCommands() {
+  const builtin = BUILTIN_COMMANDS.map((c) => ({ ...c, source: "built-in", builtin: true }));
+  const taken = new Set(BUILTIN_COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]));
+  return [...builtin, ...projectCommands().filter((c) => !taken.has(c.name))];
+}
+
+function sourceLabel(source) {
+  if (!source || source === "built-in") return "built-in";
+  return source.startsWith("plugin ") ? source.slice(7) : source;
+}
+
+const slash = { el: null, items: [], active: 0, dismissed: null };
+
+function slashQuery() {
+  const value = els.input.value;
+  const match = /^\/([\w:.-]*)$/.exec(value);
+  if (!match || els.input.selectionStart !== value.length) return null;
+  return match[1].toLowerCase();
+}
+
+function renderSlashMenu() {
+  const query = slashQuery();
+  if (query == null || slash.dismissed === els.input.value) return hideSlash();
+  const items = allCommands().filter((c) => {
+    const name = c.name.toLowerCase();
+    return name.startsWith(query) || name.split(":").pop().startsWith(query) || c.aliases?.some((a) => a.startsWith(query));
+  });
+  if (!items.length) return hideSlash();
+  slash.items = items;
+  slash.active = Math.max(0, Math.min(slash.active, items.length - 1));
+  setChildren(
+    slash.el,
+    items.map((c, index) =>
+      h(
+        "li",
+        {
+          id: `slash-${index}`,
+          class: `slash-item${index === slash.active ? " active" : ""}`,
+          role: "option",
+          "aria-selected": String(index === slash.active),
+          onmousedown: (event) => {
+            event.preventDefault();
+            acceptSlash(index, true);
+          },
+        },
+        h("span", { class: "slash-cmd" }, h("span", { class: "slash-name" }, `/${c.name}`), c.argument_hint ? h("span", { class: "slash-hint" }, ` ${c.argument_hint}`) : null),
+        h("span", { class: "slash-desc", title: c.description }, c.description),
+        h("span", { class: "slash-source", title: c.source }, sourceLabel(c.source)),
+      ),
+    ),
+  );
+  slash.el.hidden = false;
+  placeSlashMenu();
+  els.input.setAttribute("aria-expanded", "true");
+  els.input.setAttribute("aria-activedescendant", `slash-${slash.active}`);
+  slash.el.querySelector(".slash-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+/** Opens the menu above the composer, or below it when the scrolling view leaves more room there. */
+function placeSlashMenu() {
+  const box = els.composer.getBoundingClientRect();
+  const clip = els.composer.closest(".view-scroll")?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
+  const above = box.top - Math.max(clip.top, 0) - 12;
+  const below = Math.min(clip.bottom, window.innerHeight) - box.bottom - 12;
+  const wanted = Math.min(320, slash.el.scrollHeight);
+  const down = above < wanted && below > above;
+  slash.el.classList.toggle("below", down);
+  slash.el.style.maxHeight = `${Math.max(96, Math.min(320, down ? below : above))}px`;
+}
+
+function hideSlash() {
+  if (!slash.el) return;
+  slash.items = [];
+  slash.active = 0;
+  slash.el.hidden = true;
+  els.input.setAttribute("aria-expanded", "false");
+  els.input.removeAttribute("aria-activedescendant");
+}
+
+/** Completes the highlighted command; with `run`, runs one that takes no argument. */
+function acceptSlash(index, run) {
+  const command = slash.items[index];
+  if (!command) return;
+  const takesArgs = Boolean(command.argument_hint);
+  els.input.value = `/${command.name}${takesArgs || !run ? " " : ""}`;
+  hideSlash();
+  autosize();
+  els.input.focus();
+  if (run && !takesArgs) submitComposer();
+}
+
+function onSlashKey(event) {
+  if (!slash.items.length || slash.el.hidden) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    slash.active = (slash.active + (event.key === "ArrowDown" ? 1 : slash.items.length - 1)) % slash.items.length;
+    renderSlashMenu();
+  } else if (event.key === "Tab" && !event.shiftKey) {
+    acceptSlash(slash.active, false);
+  } else if (event.key === "Enter" && !event.shiftKey) {
+    acceptSlash(slash.active, true);
+  } else if (event.key === "Escape") {
+    slash.dismissed = els.input.value;
+    hideSlash();
+  } else {
+    return false;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function runBuiltin(name, args) {
+  const agent = selectedAgent();
+  const tab = currentTab();
+  switch (name) {
+    case "model":
+      if (!args) {
+        (els.topbarControls.querySelector(".model-picker") ?? els.composerModel.querySelector(".model-picker"))?.click();
+      } else if (agent) {
+        changeModel(agent, args);
+        toast(`${displayName(agent)} uses ${args} from the next turn`);
+      } else {
+        ui.newModel = args;
+        invalidate("composer");
+        toast(`New agents here use ${args}`);
+      }
+      return;
+    case "mode": {
+      if (!tab) return toast("Open a folder first", "warning");
+      const mode = MODES.find((m) => m.mode === args.toLowerCase());
+      if (args && !mode) return toast("Use /mode ask, /mode edits or /mode autopilot", "warning");
+      if (mode) requestMode(mode.mode);
+      const current = mode ?? MODES.find((m) => m.mode === state.mode);
+      return toast(`Mode: ${current?.label ?? state.mode}. ${current?.help ?? ""}.`);
+    }
+    case "agents":
+      return go({ name: "agents" });
+    case "jobs":
+      return go({ name: "jobs" });
+    case "mcp":
+      return go({ name: "settings", section: "mcp" });
+    case "memory":
+      return go({ name: "settings", section: "memory" });
+    case "context":
+      return go({ name: "settings", section: "context" });
+    case "compact":
+      if (agent?.live) compactAgent(agent);
+      else toast("Open a live agent first", "warning");
+      return;
+    case "clear":
+      return newAgent();
+    case "resume":
+      if (narrowScreen.matches || !ui.sidebarOpen) setSidebar(true);
+      els.sessionFilter.focus();
+      return;
+    case "cost":
+      if (!agent) return toast("Open an agent first", "warning");
+      return toast(`${displayName(agent)}: ${usageParts(agent.usage, agent.contextTokens).join(", ") || "no usage yet"}`);
+    case "cd":
+      return args ? openFolderTab(args) : newTab();
+    case "help":
+      return showHelp();
+  }
+}
+
+// `/cd path`: relative to the selected tab's folder; `~/` is the home directory.
+async function openFolderTab(path) {
+  const base = currentTab()?.cwd;
+  const value = expandHome(path);
+  const cwd = value.startsWith("/") || !base ? value : `${base}/${value}`;
+  try {
+    const tab = await createTab(cwd, undefined, { reuse: true });
+    go({ name: "tab", tab, fresh: true });
+  } catch (error) {
+    toast(error.message, "error");
   }
 }
 
@@ -1100,8 +1405,14 @@ function bindComposer() {
     event.preventDefault();
     submitComposer();
   });
+  slash.el = h("ul", { id: "slash-menu", class: "slash-menu", role: "listbox", "aria-label": "Commands", hidden: true });
+  els.composer.prepend(slash.el);
+  els.input.setAttribute("aria-autocomplete", "list");
+  els.input.setAttribute("aria-controls", "slash-menu");
+  els.input.setAttribute("aria-expanded", "false");
   els.input.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
+    if (onSlashKey(event)) return;
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       submitComposer();
@@ -1125,7 +1436,12 @@ function bindComposer() {
       }
     }
   });
-  els.input.addEventListener("input", autosize);
+  els.input.addEventListener("input", () => {
+    autosize();
+    if (slash.dismissed && slash.dismissed !== els.input.value) slash.dismissed = null;
+    renderSlashMenu();
+  });
+  els.input.addEventListener("blur", () => setTimeout(hideSlash, 100));
   els.input.addEventListener("paste", (event) => {
     const files = filesFrom(event.clipboardData);
     if (files.length) addImages(files);
@@ -1217,9 +1533,31 @@ function keyCaps(keys) {
   return keys.map((key) => h("kbd", {}, key === "Ctrl" && isMac ? "⌘" : key));
 }
 
+function commandsTable() {
+  return h(
+    "table",
+    { class: "table compact commands-table" },
+    h("thead", {}, h("tr", {}, h("th", {}, "Command"), h("th", {}, "What it does"), h("th", { class: "col-source" }, "Source"))),
+    h(
+      "tbody",
+      {},
+      allCommands().map((c) =>
+        h(
+          "tr",
+          {},
+          h("td", { class: "cell-command" }, h("span", { class: "slash-name" }, `/${c.name}`), c.argument_hint ? h("span", { class: "slash-hint" }, ` ${c.argument_hint}`) : null),
+          h("td", { class: "cell-main", title: c.description }, c.description),
+          h("td", { class: "col-source muted", title: c.source }, sourceLabel(c.source)),
+        ),
+      ),
+    ),
+  );
+}
+
 function showHelp() {
+  const custom = projectCommands().length;
   dialog({
-    title: "Keyboard shortcuts",
+    title: "Commands and shortcuts",
     className: "help",
     body: h(
       "div",
@@ -1230,6 +1568,17 @@ function showHelp() {
         pigLogo(32),
         h("div", {}, h("p", { class: "about-name" }, "malac", state.version ? h("span", { class: "muted" }, ` v${state.version}`) : null), h("p", { class: "muted" }, TAGLINE)),
       ),
+      h("h3", { class: "help-title" }, "Commands"),
+      h(
+        "p",
+        { class: "muted small" },
+        "Type / in the message box. ",
+        custom
+          ? `${plural(custom, "custom command")} ${custom === 1 ? "comes" : "come"} from this tab's project, its plugins or your skills; the agent expands ${custom === 1 ? "it" : "them"}.`
+          : "Commands in .malac/commands or .claude/commands of a project show up here too.",
+      ),
+      commandsTable(),
+      h("h3", { class: "help-title" }, "Keyboard shortcuts"),
       h(
         "table",
         { class: "table compact shortcuts" },

@@ -5,10 +5,10 @@
 // configuration), so defaults are never written out; inherited values are
 // shown as placeholders.
 
-import { clone, confirmDialog, formatDuration, fullTime, h, local, plural, setChildren, shortPath, toast } from "./dom.js";
+import { clone, confirmDialog, displayPath, formatDuration, fullTime, h, local, plural, relativeTime, setChildren, shortPath, toast } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { markdownNode } from "./markdown.js";
-import { api, checkControl, markAllStale, refresh, resource, state } from "./store.js";
+import { api, checkControl, createTab, markAllStale, refresh, resource, state } from "./store.js";
 import { TAGLINE, controlSummary, updatePanel } from "./views.js";
 import { modelPicker, toggle } from "./widgets.js";
 import { remoteSection } from "./remote.js";
@@ -22,6 +22,7 @@ export const SECTIONS = [
   { id: "control", title: "Control service", icon: "monitor", blurb: "Browser and computer control through malac-control." },
   { id: "memory", title: "Memory", icon: "bookmark", blurb: "Durable facts agents remember across sessions." },
   { id: "agents", title: "Agents", icon: "agents", blurb: "Subagent limits, agent types and skills." },
+  { id: "context", title: "Project context", icon: "book", blurb: "What agents in the active tab read about its project." },
   { id: "profiles", title: "Profiles", icon: "layers", blurb: "Named overlays selected with malac --profile <name>." },
   { id: "interface", title: "Interface", icon: "eye", blurb: "Terminal and web interface options." },
   { id: "remote", title: "Remote access", icon: "globe", blurb: "Other devices, pairing, tunnels and keeping the machine awake." },
@@ -351,6 +352,8 @@ export class SettingsPage {
     }
     this.render();
     this.root.querySelector(".settings-main")?.scrollTo?.(0, 0);
+    // The context follows the daemon's active tab, which may have changed.
+    if (this.section === "context" && !this.saving) this.load({ keepDraft: true });
   }
 
   // Called when the server rebuilt its runtime (here or in another tab).
@@ -874,6 +877,8 @@ export class SettingsPage {
         return this.controlSection();
       case "memory":
         return this.memorySection();
+      case "context":
+        return this.contextSection();
       case "agents":
         return this.agents();
       case "profiles":
@@ -2109,6 +2114,316 @@ export class SettingsPage {
           ? h("ul", { class: "path-list" }, instructions.map((path) => h("li", { class: "path", title: path }, path)))
           : h("p", { class: "empty-note" }, "No AGENTS.md, MALAC.md or CLAUDE.md found."),
         { description: "Added to every agent's system prompt." },
+      ),
+    ];
+  }
+
+  // Project context: `context::Report` from GET /api/settings, for the
+  // runtime of the daemon's active tab.
+
+  contextSection() {
+    const report = this.data.context;
+    if (!report) {
+      return h("p", { class: "empty-note" }, "This daemon does not report project context. Update malac to see it.");
+    }
+    const layout = report.layout ?? {};
+    const root = layout.root ?? "";
+    const folder = layout.subdir ? `${root}/${layout.subdir}` : root;
+    // The daemon reports for its active tab; name it when this window has it.
+    const tab = (state.workspace?.tabs ?? []).find((t) => t.cwd === folder || t.cwd === `${folder}/`);
+    // Paths under the project root read relative to it, others with `~`.
+    const rel = (path) => {
+      const value = String(path ?? "");
+      return root && value.startsWith(`${root}/`) ? value.slice(root.length + 1) : displayPath(value);
+    };
+    // `main` cells take the free width; the others are capped and cut.
+    const pathCell = (path, shown = rel(path), main = false) => h("td", { class: `${main ? "cell-main" : "cell-path"} path`, title: displayPath(path) }, shown);
+    const table = (head, rows, empty) =>
+      rows.length
+        ? h("table", { class: "table compact context-table" }, h("thead", {}, h("tr", {}, head)), h("tbody", {}, rows))
+        : h("p", { class: "empty-note" }, empty);
+    const th = (text, cls) => h("th", cls ? { class: cls } : {}, text);
+    const instructions = report.instructions ?? {};
+    const loaded = instructions.loaded ?? [];
+    const rules = instructions.rules ?? [];
+    const skipped = instructions.skipped ?? [];
+    const docs = report.docs ?? [];
+    const skills = report.skills ?? [];
+    const commands = report.commands ?? [];
+    const types = report.agent_types ?? [];
+    const plugins = report.plugins ?? [];
+    const warnings = report.warnings ?? [];
+    const index = report.index;
+    const knowledge = report.knowledge;
+    return [
+      h(
+        "p",
+        { class: "file-note" },
+        h(
+          "span",
+          {},
+          tab ? ["For the tab ", h("strong", {}, tab.name), " in "] : "For ",
+          h("span", { class: "path", title: displayPath(folder) }, shortPath(folder, 3)),
+          ", the daemon's active tab. Agents read this when they start there.",
+        ),
+      ),
+      warnings.length
+        ? h(
+            "div",
+            { class: "banner warning", role: "status" },
+            icon("alert", 16),
+            h("div", { class: "banner-text" }, h("strong", {}, plural(warnings.length, "warning")), h("ul", { class: "warning-list" }, warnings.map((w) => h("li", {}, w)))),
+          )
+        : null,
+      this.group(
+        "Project",
+        [
+          h(
+            "dl",
+            { class: "kv" },
+            h("dt", {}, "Root"),
+            h("dd", { class: "path ellipsis", title: displayPath(root) }, displayPath(root) || "Unknown"),
+            h("dt", {}, "Working in"),
+            h("dd", { class: "path" }, layout.subdir ? `${layout.subdir}/` : "The root"),
+            layout.siblings?.length
+              ? [h("dt", {}, "Other parts"), h("dd", {}, h("div", { class: "chips static" }, layout.siblings.map((part) => h("span", { class: "chip", title: part }, `${part}/`))))]
+              : null,
+          ),
+          layout.suggest_root
+            ? h(
+                "p",
+                { class: "field-note" },
+                icon("info", 14),
+                h(
+                  "span",
+                  {},
+                  "This folder is one part of a larger repository. A tab for ",
+                  h("span", { class: "path", title: displayPath(layout.suggest_root) }, shortPath(layout.suggest_root, 2)),
+                  " lets agents work across all of it.",
+                ),
+              )
+            : null,
+        ],
+        {
+          actions: layout.suggest_root
+            ? h(
+                "button",
+                {
+                  class: "button small",
+                  type: "button",
+                  onclick: async () => {
+                    try {
+                      const id = await createTab(layout.suggest_root, undefined, { reuse: true });
+                      location.hash = `#tab=${id}`;
+                    } catch (error) {
+                      toast(error.message, "error");
+                    }
+                  },
+                },
+                "Open repository",
+              )
+            : null,
+        },
+      ),
+      this.group(
+        "Instruction files",
+        [
+          table(
+            [th("File"), th("Kind"), th("Characters", "num")],
+            loaded.map((file) =>
+              h(
+                "tr",
+                {},
+                pathCell(file.path, rel(file.path), true),
+                h("td", { class: "cell-kind" }, file.kind),
+                h("td", { class: "num" }, file.truncated ? [h("span", { class: "badge warn", title: "Cut to fit the instruction limit" }, "cut"), " "] : null, file.chars.toLocaleString()),
+              ),
+            ),
+            "No instruction files. Add an AGENTS.md at the project root to tell agents how to work here.",
+          ),
+          rules.length
+            ? [
+                h("h3", { class: "subhead" }, "Rules"),
+                table(
+                  [th("File"), th("Kind"), th("Applies to")],
+                  rules.map((rule) =>
+                    h(
+                      "tr",
+                      {},
+                      pathCell(rule.path),
+                      h("td", { class: "cell-kind" }, rule.kind),
+                      h("td", { class: "cell-main", title: rule.globs?.length ? rule.globs.join(", ") : rule.description }, rule.globs?.length ? rule.globs.join(", ") : rule.description || "When it fits"),
+                    ),
+                  ),
+                  "",
+                ),
+              ]
+            : null,
+          skipped.length
+            ? [
+                h("h3", { class: "subhead" }, "Skipped"),
+                table(
+                  [th("File"), th("Why")],
+                  skipped.map((item) => h("tr", {}, pathCell(item.path), h("td", { class: "cell-main muted", title: item.reason }, item.reason))),
+                  "",
+                ),
+              ]
+            : null,
+        ],
+        { description: "Pasted into the system prompt in this order. Rules are listed for the agent to read when they apply." },
+      ),
+      this.group(
+        "Docs",
+        table(
+          [th("Doc"), th("About")],
+          docs.map((doc) =>
+            h(
+              "tr",
+              {},
+              pathCell(root ? `${root}/${doc.path}` : doc.path, doc.path),
+              h(
+                "td",
+                { class: "cell-main", title: [doc.title, doc.summary].filter(Boolean).join("\n") },
+                h("span", { class: "strong" }, doc.title),
+                doc.summary ? h("span", { class: "muted" }, ` · ${doc.summary}`) : null,
+              ),
+            ),
+          ),
+          "No docs found next to the code.",
+        ),
+        { description: "Listed in the prompt so agents know where to look." },
+      ),
+      this.group(
+        "Index and knowledge",
+        [
+          h(
+            "dl",
+            { class: "kv" },
+            h("dt", {}, "Index"),
+            h(
+              "dd",
+              {},
+              index
+                ? index.exists
+                  ? [
+                      h("span", { class: "status ok" }, h("span", { class: "dot ok" }), `${plural(index.files, "file")}`),
+                      index.updated ? h("span", { class: "muted", title: fullTime(index.updated) }, ` · updated ${relativeTime(index.updated)}`) : null,
+                    ]
+                  : h("span", { class: "status muted" }, h("span", { class: "dot idle" }), "Not built yet")
+                : h("span", { class: "muted" }, "Off for this folder"),
+            ),
+            index ? [h("dt", {}, "Index file"), h("dd", { class: "path ellipsis", title: displayPath(index.path) }, rel(index.path))] : null,
+            h("dt", {}, "Knowledge"),
+            h(
+              "dd",
+              {},
+              knowledge?.exists
+                ? h("span", { class: "status ok" }, h("span", { class: "dot ok" }), `${knowledge.chars.toLocaleString()} characters`)
+                : h("span", { class: "muted" }, "None yet. Agents keep lasting project knowledge here."),
+            ),
+            knowledge ? [h("dt", {}, "Knowledge file"), h("dd", { class: "path ellipsis", title: displayPath(knowledge.path) }, rel(knowledge.path))] : null,
+          ),
+        ],
+        { description: "The index maps the code for agents; .malac/MALAC.md holds what they learned. Both are plain files in the project." },
+      ),
+      this.group(
+        "Commands",
+        table(
+          [th("Command"), th("What it does"), th("Source", "col-source")],
+          commands.map((c) =>
+            h(
+              "tr",
+              {},
+              h("td", { class: "cell-command" }, h("span", { class: "slash-name" }, `/${c.name}`), c.argument_hint ? h("span", { class: "slash-hint" }, ` ${c.argument_hint}`) : null),
+              h("td", { class: "cell-main", title: c.description }, c.description),
+              h("td", { class: "col-source muted", title: c.source }, c.source),
+            ),
+          ),
+          "No custom commands. Markdown files in .malac/commands or .claude/commands become /name commands.",
+        ),
+        { description: "Type / in the message box to run them." },
+      ),
+      this.group(
+        "Skills",
+        table(
+          [th("Skill"), th("What it is for"), th("Source", "col-source"), th("Used by", "col-use")],
+          skills.map((skill) =>
+            h(
+              "tr",
+              {},
+              h("td", { class: "cell-name", title: displayPath(skill.path) }, skill.name),
+              h("td", { class: "cell-main", title: skill.description }, skill.description),
+              h("td", { class: "col-source muted", title: skill.source }, skill.source),
+              h(
+                "td",
+                { class: "col-use" },
+                [
+                  skill.model_invocable ? h("span", { class: "pill", title: "Agents load it on their own when it fits the task" }, "agent") : null,
+                  skill.user_invocable ? h("span", { class: "pill", title: `You run it as /${skill.name}` }, "you") : null,
+                ],
+              ),
+            ),
+          ),
+          "No skills. A folder with a SKILL.md in .malac/skills adds one.",
+        ),
+      ),
+      this.group(
+        "Agent types",
+        table(
+          [th("Type"), th("What it does"), th("Model", "hide-narrow"), th("Source", "col-source")],
+          types.map((t) =>
+            h(
+              "tr",
+              {},
+              h("td", { class: "cell-name strong" }, t.name),
+              h("td", { class: "cell-main", title: t.description }, t.description),
+              h("td", { class: "hide-narrow muted" }, t.model ?? "Inherited"),
+              h("td", { class: "col-source muted", title: t.source }, t.source),
+            ),
+          ),
+          "No agent types. Markdown files in .malac/agents define them for this project.",
+        ),
+      ),
+      this.group(
+        "Plugins",
+        table(
+          [th("Plugin"), th("Status"), th("Adds", "hide-narrow"), th("Version", "num col-version")],
+          plugins.map((plugin) => {
+            const adds = [
+              plugin.skills?.length ? plural(plugin.skills.length, "skill") : null,
+              plugin.commands?.length ? plural(plugin.commands.length, "command") : null,
+              plugin.agents?.length ? plural(plugin.agents.length, "agent") : null,
+              plugin.mcp?.length ? plural(plugin.mcp.length, "MCP server") : null,
+              plugin.hooks?.length ? plural(plugin.hooks.length, "hook") : null,
+            ].filter(Boolean);
+            const problems = [...(plugin.warnings ?? []), ...(plugin.unsupported?.length ? [`Not supported here: ${plugin.unsupported.join(", ")}`] : [])];
+            const pending = plugin.pending?.length ? `Enabling it asks you to approve its ${plugin.pending.join(" and ")}` : "";
+            const status = plugin.error
+              ? h("span", { class: "status bad", title: plugin.error }, h("span", { class: "dot failed" }), "Failed to load")
+              : problems.length
+                ? h("span", { class: "status warn", title: problems.join("\n") }, h("span", { class: "dot waiting" }), plural(problems.length, "warning"))
+                : plugin.enabled && pending
+                  ? h("span", { class: "status warn", title: pending }, h("span", { class: "dot waiting" }), "Waiting for approval")
+                  : plugin.enabled
+                    ? h("span", { class: "status ok" }, h("span", { class: "dot ok" }), { builtin: "On, built in", user: "On for you", project: "On in this project" }[plugin.scope] ?? "On")
+                    : h("span", { class: "status muted", title: pending || null }, h("span", { class: "dot idle" }), plugin.installed ? "Installed, off" : "Available");
+            return h(
+              "tr",
+              {},
+              h(
+                "td",
+                { class: "cell-main", title: [plugin.id, plugin.description].filter(Boolean).join("\n") },
+                h("span", { class: "strong" }, plugin.name),
+                plugin.marketplace ? h("span", { class: "muted small" }, ` ${plugin.marketplace}`) : null,
+              ),
+              h("td", { class: "cell-status" }, status),
+              h("td", { class: "cell-adds hide-narrow muted", title: adds.join(", ") }, adds.join(", ") || "–"),
+              h("td", { class: "num col-version muted" }, plugin.version ?? "–"),
+            );
+          }),
+          "No plugins. Install them with malac plugin install.",
+        ),
+        { description: "Enabling a plugin that runs hooks or MCP servers asks for your approval first." },
       ),
     ];
   }

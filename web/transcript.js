@@ -76,6 +76,21 @@ function resultImages(content) {
   return (content ?? []).filter((block) => block.type === "image");
 }
 
+/** A `malac_configure` request to enable a plugin that runs unapproved code. */
+export function isPluginApproval(request) {
+  return request?.tool === "malac_configure" && typeof request.input?.plugin === "string";
+}
+
+/** What enabling the plugin would run (its hooks, MCP servers, scripts), as the daemon lists it. */
+export function pluginApprovalDetails(input) {
+  return h(
+    "div",
+    { class: "plugin-approval" },
+    h("p", { class: "muted small" }, "It runs code that was not approved before. Review what it adds:"),
+    input?.contents ? h("pre", { class: "output plugin-contents", tabindex: "0", "aria-label": `What ${input.plugin} runs` }, input.contents) : null,
+  );
+}
+
 export function summarizeInput(name, input) {
   if (!input || typeof input !== "object") return "";
   if (name === "agent_spawn") return `${input.label || input.agent || "agent"}: ${firstLine(input.task)}`;
@@ -587,7 +602,7 @@ export class TranscriptView {
     const card = this.cards.get(env.call_id) ?? this.matchCard(env.tool, env.input);
     if (!(card instanceof ToolCard)) return;
     this.approvals.set(env.request_id, card);
-    card.awaitApproval({ id: env.request_id, tool: env.tool, summary: env.summary });
+    card.awaitApproval({ id: env.request_id, tool: env.tool, summary: env.summary, input: env.input });
     invalidate("permissions");
   }
 
@@ -604,10 +619,15 @@ export class TranscriptView {
   // to an unfinished card with the same tool and input.
   matchCard(tool, input) {
     const json = JSON.stringify(input);
+    let running = null;
     for (const card of this.cards.values()) {
-      if (card instanceof ToolCard && !card.done && !card.approval && card.name === tool && card.inputJson === json) return card;
+      if (!(card instanceof ToolCard) || card.done || card.approval || card.name !== tool) continue;
+      if (card.inputJson === json) return card;
+      running = card;
     }
-    return null;
+    // Enabling a plugin asks with its own input and no call id, from inside
+    // the malac_configure call that is still running.
+    return isPluginApproval({ tool, input }) ? running : null;
   }
 
   claimPending() {
@@ -915,6 +935,22 @@ class ToolCard {
       if (!decide(request.id, decision)) return;
       for (const button of buttons.querySelectorAll("button")) button.disabled = true;
     };
+    if (isPluginApproval(request)) {
+      buttons.append(
+        h("button", { class: "button primary small", type: "button", onclick: choose("allow") }, "Enable plugin"),
+        h("button", { class: "button small", type: "button", onclick: choose("deny") }, "Keep it off"),
+      );
+      setChildren(
+        this.approvalRow,
+        h("span", { class: "approval-text" }, icon("shield", 14), h("span", {}, "Enable the plugin ", h("strong", {}, request.input.plugin), "?")),
+        buttons,
+        pluginApprovalDetails(request.input),
+      );
+      this.approvalRow.hidden = false;
+      this.toggle(true);
+      this.paintBody();
+      return;
+    }
     buttons.append(
       h("button", { class: "button primary small", type: "button", onclick: choose("allow") }, "Allow"),
       h(

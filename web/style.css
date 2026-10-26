@@ -1728,7 +1728,7 @@ button.chip:hover {
 }
 
 .modal.help {
-  width: min(520px, 100%);
+  width: min(680px, 100%);
 }
 
 .about {
@@ -1896,6 +1896,44 @@ button.chip:hover {
   gap: 6px;
 }
 
+/* Enabling a plugin: what it runs, in full, before the buttons. */
+
+.permission.plugin {
+  align-items: flex-start;
+}
+
+.permission.plugin .permission-text {
+  flex-basis: 100%;
+}
+
+.permission.plugin .permission-text > div {
+  flex: 1;
+}
+
+.permission.plugin .approval-actions {
+  margin-left: 26px;
+}
+
+.plugin-approval {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.tool-approval .plugin-approval {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+.output.plugin-contents {
+  max-height: 240px;
+  border-color: var(--amber-border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
 /* Composer */
 
 .composer-dock {
@@ -1906,8 +1944,96 @@ button.chip:hover {
 }
 
 .composer {
+  position: relative;
   max-width: calc(var(--measure) - 48px);
   margin: 0 auto;
+}
+
+/* `/` completion: built-ins first, then the project's own commands. */
+
+.slash-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  max-height: min(320px, 50vh);
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  list-style: none;
+}
+
+.slash-menu.below {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
+.slash-menu:not([hidden]) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-content: start;
+}
+
+.slash-item {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  gap: 2px 16px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.slash-item:hover,
+.slash-item.active {
+  background: var(--surface-2);
+}
+
+.slash-item:active {
+  background: var(--surface-3);
+}
+
+.slash-cmd {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-name {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.slash-hint {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.slash-desc {
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-source {
+  max-width: 140px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .home-composer .composer {
@@ -2332,6 +2458,77 @@ button.chip:hover {
 .table .cell-model {
   max-width: 180px;
   white-space: nowrap;
+}
+
+.table .cell-command {
+  width: 1%;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table .cell-path,
+.table .cell-adds {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table .cell-kind {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.table .col-source {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table .col-use {
+  white-space: nowrap;
+}
+
+.table .col-use .pill + .pill {
+  margin-left: 4px;
+}
+
+.context-table .ellipsis-cell {
+  width: 40%;
+}
+
+.subhead {
+  margin: 14px 0 4px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.help-title {
+  margin: 18px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.help .commands-table {
+  margin-top: 6px;
+}
+
+.help .commands-table .cell-command {
+  max-width: 240px;
+}
+
+.warning-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-weight: 400;
+}
+
+.warning-list li + li {
+  margin-top: 2px;
 }
 
 .table tr.selected td {
@@ -4472,6 +4669,32 @@ dl.kv.paths dt {
 }
 
 @container main (max-width: 520px) {
+  .slash-menu:not([hidden]) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .slash-desc {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    font-size: 12.5px;
+  }
+
+  .context-table .col-source,
+  .context-table .col-use,
+  .context-table .col-version {
+    display: none;
+  }
+
+  .context-table .cell-path,
+  .context-table .cell-command,
+  .context-table .cell-name {
+    max-width: 150px;
+  }
+
+  .permission.plugin .approval-actions {
+    margin-left: 0;
+  }
+
   .topbar {
     flex-wrap: wrap;
     height: auto;
@@ -5661,6 +5884,16 @@ td .badge {
 
 .remote-way p {
   margin: 0 0 4px;
+}
+
+@media (max-width: 520px) {
+  .help .commands-table .col-source {
+    display: none;
+  }
+
+  .help .commands-table .cell-command {
+    max-width: 150px;
+  }
 }
 
 @media (max-width: 640px) {

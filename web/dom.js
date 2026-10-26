@@ -65,6 +65,13 @@ export function displayPath(path) {
   return value;
 }
 
+/** `~/x` as an absolute path, when the home directory is known. */
+export function expandHome(path) {
+  const value = String(path ?? "");
+  if (userHome && (value === "~" || value.startsWith("~/"))) return `${userHome}${value.slice(1)}`;
+  return value;
+}
+
 export function shortPath(path, keep = 2) {
   const value = displayPath(path);
   const parts = value.split("/").filter(Boolean);
