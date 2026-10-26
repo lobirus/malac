@@ -3,10 +3,12 @@
 A plugin packages things that extend the agent: skills, slash commands, agent types, MCP servers and hooks. A marketplace is a catalog of plugins and where to fetch each one. malac installs plugins written for Claude Code and plugins that follow the open [Agent Plugins](https://agent-plugins.org/specification) specification, from folders, GitHub, GitLab or any git host, private repositories included.
 
 ```sh
-malac plugin marketplace add lobirus/claude-plugins     # a GitHub repository with a marketplace.json
-malac plugin install server-setup@lobirus-plugins       # install and enable
+malac plugin marketplace add lobirus/agent-plugins   # a GitHub repository with a marketplace.json
+malac plugin install server-setup@lobirus           # install and enable
 malac plugin list
 ```
+
+[lobirus/agent-plugins](https://github.com/lobirus/agent-plugins) is the recommended marketplace: each plugin in it is both an Agent Plugins package and a Claude Code plugin, it lists [ponytail](https://ponytail.dev) from upstream, and its `scripts/validate` is a starting point for checking a marketplace of your own (see [Publishing](#publishing-a-provider-agnostic-marketplace)).
 
 In a session, `/context` lists the plugins, skills and commands in use. The agent can manage plugins too, through `malac_configure` (see the end of this page).
 
@@ -85,7 +87,7 @@ Hooks use Claude Code's format. Each is a shell command (or `command` plus `args
 
 Repositories are cloned with your `git`, so SSH keys, credential helpers (`gh auth`, the macOS keychain) and private repositories work as in a terminal. GitHub shorthand is cloned over HTTPS and retried over SSH when that fails. git never prompts: without credentials, the clone fails with git's message.
 
-The catalog is the first of `.claude-plugin/marketplace.json`, `marketplace.json`, `.agents/plugins/marketplace.json`, `.github/plugin/marketplace.json` and `.cursor-plugin/marketplace.json` that has a `plugins` array, in Claude Code's format: `name`, `owner`, `metadata.pluginRoot`, and entries with `name` and `source`. Entry sources may be a path inside the marketplace (`./plugins/x`, or a bare name under `pluginRoot`), `{"source": "github", "repo", "ref", "sha"}`, `{"source": "url", "url", "ref", "sha"}` (a git repository) or `{"source": "git-subdir", "url", "path", "ref"}`. An entry's component fields (`skills`, `commands`, …) add to the plugin, and stand in for a missing manifest.
+The catalog is the first of `.claude-plugin/marketplace.json`, `marketplace.json`, `.agents/plugins/marketplace.json`, `.github/plugin/marketplace.json` and `.cursor-plugin/marketplace.json` that has a `plugins` array, in Claude Code's format: `name`, `owner`, `metadata.pluginRoot`, and entries with `name` and `source`. Entry sources may be a path inside the marketplace (`./plugins/x`, a bare name under `pluginRoot`, or Codex's `{"source": "local", "path": "./plugins/x"}`), `{"source": "github", "repo", "ref", "sha"}`, `{"source": "url", "url", "ref", "sha"}` (a git repository) or `{"source": "git-subdir", "url", "path", "ref"}`. An entry's component fields (`skills`, `commands`, …) add to the plugin, and stand in for a missing manifest.
 
 A folder or repository without a catalog is a marketplace too: one plugin if it is a plugin itself, otherwise the plugins in its `plugins/` folder (or top level), named after the folder. So `malac plugin install owner/repo` installs a repository that is a plugin in one step.
 
@@ -99,10 +101,10 @@ A folder or repository without a catalog is a marketplace too: one plugin if it 
 
 ```toml
 [marketplaces]
-lobirus-plugins = "lobirus/claude-plugins"
+lobirus = "lobirus/agent-plugins"
 
 [plugins]
-"server-setup@lobirus-plugins" = true
+"server-setup@lobirus" = true
 "ponytail@malac" = false
 ```
 
@@ -140,12 +142,12 @@ Turn it off with `malac plugin disable ponytail@malac` (or `--project` for one r
 
 ## Publishing a provider-agnostic marketplace
 
-[`examples/marketplace`](../examples/marketplace) is a complete one. The recipe:
+[lobirus/agent-plugins](https://github.com/lobirus/agent-plugins) is a complete one, with catalogs for Claude Code, Codex and Cursor and a validation script that checks every manifest against the Agent Plugins schemas and the Claude Code structure; [`examples/marketplace`](../examples/marketplace) is a minimal one. The recipe:
 
 1. Put each plugin in `plugins/<name>/` with an Agent Plugins `plugin.json` (`$schema`, `name`, `version`, `description`, `license`) and a `.claude-plugin/plugin.json` with the same metadata, so Claude Code, malac and Agent Plugins clients all find a manifest.
 2. Put portable components in the standard places: `skills/<name>/SKILL.md` with `scripts/` and `references/`, and MCP servers in `mcp.json` with `./` commands and `${PLUGIN_ROOT}`. Claude Code reads MCP servers from `.mcp.json` instead; ship both when you have servers.
 3. Put client-specific parts where each client looks: `commands/`, `agents/` and `hooks/hooks.json` for Claude Code (malac reads them too), and anything only malac should load under `io.malac/`.
-4. List the plugins in `.claude-plugin/marketplace.json` with `./plugins/<name>` sources. Copy it to `.cursor-plugin/marketplace.json` for Cursor if you like; malac reads either.
+4. List the plugins in `.claude-plugin/marketplace.json` with `./plugins/<name>` sources (Claude Code, Copilot and VS Code read it there). Add the same list to `.cursor-plugin/marketplace.json` for Cursor and to `.agents/plugins/marketplace.json` for Codex, whose entries are `{"source": {"source": "local", "path": "./plugins/<name>"}, "policy": …}`. The Agent Plugins specification defines no catalog, so each client keeps its own; malac reads any of them.
 5. Push it to GitHub or GitLab, public or private. Users run `malac plugin marketplace add <owner>/<repo>` (or the git URL) and `malac plugin install <plugin>@<marketplace>`; teams add both to `.malac/plugins.toml`.
 
 Check it locally first: `malac plugin marketplace add ./my-marketplace`, `malac plugin install <plugin>` and `malac plugin show <plugin>` print what each client-neutral part became, with warnings for anything malac skipped.

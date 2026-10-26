@@ -251,10 +251,12 @@ Skills follow the [Agent Skills](https://agentskills.io/specification) format: a
 Plugins bundle skills, slash commands, agent types, MCP servers and hooks. malac installs both Claude Code plugins and [Agent Plugins](https://agent-plugins.org), from marketplaces: folders, GitHub (`owner/repo`), GitLab or any git URL, private repositories included through your own git credentials, or the URL of a `marketplace.json`.
 
 ```bash
-malac plugin marketplace add lobirus/claude-plugins
-malac plugin install server-setup@lobirus-plugins
+malac plugin marketplace add lobirus/agent-plugins
+malac plugin install server-setup@lobirus
 malac plugin marketplace add git@gitlab.example.com:team/agent-plugins.git --project   # for the whole team
 ```
+
+[lobirus/agent-plugins](https://github.com/lobirus/agent-plugins) is the recommended marketplace to start with: every plugin in it is both an Agent Plugins package and a Claude Code plugin, so the same marketplace works in malac, Claude Code, Codex, Copilot, VS Code and Cursor.
 
 Installing runs nothing. A plugin with hooks, MCP servers or scripts is enabled only after you approve what it runs, and a repository's `.malac/plugins.toml` can list plugins for the team but never turns their code on by itself. Hooks cover session start, prompts and tool calls (allow, deny, ask, or change the input). malac ships [ponytail](https://ponytail.dev) (MIT, by Dietrich Gebert) as a default plugin for lean, complete changes and reviews; `malac plugin disable ponytail@malac` or `[plugins] defaults = false` turns it off. See [docs/plugins.md](docs/plugins.md) for the formats, sources, scopes, security model and how to publish a marketplace that every agent can read, and [examples/marketplace](examples/marketplace) for one.
 

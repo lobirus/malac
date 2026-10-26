@@ -261,6 +261,10 @@ fn entry_source(value: &Value, plugin_root: Option<&str>) -> Result<EntrySource>
         .get("source")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // Codex's catalogs write a folder as `{"source": "local", "path": "./x"}`.
+    if let ("local", Some(path)) = (kind, value.get("path")) {
+        return entry_source(path, plugin_root);
+    }
     let field = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
     let github = |repo: &str| format!("https://github.com/{repo}.git");
     let looks_like_shorthand =
@@ -314,6 +318,7 @@ mod tests {
             {"name": "mono", "source": {"source": "git-subdir", "url": "org/mono", "path": "tools/x"}},
             {"name": "lab", "source": {"source": "url", "url": "https://gitlab.com/g/lab.git"}},
             {"name": "pkg", "source": {"source": "npm", "package": "@org/pkg"}},
+            {"name": "codex", "source": {"source": "local", "path": "./plugins/codex"}},
             {"name": "escape", "source": "./../outside"},
             {"name": "local", "source": "./again"},
             {"source": "./nameless"}
@@ -352,7 +357,13 @@ mod tests {
             matches!(sources[4], EntrySource::Git { url, .. } if url == "https://gitlab.com/g/lab.git")
         );
         assert_eq!(sources[5], &EntrySource::Unsupported { kind: "npm".into() });
-        assert_eq!(catalog.plugins.len(), 6);
+        assert_eq!(
+            sources[6],
+            &EntrySource::Path {
+                path: "./plugins/codex".into()
+            }
+        );
+        assert_eq!(catalog.plugins.len(), 7);
         assert_eq!(catalog.warnings.len(), 3);
     }
 
