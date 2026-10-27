@@ -1,6 +1,6 @@
 # malac for Android
 
-Watch and command a malac daemon from an Android phone: workspaces, tabs and agents with their live status, transcripts with tool calls and subagents, prompts with photos, approvals, background jobs, and notifications when an agent needs you or finishes. The app is a client of the daemon's [protocol](../../docs/protocol.md), like the web UI.
+Watch and command a malac daemon from an Android phone: workspaces, tabs and agents with their live status, transcripts with tool calls and subagents, prompts with photos, approvals, background jobs, files and screenshots malac sends, dictation, speech, talk mode, and notifications when an agent needs you or finishes. The app is a client of the daemon's [protocol](../../docs/protocol.md), like the web UI.
 
 ## Layout
 
@@ -52,7 +52,7 @@ MALAC_KEYSTORE=/path/to/release.p12 MALAC_KEYSTORE_PASSWORD=... ./gradlew :app:a
 ./gradlew :core:test
 ```
 
-This needs no Android SDK. The tests decode every message of a recorded session, the documentation's examples and the REST responses; replay the session through the reducer and compare the result with the daemon's own final snapshot; check approvals that another client answers, resync after `lagged`, and reconnects and revoked tokens against a fake daemon; and build transcripts from saved history and live events.
+This needs no Android SDK. The tests decode every message of a recorded session, the documentation's examples and the REST responses; replay the session through the reducer and compare the result with the daemon's own final snapshot; check approvals that another client answers, resync after `lagged`, and reconnects and revoked tokens against a fake daemon; and build transcripts from saved history and live events. The voice tests encode WAV and PCM, follow a spoken conversation, parse the files `send_to_user` sends, and check the voice REST calls, the listener id across reconnects and talk mode's WebSocket against fake daemons.
 
 ## Pairing
 
@@ -80,6 +80,17 @@ On Android 13 and later the app asks for the notification permission when it sta
 ### Remote push
 
 Instant notifications on a sleeping phone need push, and FCM needs server credentials that an open-source daemon cannot ship. The seam is [`PushRegistrar`](app/src/main/kotlin/io/malac/app/notify/PushRegistrar.kt): a relay holding the FCM credentials would receive "request R of daemon D is waiting" (ids only, no content) from the daemon and wake the phone, which then fetches the details over its own authenticated connection, exactly as the background check does. Adding it means an implementation of `PushRegistrar` that registers the phone's FCM token with the daemon for this device, plus the relay; the notification code stays as it is.
+
+## Voice, files and images
+
+See [voice.md](../../docs/voice.md) for what each feature does and the daemon side.
+
+- **Images** open full screen from every thumbnail: screenshots in tool results, photos and attachments of prompts, images malac sent, and photos about to be sent. Pinch to zoom around your fingers, drag to pan, double-tap to switch between fitting and 2.5x, swipe down or go back to close. The bar has share and **Save to Pictures** (Pictures/malac through MediaStore, which needs no permission from Android 10; older versions save with the system's file picker). The viewer draws behind the status bar and the camera cutout; its bar stays clear of both. Live tool results carry only placeholders for their images, so the transcript fetches the saved history again once the next message is recorded, as the web UI does.
+- **Files malac sends** with `send_to_user` replace the tool row: the caption, images inline (`GET /api/shared/{id}`, decoded at the size shown) and other files as a card with the name and size. Tapping a card downloads it to the cache and opens it with the app you pick; share sends it elsewhere. A [FileProvider](app/src/main/res/xml/file_paths.xml) hands out only the cache's `shared/` folder.
+- **Dictation**: the microphone in the composer appears when the daemon's dictation is ready. Tap it, speak, and tap again: the recording (16 kHz mono 16-bit WAV) goes to `POST /api/voice/transcribe`, and the text goes in at the cursor for you to edit and send. The strip above the prompt shows the time and level, and cancels. The app asks for the microphone the first time, with a rationale when Android suggests one and the way to Settings once it is denied.
+- **Speech**: with **Speak on this device** on (Daemons → Voice; stored on the phone, on by default) and the daemon's speech ready, the connection sends `voice_listen` after every connect, and the sentences the daemon picks this phone for are fetched from `/api/voice/say/{id}` and played one at a time with MediaPlayer, ducking other audio, and shown briefly at the bottom.
+- **Talk mode**: the headset in an agent's top bar opens a spoken conversation through that tab (`/api/voice/talk`). The microphone (voice communication source, with the platform's echo canceller and noise suppressor) streams 100 ms frames of 24 kHz PCM once the daemon is ready; the voice plays as it arrives through an AudioTrack, on the speaker in communication mode unless a headset is connected, and stops the moment you start talking. The screen shows the state, the level, what was said and what the voice asked malac, with mute and end; it stays on, and back ends the conversation. malac's own speech waits until it is over.
+- **Voice settings**: Daemons → Voice has a switch, model and voice for each feature and the dictation language (`PUT /api/voice`), and checks the providers' model lists again (`GET /api/voice?refresh=true`).
 
 ## How it works
 

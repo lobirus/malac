@@ -16,6 +16,7 @@ import io.malac.core.protocol.ServerMessage
 import io.malac.core.protocol.TabView
 import io.malac.core.protocol.TurnStatus
 import io.malac.core.protocol.UpdateStatus
+import io.malac.core.protocol.VoiceStatus
 import io.malac.core.protocol.WorkspaceSummary
 import io.malac.core.protocol.WorkspaceView
 import java.time.Instant
@@ -46,6 +47,9 @@ sealed interface Effect {
 
     /** A top-level agent finished a turn. */
     data class TurnFinished(val agent: AgentState, val status: TurnStatus, val text: String) : Effect
+
+    /** A sentence for this connection to read aloud: fetch `/api/voice/say/{id}` and play it. */
+    data class Say(val say: ServerMessage.Say) : Effect
 }
 
 data class Reduction(val state: DaemonState, val effects: List<Effect> = emptyList())
@@ -69,6 +73,10 @@ data class DaemonState(
     val update: UpdateStatus? = null,
     val remote: RemoteStatus? = null,
     val awake: AwakeStatus? = null,
+    /** Null from daemons older than voice support. */
+    val voice: VoiceStatus? = null,
+    /** This connection's listener id while it plays speech (`voice_listen`); null on a new connection. */
+    val listener: Long? = null,
     /** Set by `shutdown`, cleared by the next snapshot. */
     val shutdownReason: String? = null,
     /** Tab names and workspaces seen so far, to label approvals from other workspaces. */
@@ -183,6 +191,10 @@ private class Reducer(private var state: DaemonState) {
             is ServerMessage.Clients -> state = state.copy(daemon = state.daemon?.copy(clients = message.clients))
             is ServerMessage.Remote -> state = state.copy(remote = message.remote)
             is ServerMessage.Awake -> state = state.copy(awake = message.awake)
+            is ServerMessage.Voice -> state = state.copy(voice = message.voice)
+            is ServerMessage.VoiceListening -> state = state.copy(listener = message.listener)
+            // Every client gets every sentence; the one whose listener it names plays it.
+            is ServerMessage.Say -> if (state.listener != null && message.listener == state.listener) effects += Effect.Say(message)
             is ServerMessage.Notice -> effects += Effect.Notice(message.level, message.message)
             is ServerMessage.Lagged -> effects += Effect.Resync(state.workspace?.id)
             is ServerMessage.Shutdown -> state = state.copy(shutdownReason = message.reason.ifEmpty { "stopped" })
@@ -208,6 +220,7 @@ private class Reducer(private var state: DaemonState) {
             update = snapshot.update ?: state.update,
             remote = snapshot.remote,
             awake = snapshot.awake,
+            voice = snapshot.voice,
             models = snapshot.models,
             defaultModel = snapshot.defaultModel,
             shutdownReason = null,

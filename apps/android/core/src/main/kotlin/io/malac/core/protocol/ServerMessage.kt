@@ -32,6 +32,8 @@ sealed interface ServerMessage {
         @SerialName("default_model") val defaultModel: String? = null,
         val remote: RemoteStatus? = null,
         val awake: AwakeStatus? = null,
+        /** Null from daemons older than voice support. */
+        val voice: VoiceStatus? = null,
     ) : ServerMessage
 
     @Serializable
@@ -145,6 +147,32 @@ sealed interface ServerMessage {
     @Serializable
     data class Awake(val awake: AwakeStatus) : ServerMessage
 
+    /** Voice settings changed, or the providers' model lists were read again. */
+    @Serializable
+    data class Voice(val voice: VoiceStatus) : ServerMessage
+
+    /**
+     * A sentence to read aloud, on the connection whose [listener] id it
+     * names: that one fetches `/api/voice/say/{id}` and plays it.
+     */
+    @Serializable
+    data class Say(
+        val id: String,
+        val text: String = "",
+        /** `approval`, `agent` (its `say` tool), `finished` or `failed`. */
+        val reason: String = "",
+        val tab: String? = null,
+        val agent: String? = null,
+        val listener: Long = 0,
+    ) : ServerMessage
+
+    /** The reply to `voice_listen`: this connection's listener id, or null after `on: false`. */
+    @Serializable
+    data class VoiceListening(
+        @SerialName("client_ref") override val clientRef: String? = null,
+        val listener: Long? = null,
+    ) : ServerMessage
+
     /** Settings were applied. */
     data object Reloaded : ServerMessage
 
@@ -187,6 +215,9 @@ internal object ServerMessageSerializer : JsonContentPolymorphicSerializer<Serve
             "clients" -> ServerMessage.Clients.serializer()
             "remote" -> ServerMessage.Remote.serializer()
             "awake" -> ServerMessage.Awake.serializer()
+            "voice" -> ServerMessage.Voice.serializer()
+            "say" -> ServerMessage.Say.serializer()
+            "voice_listening" -> ServerMessage.VoiceListening.serializer()
             "reloaded" -> UnknownSerializer(type) { ServerMessage.Reloaded }
             "lagged" -> ServerMessage.Lagged.serializer()
             "shutdown" -> ServerMessage.Shutdown.serializer()

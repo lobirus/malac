@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the app hands other apps to open or share: copies of files malac
+     sent, and images from the transcript, in the cache. -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>

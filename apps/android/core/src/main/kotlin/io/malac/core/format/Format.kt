@@ -39,6 +39,20 @@ fun formatCost(cost: Double): String = when {
     else -> String.format(Locale.ROOT, "$%.2f", cost)
 }
 
+/** 512 B, 84 KB, 1.4 MB, for file sizes. */
+fun formatBytes(bytes: Long): String = when {
+    bytes < 1_000 -> "${bytes.coerceAtLeast(0)} B"
+    bytes < 1_000_000 -> "${Math.round(bytes / 1_000.0)} KB"
+    bytes < 1_000_000_000 -> oneDecimal(bytes / 1_000_000.0) + " MB"
+    else -> oneDecimal(bytes / 1_000_000_000.0) + " GB"
+}
+
+/** 0:07, 1:30, for a recording's length. */
+fun formatClock(millis: Long): String {
+    val seconds = (millis / 1_000).coerceAtLeast(0)
+    return String.format(Locale.ROOT, "%d:%02d", seconds / 60, seconds % 60)
+}
+
 /** 640ms, 1.5s, 3m 04s, 2h 05m. */
 fun formatDuration(millis: Long): String {
     if (millis < 1_000) return "${millis.coerceAtLeast(0)}ms"

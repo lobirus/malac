@@ -1,9 +1,11 @@
 package io.malac.app.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -22,6 +24,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -30,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -49,13 +53,19 @@ import io.malac.app.data.SavedDaemon
 import io.malac.app.ui.agent.AgentScreen
 import io.malac.app.ui.approvals.ApprovalsScreen
 import io.malac.app.ui.components.CrashReport
+import io.malac.app.ui.components.ImageViewerHost
+import io.malac.app.ui.components.ImageViewerState
+import io.malac.app.ui.components.LocalImageViewer
 import io.malac.app.ui.daemons.AddDaemonScreen
 import io.malac.app.ui.daemons.DaemonsScreen
 import io.malac.app.ui.jobs.JobLogScreen
 import io.malac.app.ui.jobs.JobsScreen
+import io.malac.app.ui.talk.TalkScreen
 import io.malac.app.ui.workspaces.TabScreen
 import io.malac.app.ui.workspaces.WorkspaceScreen
 import io.malac.app.ui.workspaces.WorkspacesScreen
+import io.malac.core.net.DaemonConnection
+import io.malac.core.state.DaemonState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 
@@ -68,6 +78,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class JobRoute(val id: String)
 @Serializable data object DaemonsRoute
 @Serializable data object AddDaemonRoute
+@Serializable data class TalkRoute(val tab: String? = null, val agent: String? = null)
 
 /** A notification asked to show an agent of a daemon. */
 data class OpenAgent(val daemon: String, val agent: String)
@@ -96,10 +107,37 @@ private fun Main(graph: AppGraph, active: ActiveDaemon, opens: Flow<OpenAgent>) 
     val state by active.connection.state.collectAsStateWithLifecycle()
     val status by active.connection.status.collectAsStateWithLifecycle()
     val commands = rememberCommands(active) { graph.connections.notice(it) }
+    val viewer = remember { ImageViewerState() }
 
     LaunchedEffect(graph) {
         graph.connections.notices.collect { snackbar.showSnackbar(it) }
     }
+    // What malac says aloud, briefly, for when the sound is off.
+    LaunchedEffect(graph) {
+        graph.speech.lines.collect { snackbar.showSnackbar(it) }
+    }
+    // Images open over everything, edge to edge; what is under them is hidden from TalkBack meanwhile.
+    CompositionLocalProvider(LocalImageViewer provides viewer) {
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().then(if (viewer.image != null) Modifier.clearAndSetSemantics {} else Modifier)) {
+                Screens(graph, active, opens, nav, snackbar, state, status, commands)
+            }
+            ImageViewerHost(viewer)
+        }
+    }
+}
+
+@Composable
+private fun Screens(
+    graph: AppGraph,
+    active: ActiveDaemon,
+    opens: Flow<OpenAgent>,
+    nav: NavHostController,
+    snackbar: SnackbarHostState,
+    state: DaemonState,
+    status: DaemonConnection.Status,
+    commands: Commands,
+) {
     LaunchedEffect(opens) {
         opens.collect { open ->
             if (open.daemon == active.daemon.id) nav.navigate(AgentRoute(open.agent)) else graph.daemons.select(open.daemon)
@@ -181,8 +219,13 @@ private fun Main(graph: AppGraph, active: ActiveDaemon, opens: Flow<OpenAgent>) 
                         onStarted = { agent ->
                             nav.navigate(AgentRoute(agent)) { popUpTo<AgentRoute> { inclusive = true } }
                         },
+                        onTalk = { tab, agent -> nav.navigate(TalkRoute(tab, agent)) },
                         onBack = { nav.popBackStack() },
                     )
+                }
+                composable<TalkRoute> { backStack ->
+                    val route = backStack.toRoute<TalkRoute>()
+                    TalkScreen(graph, active, route.tab, route.agent, onEnd = { nav.popBackStack() })
                 }
                 composable<ApprovalsRoute> {
                     ApprovalsScreen(state, status, commands, onOpenAgent = { nav.navigate(AgentRoute(it)) })

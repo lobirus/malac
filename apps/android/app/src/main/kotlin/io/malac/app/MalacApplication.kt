@@ -13,6 +13,7 @@ class MalacApplication : Application() {
         val crashes = CrashLog(this).apply { install() }
         graph = AppGraph(this, crashes)
         graph.connections.start()
+        graph.speech.start()
         BackgroundCheckWorker.schedule(this)
     }
 }

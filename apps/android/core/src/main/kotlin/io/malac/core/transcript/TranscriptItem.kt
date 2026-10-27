@@ -70,6 +70,8 @@ data class ToolCall(
     val millis: Long? = null,
     val images: List<Block.Image> = emptyList(),
     val at: Instant? = null,
+    /** What a finished `send_to_user` call sent; null for other tools and failed calls. */
+    val shared: SharedFiles? = null,
 ) {
     val isError: Boolean get() = state == ToolState.Failed || state == ToolState.Denied
     val isFinished: Boolean get() = state in setOf(ToolState.Done, ToolState.Failed, ToolState.Denied)

@@ -77,6 +77,10 @@ fun DaemonsScreen(
             if (state.loaded) {
                 item(key = "details") { DaemonDetails(active.daemon.name, state, commands) }
             }
+            // Daemons older than voice support send no voice status.
+            state.voice?.let { voice ->
+                item(key = "voice") { VoiceSettings(active, voice, graph.voicePrefs, commands) }
+            }
             items(daemons, key = { it.id }) { daemon ->
                 val current = daemon.id == active.daemon.id
                 DaemonRow(

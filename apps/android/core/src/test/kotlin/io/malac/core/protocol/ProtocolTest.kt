@@ -162,6 +162,58 @@ class ProtocolTest {
     }
 
     @Test
+    fun voiceMessagesDecode() {
+        val snapshot = decodeServerMessage(
+            """{"type":"snapshot","daemon":{"version":"1.2.0"},"voice":{""" +
+                """"dictation":{"enabled":true,"model":"fake/whisper-1","configured":null,"voice":null,"models":["fake/whisper-1"]},""" +
+                """"speech":{"enabled":false,"model":"system","configured":"system","voice":null,"models":["fake/tts-1","system"]},""" +
+                """"talk":{"enabled":true,"model":null,"configured":null,"voice":"marin","models":[]},""" +
+                """"language":"en","voices":["alloy","marin"],"checked":"2026-10-27T14:02:11.123Z"}}""",
+        )
+        val voice = assertIs<ServerMessage.Snapshot>(snapshot).voice!!
+        assertTrue(voice.dictation.ready)
+        assertEquals(listOf("fake/tts-1", "system"), voice.speech.models)
+        assertTrue(!voice.speech.ready, "off")
+        assertTrue(!voice.talk.ready, "no model")
+        assertEquals("marin", voice.talk.voice)
+        assertEquals("en", voice.language)
+        assertEquals(Instant.parse("2026-10-27T14:02:11.123Z"), voice.checked)
+        assertNull(assertIs<ServerMessage.Snapshot>(decodeServerMessage("""{"type":"snapshot"}""")).voice, "an older daemon")
+
+        val broadcast = assertIs<ServerMessage.Voice>(decodeServerMessage("""{"type":"voice","voice":{"dictation":{"enabled":false},"speech":{"enabled":true},"talk":{"enabled":true}}}"""))
+        assertEquals(VoiceFeature(enabled = true), broadcast.voice.speech)
+        assertEquals(
+            ServerMessage.Say("c1", "malac needs your approval to run cargo publish.", "approval", "t", "a", 3),
+            decodeServerMessage("""{"type":"say","id":"c1","text":"malac needs your approval to run cargo publish.","reason":"approval","tab":"t","agent":"a","listener":3}"""),
+        )
+        assertEquals(ServerMessage.VoiceListening("a4", 7), decodeServerMessage("""{"type":"voice_listening","client_ref":"a4","listener":7}"""))
+        assertEquals(ServerMessage.VoiceListening("a5", null), decodeServerMessage("""{"type":"voice_listening","client_ref":"a5","listener":null}"""))
+        assertEquals(
+            MalacJson.parseToJsonElement("""{"type":"voice_listen","on":true,"client_ref":"a1"}"""),
+            MalacJson.parseToJsonElement(Command.VoiceListen(true).encode("a1")),
+        )
+        assertEquals(MalacJson.parseToJsonElement("""{"type":"voice_listen","on":false}"""), MalacJson.parseToJsonElement(Command.VoiceListen(false).encode()))
+    }
+
+    @Test
+    fun talkMessagesDecode() {
+        assertEquals(TalkMessage.Ready("fake/gpt-realtime", "marin"), decodeTalkMessage("""{"type":"ready","model":"fake/gpt-realtime","voice":"marin"}"""))
+        assertEquals(TalkMessage.Listening, decodeTalkMessage("""{"type":"listening"}"""))
+        assertEquals(TalkMessage.Thinking, decodeTalkMessage("""{"type":"thinking"}"""))
+        assertEquals(TalkMessage.Transcript(Role.User, "say hello", true), decodeTalkMessage("""{"type":"transcript","role":"user","text":"say hello","final":true}"""))
+        assertEquals(TalkMessage.Transcript(Role.Assistant, "Hel", false), decodeTalkMessage("""{"type":"transcript","role":"assistant","text":"Hel","final":false}"""))
+        assertEquals(TalkMessage.Tool("ask_malac", "Asked malac: say hello"), decodeTalkMessage("""{"type":"tool","name":"ask_malac","summary":"Asked malac: say hello"}"""))
+        assertEquals(TalkMessage.Done, decodeTalkMessage("""{"type":"done"}"""))
+        assertEquals(TalkMessage.Error("no realtime model"), decodeTalkMessage("""{"type":"error","message":"no realtime model"}"""))
+        assertEquals(TalkMessage.Closed("talk mode ended"), decodeTalkMessage("""{"type":"closed","reason":"talk mode ended"}"""))
+        assertEquals(TalkMessage.Unknown("session_created"), decodeTalkMessage("""{"type":"session_created","id":1}"""))
+        assertEquals(TalkMessage.Unknown("malformed"), decodeTalkMessage("{nope"))
+        assertEquals("""{"type":"text","text":"hi"}""", TalkCommand.Text("hi").encode())
+        assertEquals("""{"type":"interrupt"}""", TalkCommand.Interrupt.encode())
+        assertEquals("""{"type":"stop"}""", TalkCommand.Stop.encode())
+    }
+
+    @Test
     fun recordedCommandsRoundTrip() {
         val sent = Fixtures.sessionLines.filter { it["dir"]?.jsonPrimitive?.content == "out" }.map { it.getValue("msg").jsonObject }
         val approve = sent.first { it["type"] == JsonPrimitive("approve") }

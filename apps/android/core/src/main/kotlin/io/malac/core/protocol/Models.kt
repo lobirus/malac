@@ -282,3 +282,37 @@ data class AwakeStatus(
     /** When [awake] last changed. */
     val since: Timestamp? = null,
 )
+
+/** One voice feature. It is [ready] when [enabled] and a [model] can do it; clients show its button only then. */
+@Serializable
+data class VoiceFeature(
+    val enabled: Boolean = false,
+    /** The model in use: [configured], else the first of [models]; null when none can do it. */
+    val model: String? = null,
+    /** The model the settings name, if any. */
+    val configured: String? = null,
+    /** The voice, for speech and talk mode. */
+    val voice: String? = null,
+    /** Every `provider/model` that can do it; speech may list `system`. */
+    val models: List<String> = emptyList(),
+) {
+    val ready: Boolean get() = enabled && model != null
+}
+
+/** Dictation, speech and talk mode: whether each is on and which model it uses. */
+@Serializable
+data class VoiceStatus(
+    val dictation: VoiceFeature = VoiceFeature(),
+    val speech: VoiceFeature = VoiceFeature(),
+    val talk: VoiceFeature = VoiceFeature(),
+    /** The dictation language; null lets the model work it out. */
+    val language: String? = null,
+    /** Voices speech and talk models know. */
+    val voices: List<String> = emptyList(),
+    /** When the providers' model lists were last read. */
+    val checked: Timestamp? = null,
+)
+
+/** `POST /api/voice/transcribe`: what was said, and the model that heard it. */
+@Serializable
+data class Transcription(val text: String = "", val model: String = "")

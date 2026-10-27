@@ -1,11 +1,15 @@
 package io.malac.app.ui.agent
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.malac.app.connection.ActiveDaemon
+import io.malac.app.voice.Dictation
 import io.malac.core.net.CommandException
 import io.malac.core.net.DaemonException
 import io.malac.core.protocol.Block
@@ -16,7 +20,10 @@ import io.malac.core.state.DaemonState
 import io.malac.core.transcript.Draft
 import io.malac.core.transcript.Transcript
 import io.malac.core.transcript.TranscriptItem
+import io.malac.core.transcript.imagesSavedAt
+import io.malac.core.voice.insertDictation
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,13 +50,15 @@ data class TranscriptUi(
  * saved history and the agent's event log whenever either changes, which
  * keeps it a pure function of the daemon state.
  */
-class AgentViewModel(private val active: ActiveDaemon, val agentId: String?) : ViewModel() {
+class AgentViewModel(context: Context, private val active: ActiveDaemon, val agentId: String?) : ViewModel() {
     private class History(val messages: List<Message>, val cutoff: Long, val error: String?)
 
     private val history = MutableStateFlow<History?>(null)
     private val outgoing = MutableStateFlow<List<Pair<String, List<Block.Image>>>>(emptyList())
 
-    var draftText by mutableStateOf("")
+    /** The prompt being written, with its cursor, where dictation goes. */
+    var prompt by mutableStateOf(TextFieldValue(""))
+    val draftText: String get() = prompt.text
     var images by mutableStateOf<List<PickedImage>>(emptyList())
         private set
     var sending by mutableStateOf(false)
@@ -57,6 +66,8 @@ class AgentViewModel(private val active: ActiveDaemon, val agentId: String?) : V
 
     /** The model for a new agent; an existing agent's model changes right away. */
     var newAgentModel by mutableStateOf<String?>(null)
+
+    val dictation = Dictation(context.applicationContext, active.api, viewModelScope)
 
     val transcript: StateFlow<TranscriptUi> = combine(active.connection.state, history, outgoing) { state, history, outgoing ->
         build(state, history, outgoing)
@@ -70,6 +81,18 @@ class AgentViewModel(private val active: ActiveDaemon, val agentId: String?) : V
             viewModelScope.launch {
                 // A snapshot clears the event logs, so the history is fetched again with a new cutoff.
                 active.connection.state.map { it.generation }.distinctUntilChanged().collectLatest { load(agentId) }
+            }
+            viewModelScope.launch {
+                // Live tool results show their images once the history has them, like the web UI.
+                combine(active.connection.state, history) { state, history -> history?.let { imagesSavedAt(state.log(agentId), it.cutoff) } }
+                    .distinctUntilChanged()
+                    .flowOn(Dispatchers.Default)
+                    .collectLatest { saved ->
+                        if (saved != null) {
+                            delay(400)
+                            load(agentId)
+                        }
+                    }
             }
         }
     }
@@ -94,6 +117,25 @@ class AgentViewModel(private val active: ActiveDaemon, val agentId: String?) : V
         transcript.claim(state.pendingFor(agent))
         transcript.linkChildren(state.childrenOf(agent))
         return TranscriptUi(transcript.items, transcript.draft, loading = false, error = history.error)
+    }
+
+    /** Starts dictation, or stops it and puts what was said at the cursor. */
+    fun dictate(onError: (String) -> Unit) {
+        when (dictation.state) {
+            Dictation.State.Idle -> dictation.start(onText = ::insert, onError = onError)
+            is Dictation.State.Recording -> dictation.finish()
+            Dictation.State.Transcribing -> Unit
+        }
+    }
+
+    private fun insert(spoken: String) {
+        val value = prompt
+        val inserted = insertDictation(value.text, value.selection.start, value.selection.end, spoken)
+        prompt = TextFieldValue(inserted.text, TextRange(inserted.cursor))
+    }
+
+    override fun onCleared() {
+        dictation.cancel()
     }
 
     fun addImages(picked: List<PickedImage>) {
@@ -121,7 +163,7 @@ class AgentViewModel(private val active: ActiveDaemon, val agentId: String?) : V
         viewModelScope.launch {
             try {
                 val ack = active.connection.request(command) as? ServerMessage.Ack
-                draftText = ""
+                prompt = TextFieldValue("")
                 images = emptyList()
                 if (agentId == null) ack?.agent?.let(onStarted)
             } catch (error: CommandException) {

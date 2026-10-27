@@ -11,6 +11,8 @@ import io.malac.core.protocol.ServerMessage
 import io.malac.core.protocol.SessionList
 import io.malac.core.protocol.SessionSummary
 import io.malac.core.protocol.SessionTranscript
+import io.malac.core.protocol.Transcription
+import io.malac.core.protocol.VoiceStatus
 import io.malac.core.protocol.encode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -18,6 +20,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
@@ -28,6 +31,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.File
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -50,6 +54,10 @@ class DaemonException(val status: Int, message: String) : IOException(message) {
 }
 
 private val JSON = "application/json; charset=utf-8".toMediaType()
+private val WAV = "audio/wav".toMediaType()
+
+/** A file or clip from the daemon, with the type it says it is. */
+class Download(val bytes: ByteArray, val mediaType: String)
 
 /** The daemon's REST API, for what the WebSocket does not carry and for background checks. */
 class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint) {
@@ -84,13 +92,67 @@ class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint
         return client.fetch(request, ServerMessage.serializer())
     }
 
+    /** What dictation, speech and talk mode offer; [refresh] reads the providers' model lists again first. */
+    suspend fun voice(refresh: Boolean = false): VoiceStatus =
+        get(if (refresh) "api/voice?refresh=true" else "api/voice", VoiceStatus.serializer())
+
+    /**
+     * Changes voice settings: any of `dictation`, `dictation_model`,
+     * `language`, `speech`, `speech_model`, `speech_voice`, `talk`,
+     * `talk_model` and `talk_voice`; JSON null removes one.
+     */
+    suspend fun setVoice(changes: Map<String, JsonElement>): VoiceStatus {
+        val request = authorized("api/voice").put(JsonObject(changes).toString().toRequestBody(JSON)).build()
+        return client.fetch(request, VoiceStatus.serializer())
+    }
+
+    /** Dictation: [wav] is a 16 kHz mono 16-bit recording. */
+    suspend fun transcribe(wav: ByteArray, language: String? = null): Transcription {
+        val url = endpoint.base.resolve("api/voice/transcribe")!!.newBuilder()
+            .apply { if (!language.isNullOrEmpty()) addQueryParameter("language", language) }
+            .build()
+        val request = authorized(url).post(wav.toRequestBody(WAV)).build()
+        return client.fetch(request, Transcription.serializer())
+    }
+
+    /** The audio of a `say` broadcast: `audio/mpeg` or `audio/wav`. */
+    suspend fun sayAudio(id: String): Download = client.download(authorized(url("api/voice/say", id)).get().build())
+
+    /** A file an agent sent with `send_to_user`, read into memory, as images are. */
+    suspend fun shared(id: String): Download = client.download(authorized(url("api/shared", id)).get().build())
+
+    /** Saves a shared file to [file] as it arrives, for files too big to hold in memory. */
+    suspend fun saveShared(id: String, file: File) {
+        val url = url("api/shared", id).newBuilder().addQueryParameter("download", "true").build()
+        val response = client.newCall(authorized(url).get().build()).await()
+        val partial = File(file.path + ".part")
+        withContext(Dispatchers.IO) {
+            response.use {
+                try {
+                    it.requireSuccess()
+                    file.parentFile?.mkdirs()
+                    partial.outputStream().use { out -> it.body.byteStream().copyTo(out) }
+                    if (!partial.renameTo(file)) throw IOException("could not save ${file.name}")
+                } catch (error: IOException) {
+                    partial.delete()
+                    throw error as? DaemonException ?: DaemonException(0, error.message ?: "the connection dropped")
+                }
+            }
+        }
+    }
+
     private suspend fun <T> get(path: String, deserializer: DeserializationStrategy<T>): T {
         val request = authorized(path).get().build()
         return client.fetch(request, deserializer)
     }
 
-    private fun authorized(path: String): Request.Builder =
-        Request.Builder().url(endpoint.base.resolve(path)!!).header("Authorization", "Bearer ${endpoint.token}")
+    private fun authorized(path: String): Request.Builder = authorized(endpoint.base.resolve(path)!!)
+
+    private fun authorized(url: HttpUrl): Request.Builder =
+        Request.Builder().url(url).header("Authorization", "Bearer ${endpoint.token}")
+
+    /** [path] with [id] as its last segment, encoded. */
+    private fun url(path: String, id: String): HttpUrl = endpoint.base.resolve(path)!!.newBuilder().addPathSegment(id).build()
 }
 
 /**
@@ -126,6 +188,10 @@ class HttpPairingService(private val client: OkHttpClient) : PairingService {
     }
 }
 
+private fun Response.requireSuccess() {
+    if (!isSuccessful) bodyOrThrow()
+}
+
 private fun Response.bodyOrThrow(): String {
     val text = body.string()
     if (isSuccessful) return text
@@ -149,6 +215,22 @@ internal suspend fun <T> OkHttpClient.fetch(request: Request, deserializer: Dese
                 MalacJson.decodeFromString(deserializer, it.bodyOrThrow())
             } catch (error: SerializationException) {
                 throw DaemonException(it.code, "unexpected reply from the daemon: ${error.message}")
+            } catch (error: IOException) {
+                throw error as? DaemonException ?: DaemonException(0, error.message ?: "the connection dropped")
+            }
+        }
+    }
+}
+
+/** Sends [request] and reads the whole body on the IO dispatcher, failing only with [DaemonException]. */
+internal suspend fun OkHttpClient.download(request: Request): Download {
+    val response = newCall(request).await()
+    return withContext(Dispatchers.IO) {
+        response.use {
+            try {
+                it.requireSuccess()
+                val type = it.header("Content-Type")?.substringBefore(';')?.trim().orEmpty()
+                Download(it.body.bytes(), type.ifEmpty { "application/octet-stream" })
             } catch (error: IOException) {
                 throw error as? DaemonException ?: DaemonException(0, error.message ?: "the connection dropped")
             }

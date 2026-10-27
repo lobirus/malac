@@ -14,6 +14,12 @@
     <string name="cancel">Cancel</string>
     <string name="save">Save</string>
     <string name="loading">Loading…</string>
+    <string name="close">Close</string>
+    <string name="ok">OK</string>
+    <string name="continue_label">Continue</string>
+    <string name="not_now">Not now</string>
+    <string name="open_settings">Open settings</string>
+    <string name="selected">Selected</string>
 
     <!-- Status -->
     <string name="phase_approval">Approval needed</string>
@@ -64,6 +70,23 @@
     <string name="rename">Rename</string>
     <string name="forget">Forget</string>
     <string name="forget_title">Forget %1$s?</string>
+    <string name="voice">Voice</string>
+    <string name="voice_checked">Models checked %1$s</string>
+    <string name="voice_refresh">Check again</string>
+    <string name="speak_here">Speak on this device</string>
+    <string name="speak_here_detail">Of your devices with this on, malac speaks on the one you used last.</string>
+    <string name="voice_dictation">Dictation</string>
+    <string name="voice_dictation_detail">A microphone in the composer types what you say.</string>
+    <string name="voice_speech">Speech</string>
+    <string name="voice_speech_detail">malac reads approvals, questions and notable results aloud.</string>
+    <string name="voice_talk">Talk mode</string>
+    <string name="voice_talk_detail">A spoken conversation: a voice model hands your requests to malac.</string>
+    <string name="voice_voice">Voice</string>
+    <string name="voice_automatic">Automatic (%1$s)</string>
+    <string name="voice_default">Default</string>
+    <string name="voice_no_model">No model can do this. Add an OpenAI-style provider that has one to the daemon, then check again.</string>
+    <string name="voice_language">Dictation language</string>
+    <string name="voice_language_automatic">Automatic, or a code such as en</string>
     <string name="forget_body">This phone is unpaired on the daemon if it answers, and its token is deleted here. If the daemon cannot be reached, revoke the device on the computer with malac remote revoke.</string>
 
     <!-- Workspaces and tabs -->
@@ -109,6 +132,23 @@
     <string name="history_failed">Could not load the saved transcript: %1$s</string>
     <string name="jump_to_latest">Jump to the latest message</string>
 
+    <!-- Images and files malac sent -->
+    <string name="view_full_screen">View full screen</string>
+    <string name="image_of">Image %1$d of %2$d</string>
+    <string name="image_failed">This image could not be shown.</string>
+    <string name="image_not_loaded">Could not load the image: %1$s</string>
+    <string name="zoom_in">Zoom in</string>
+    <string name="zoom_out">Zoom out</string>
+    <string name="share">Share</string>
+    <string name="save_to_pictures">Save to Pictures</string>
+    <string name="image_saved">Saved to Pictures/malac</string>
+    <string name="image_not_saved">Could not save the image. Check that the phone has free space, then try again.</string>
+    <string name="open_file">Open</string>
+    <string name="share_file">Share %1$s</string>
+    <string name="no_app_to_open">No app on this phone opens %1$s. Share it to an app that can, or open it on the computer.</string>
+    <string name="no_app_to_share">No app on this phone can take it.</string>
+    <string name="download_failed">Could not download %1$s.</string>
+
     <!-- Composer -->
     <string name="model">Model</string>
     <string name="default_model">default</string>
@@ -119,6 +159,35 @@
     <string name="prompt_running">Queue a message</string>
     <string name="send">Send</string>
     <string name="stop">Stop the agent</string>
+    <string name="dictate">Dictate</string>
+    <string name="dictation_stop">Stop and insert the text</string>
+    <string name="dictation_recording">Recording %1$s</string>
+    <string name="dictation_transcribing">Typing what you said…</string>
+    <string name="dictation_nothing_heard">malac heard nothing. Speak closer to the microphone, then try again.</string>
+    <string name="dictation_failed">Dictation failed: %1$s</string>
+
+    <!-- Microphone -->
+    <string name="microphone_title">Microphone</string>
+    <string name="microphone_rationale">malac uses the microphone to type what you say and to talk with you. The recording goes to your malac daemon, which sends it to the model you chose and keeps nothing.</string>
+    <string name="microphone_denied">Without the microphone malac cannot hear you. Tap the microphone again and allow it to dictate or talk.</string>
+    <string name="microphone_settings">The microphone is off for malac. Turn it on in Settings, under Permissions, then try again.</string>
+    <string name="microphone_unavailable">The microphone is not available. Another app may be using it; close that app, then try again.</string>
+
+    <!-- Talk mode -->
+    <string name="talk_mode">Talk mode</string>
+    <string name="talk_connecting">Connecting…</string>
+    <string name="talk_listening">Listening</string>
+    <string name="talk_thinking">Thinking</string>
+    <string name="talk_speaking">Speaking</string>
+    <string name="talk_ended">Talk mode ended</string>
+    <string name="talk_hint">Speak when you are ready. Talking over the voice stops it.</string>
+    <string name="talk_hint_connecting">Starting the voice model.</string>
+    <string name="talk_hint_muted">Muted: malac cannot hear you.</string>
+    <string name="talk_empty">What you say and what malac answers shows here.</string>
+    <string name="talk_voice">Voice</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Unmute</string>
+    <string name="end_talk">End</string>
 
     <!-- Approvals -->
     <string name="allow">Allow</string>
@@ -169,10 +238,6 @@
     <plurals name="devices">
         <item quantity="one">%d device</item>
         <item quantity="other">%d devices</item>
-    </plurals>
-    <plurals name="images">
-        <item quantity="one">%d image</item>
-        <item quantity="other">%d images</item>
     </plurals>
     <plurals name="approvals_waiting">
         <item quantity="one">%d waiting</item>

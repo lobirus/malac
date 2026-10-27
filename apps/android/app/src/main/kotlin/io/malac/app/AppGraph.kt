@@ -9,6 +9,8 @@ import io.malac.app.data.TokenVault
 import io.malac.app.notify.NoPushRegistrar
 import io.malac.app.notify.Notifier
 import io.malac.app.notify.PushRegistrar
+import io.malac.app.voice.Speech
+import io.malac.app.voice.VoicePrefs
 import io.malac.core.net.DaemonApi
 import io.malac.core.net.DaemonConnection
 import io.malac.core.net.HttpPairingService
@@ -41,6 +43,8 @@ class AppGraph(context: Context, val crashes: CrashLog) {
     val pairing: PairingService = HttpPairingService(http)
     val push: PushRegistrar = NoPushRegistrar
     val connections = ConnectionManager(context, http, daemons, ledgers, notifier, scope)
+    val voicePrefs = VoicePrefs(context)
+    val speech = Speech(context, connections, voicePrefs, scope)
 
     /**
      * Forgets a daemon: revokes this device's token there when the daemon

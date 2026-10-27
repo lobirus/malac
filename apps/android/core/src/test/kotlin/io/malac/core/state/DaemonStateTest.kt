@@ -7,8 +7,11 @@ import io.malac.core.protocol.MalacJson
 import io.malac.core.protocol.Mode
 import io.malac.core.protocol.ServerMessage
 import io.malac.core.protocol.TurnStatus
+import io.malac.core.protocol.VoiceFeature
+import io.malac.core.protocol.VoiceStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DaemonStateTest {
@@ -140,5 +143,31 @@ class DaemonStateTest {
         assertEquals(Mode.Ask, other.workspace!!.tabs.single().mode)
         val all = state.reduce(ServerMessage.ModeChanged(mode = Mode.Autopilot, workspace = Fixtures.WORKSPACE)).state
         assertEquals(Mode.Autopilot, all.workspace!!.tabs.single().mode)
+    }
+
+    @Test
+    fun voiceSettingsFollowTheSnapshotAndBroadcasts() {
+        val ready = VoiceStatus(dictation = VoiceFeature(enabled = true, model = "fake/whisper-1"))
+        val state = DaemonState().reduce(ServerMessage.Snapshot(voice = ready)).state
+        assertEquals(ready, state.voice)
+        val off = ready.copy(dictation = ready.dictation.copy(enabled = false))
+        assertEquals(off, state.reduce(ServerMessage.Voice(off)).state.voice)
+    }
+
+    @Test
+    fun onlyThisConnectionsSentencesAreSpoken() {
+        val say = ServerMessage.Say("c1", "Done.", "finished", listener = 2)
+        val idle = DaemonState().reduce(ServerMessage.Snapshot()).state
+        assertTrue(idle.reduce(say).effects.isEmpty(), "not listening")
+
+        val listening = idle.reduce(ServerMessage.VoiceListening("a1", 2)).state
+        assertEquals(2L, listening.listener)
+        assertEquals(listOf<Effect>(Effect.Say(say)), listening.reduce(say).effects)
+        assertTrue(listening.reduce(say.copy(listener = 3)).effects.isEmpty(), "another device's")
+        assertEquals(2L, listening.reduce(ServerMessage.Snapshot()).state.listener, "a resync keeps the connection")
+
+        val stopped = listening.reduce(ServerMessage.VoiceListening("a2", null)).state
+        assertNull(stopped.listener)
+        assertTrue(stopped.reduce(say).effects.isEmpty())
     }
 }

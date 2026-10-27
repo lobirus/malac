@@ -116,8 +116,11 @@ fun ToolRow(call: ToolCall, cwd: String?, answering: Boolean, onDecide: (String,
             Column(Modifier.padding(start = 24.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ToolInput(call, cwd, diff)
                 ToolOutput(call)
-                if (call.images.isNotEmpty()) Thumbnails(call.images)
             }
+        }
+        // Screenshots and other images show without expanding; a tap opens them full screen.
+        if (call.images.isNotEmpty()) {
+            Column(Modifier.padding(start = 24.dp, bottom = 8.dp)) { Thumbnails(call.images) }
         }
     }
 }

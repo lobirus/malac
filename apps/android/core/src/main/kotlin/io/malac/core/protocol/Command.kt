@@ -77,6 +77,11 @@ sealed interface Command {
     @SerialName("keep_awake")
     data class SetKeepAwake(val mode: KeepAwake) : Command
 
+    /** Plays speech on this connection, or stops; the reply is `voice_listening`. */
+    @Serializable
+    @SerialName("voice_listen")
+    data class VoiceListen(val on: Boolean) : Command
+
     @Serializable
     @SerialName("ping")
     data object Ping : Command

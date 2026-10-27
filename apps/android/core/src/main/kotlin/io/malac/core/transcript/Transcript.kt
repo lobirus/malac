@@ -196,6 +196,7 @@ class Transcript {
                         output = output,
                         millis = millis ?: call.millis,
                         images = images.ifEmpty { call.images },
+                        shared = if (call.name == SEND_TO_USER && !isError) parseShared(output).takeIf { it.files.isNotEmpty() } else null,
                     ),
                 )
             }
@@ -329,6 +330,31 @@ class Transcript {
         val index = outgoing.indexOfFirst { text.startsWith(it.first) }
         return if (index >= 0) outgoing.removeAt(index).second else emptyList()
     }
+}
+
+private val IMAGE_PLACEHOLDER = Regex("""\[image/[\w.+-]+ image]""")
+
+/**
+ * Live tool results carry only placeholders for their images, which the
+ * saved history has once the next message or the turn's end is recorded.
+ * This is the seq of the last such moment in [log] after [cutoff], when
+ * fetching the history again would show images it does not have yet.
+ */
+fun imagesSavedAt(log: List<LogEntry>, cutoff: Long): Long? {
+    var waiting = false
+    var saved: Long? = null
+    for (entry in log) {
+        if (entry.seq <= cutoff || entry !is LogEntry.Event) continue
+        when (val event = entry.envelope.event) {
+            is AgentEvent.ToolFinished -> if (IMAGE_PLACEHOLDER.containsMatchIn(event.output)) waiting = true
+            is AgentEvent.AssistantMessage, is AgentEvent.TurnFinished -> if (waiting) {
+                saved = entry.seq
+                waiting = false
+            }
+            else -> Unit
+        }
+    }
+    return saved
 }
 
 private fun todos(input: JsonElement): List<Todo> {

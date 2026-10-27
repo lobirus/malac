@@ -9,6 +9,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import io.malac.app.data.DaemonRepository
 import io.malac.app.data.LedgerStore
 import io.malac.app.data.SavedDaemon
+import io.malac.app.files.SharedFileStore
 import io.malac.app.notify.Notifier
 import io.malac.core.net.DaemonApi
 import io.malac.core.net.DaemonConnection
@@ -28,8 +29,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
-/** The selected daemon and its connection. */
-data class ActiveDaemon(val daemon: SavedDaemon, val connection: DaemonConnection, val api: DaemonApi)
+/** The selected daemon, its connection, and the files its agents sent. */
+data class ActiveDaemon(val daemon: SavedDaemon, val connection: DaemonConnection, val api: DaemonApi, val files: SharedFileStore)
 
 /**
  * Keeps one WebSocket to the selected daemon while the app is visible and
@@ -111,7 +112,8 @@ class ConnectionManager(
             return
         }
         val connection = DaemonConnection(endpoint, http, scope)
-        val active = ActiveDaemon(daemon, connection, DaemonApi(http, endpoint))
+        val api = DaemonApi(http, endpoint)
+        val active = ActiveDaemon(daemon, connection, api, SharedFileStore(context, api))
         _active.value = active
         effects = scope.launch { connection.effects.collect { handle(active, it) } }
         if (inForeground) connection.start()
@@ -127,6 +129,8 @@ class ConnectionManager(
             is Effect.TurnFinished -> if (!inForeground) {
                 notifier.turnFinished(active.daemon, effect.agent.id, effect.agent.displayName, effect.status, effect.text)
             }
+            // Played by io.malac.app.voice.Speech, which follows the active daemon itself.
+            is Effect.Say -> Unit
             is Effect.Resync -> Unit
         }
     }

@@ -31,6 +31,12 @@ class FormatTest {
         assertEquals("27.9k in · 762 out", formatUsage(Usage(inputTokens = 27_926, outputTokens = 762)))
         assertEquals("~/src/demo", displayPath("/Users/dev/src/demo", "/Users/dev"))
         assertEquals("/Users/devil", displayPath("/Users/devil", "/Users/dev"))
+        assertEquals("512 B", formatBytes(512))
+        assertEquals("84 KB", formatBytes(84_211))
+        assertEquals("1.4 MB", formatBytes(1_400_000))
+        assertEquals("2 GB", formatBytes(2_000_000_000))
+        assertEquals("0:07", formatClock(7_900))
+        assertEquals("1:30", formatClock(90_000))
     }
 
     @Test

@@ -42,16 +42,18 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.malac.app.R
+import io.malac.app.ui.components.LocalImageViewer
 import io.malac.app.ui.components.MarkdownText
+import io.malac.app.ui.components.toViewerImage
 import io.malac.app.ui.theme.malac
 import io.malac.core.format.baseName
 import io.malac.core.format.firstLine
@@ -81,7 +83,9 @@ fun UserRow(item: TranscriptItem.User) {
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.you), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.malac.text2)
-            if (item.images.isNotEmpty()) Thumbnails(item.images)
+            // Photos sent with the prompt, then images inside attached files.
+            val images = item.images + item.attachments.flatMap { it.images }
+            if (images.isNotEmpty()) Thumbnails(images)
             if (item.text.isNotEmpty()) SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyMedium) }
             if (item.attachments.isNotEmpty()) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -271,26 +275,28 @@ fun Pill(text: String) {
 private val THUMBNAIL = 96.dp
 
 /**
- * Images from the transcript as thumbnails. Each is decoded off the main
- * thread at about the size it is shown: a full-size screenshot takes tens
- * of megabytes as a bitmap, and a session can hold many.
+ * Images from the transcript as thumbnails that open full screen. Each is
+ * decoded off the main thread at about the size it is shown: a full-size
+ * screenshot takes tens of megabytes as a bitmap, and a session can hold many.
  */
 @Composable
 fun Thumbnails(images: List<Block.Image>) {
-    val description = pluralStringResource(R.plurals.images, images.size, images.size)
+    val viewer = LocalImageViewer.current
     val edge = with(LocalDensity.current) { THUMBNAIL.roundToPx() }
-    Row(
-        Modifier.horizontalScroll(rememberScrollState()).semantics(mergeDescendants = true) {},
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        for (image in images) {
+    val open = stringResource(R.string.view_full_screen)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        images.forEachIndexed { index, image ->
             val bitmap by produceState<ImageBitmap?>(null, image.data, edge) {
                 value = withContext(Dispatchers.Default) { thumbnail(image.data, edge) }
             }
-            val modifier = Modifier.size(THUMBNAIL).clip(MaterialTheme.shapes.small)
+            val description = stringResource(R.string.image_of, index + 1, images.size)
+            val modifier = Modifier
+                .size(THUMBNAIL)
+                .clip(MaterialTheme.shapes.small)
+                .clickable(onClickLabel = open, role = Role.Image) { viewer?.open(image.toViewerImage("image-${index + 1}")) }
             bitmap?.let {
                 Image(bitmap = it, contentDescription = description, contentScale = ContentScale.Crop, modifier = modifier)
-            } ?: Box(modifier.background(MaterialTheme.colorScheme.surfaceContainer))
+            } ?: Box(modifier.background(MaterialTheme.colorScheme.surfaceContainer).semantics { contentDescription = description })
         }
     }
 }

@@ -3,6 +3,7 @@ package io.malac.core.transcript
 import io.malac.core.Fixtures
 import io.malac.core.protocol.AgentEvent
 import io.malac.core.protocol.AgentStatus
+import io.malac.core.protocol.Envelope
 import io.malac.core.protocol.MalacJson
 import io.malac.core.protocol.Message
 import io.malac.core.protocol.ServerMessage
@@ -11,6 +12,8 @@ import io.malac.core.protocol.TurnStatus
 import io.malac.core.state.AgentState
 import io.malac.core.state.DaemonState
 import io.malac.core.state.LogEntry
+import kotlinx.serialization.json.JsonPrimitive
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -168,5 +171,72 @@ class TranscriptTest {
         val grep = MalacJson.parseToJsonElement("""{"pattern":"TODO","path":"/src/app/src"}""")
         assertEquals("TODO in src", describeTool("grep", grep, "/src/app"))
         assertEquals("2 items", summarizeInput("todo", MalacJson.parseToJsonElement("""{"items":[{},{}]}""")))
+    }
+
+    private val sent = "Sent to the user: Screenshot 2026-10-27 14.02.11.jpg, report.pdf.\n" +
+        "<caption>The settings page after the fix</caption>\n" +
+        "<shared id=\"0193f0c2aa\" name=\"Screenshot 2026-10-27 14.02.11.jpg\" type=\"image/jpeg\" size=\"84211\"/>\n" +
+        "<shared id=\"0193f0c2bb\" name=\"report.pdf\" type=\"application/pdf\" size=\"5120\"/>"
+
+    @Test
+    fun sharedTagsParseLikeTheDaemonWritesThem() {
+        val shared = parseShared(sent)
+        assertEquals("The settings page after the fix", shared.caption)
+        assertEquals(
+            listOf(
+                SharedFile("0193f0c2aa", "Screenshot 2026-10-27 14.02.11.jpg", "image/jpeg", 84211),
+                SharedFile("0193f0c2bb", "report.pdf", "application/pdf", 5120),
+            ),
+            shared.files,
+        )
+        assertEquals(listOf(true, false), shared.files.map { it.isImage })
+        assertTrue(!SharedFile("x", "chart.svg", "image/svg+xml", 1).isImage, "drawn by browsers only")
+        assertEquals(SharedFiles(null, listOf(SharedFile("x", "a b", "application/octet-stream", 0))), parseShared("""<shared id="x" name="a b"/>"""))
+        assertTrue(parseShared("<shared broken").files.isEmpty())
+        assertTrue(parseShared("""<shared name="no id"/>""").files.isEmpty())
+    }
+
+    @Test
+    fun sendToUserCallsCarryTheirFiles() {
+        val history = listOf(
+            """{"role":"assistant","content":[{"type":"tool_use","id":"s1","name":"send_to_user","input":{"paths":["report.pdf"]}},""" +
+                """{"type":"tool_use","id":"b1","name":"bash","input":{"command":"cat notes"}}]}""",
+            """{"role":"user","content":[{"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":${JsonPrimitive(sent)}}]},""" +
+                """{"type":"tool_result","tool_use_id":"b1","content":[{"type":"text","text":"<shared id=\"x\" name=\"y\"/>"}]}]}""",
+        ).map { MalacJson.decodeFromString(Message.serializer(), it) }
+        val tools = Transcript().apply { load(history) }.items.only<TranscriptItem.Tool>()
+        assertEquals(2, tools.single { it.call.name == "send_to_user" }.call.shared?.files?.size)
+        assertNull(tools.single { it.call.name == "bash" }.call.shared, "only send_to_user sends files")
+
+        // Live: the files arrive with `tool_finished`.
+        val at = Instant.parse("2026-10-27T14:02:11Z")
+        val live = Transcript()
+        live.load(history.take(1))
+        live.apply(Envelope("a", 1, at, AgentEvent.ToolFinished("s1", "send_to_user", sent, millis = 12)))
+        live.apply(Envelope("a", 2, at, AgentEvent.ToolFinished("b1", "bash", "", isError = true)))
+        val call = live.items.only<TranscriptItem.Tool>().first().call
+        assertEquals("The settings page after the fix", call.shared?.caption)
+        assertEquals(ToolState.Done, call.state)
+        val failed = Transcript().apply { load(history.take(1)) }
+        failed.apply(Envelope("a", 1, at, AgentEvent.ToolFinished("s1", "send_to_user", "no such file: report.pdf", isError = true)))
+        assertNull(failed.items.only<TranscriptItem.Tool>().first().call.shared)
+    }
+
+    @Test
+    fun liveToolImagesAreFetchedOnceSaved() {
+        val at = Instant.parse("2026-10-27T14:02:11Z")
+        fun entry(seq: Long, event: AgentEvent) = LogEntry.Event(Envelope("a", seq, at, event))
+        val log = listOf(
+            entry(1, AgentEvent.ToolFinished("c1", "bash", "ok")),
+            entry(2, AgentEvent.AssistantMessage(Message())),
+            entry(3, AgentEvent.ToolFinished("c2", "browser_screenshot", "Took a screenshot.\n[image/png image]")),
+            entry(4, AgentEvent.TextDelta("looking")),
+            entry(5, AgentEvent.AssistantMessage(Message())),
+            entry(6, AgentEvent.TurnFinished()),
+        )
+        assertNull(imagesSavedAt(log.take(2), cutoff = 0), "no images")
+        assertNull(imagesSavedAt(log.take(4), cutoff = 0), "not saved yet")
+        assertEquals(5L, imagesSavedAt(log, cutoff = 0))
+        assertNull(imagesSavedAt(log, cutoff = 5), "the history fetched after it has them")
     }
 }

@@ -4,21 +4,29 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
@@ -44,17 +52,28 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.malac.app.R
+import io.malac.app.ui.components.LocalImageViewer
+import io.malac.app.ui.components.MicrophoneAccessDialogs
+import io.malac.app.ui.components.rememberMicrophoneAccess
 import io.malac.app.ui.label
 import io.malac.app.ui.theme.malac
+import io.malac.app.voice.Dictation
+import io.malac.core.format.formatClock
 import io.malac.core.protocol.Mode
 import kotlinx.coroutines.launch
 
 /**
- * Prompt, photos, model and mode. [model] and [mode] are what applies to
- * this agent; picking another sends the change right away.
+ * Prompt, photos, dictation, model and mode. [model] and [mode] are what
+ * applies to this agent; picking another sends the change right away. The
+ * microphone shows when the daemon can [dictate].
  */
 @Composable
 fun Composer(
@@ -64,13 +83,19 @@ fun Composer(
     mode: Mode?,
     running: Boolean,
     enabled: Boolean,
+    dictate: Boolean,
     onModel: (String) -> Unit,
     onMode: (Mode) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onError: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val viewer = LocalImageViewer.current
+    val microphone = rememberMicrophoneAccess()
+    MicrophoneAccessDialogs(microphone)
+    val dictation = viewModel.dictation.state
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(maxItems = 6)) { uris ->
         scope.launch { viewModel.addImages(uris.mapNotNull { PickedImage.load(context, it) }) }
     }
@@ -87,7 +112,10 @@ fun Composer(
                             bitmap = image.preview,
                             contentDescription = image.name,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(64.dp).clip(MaterialTheme.shapes.small),
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(MaterialTheme.shapes.small)
+                                .clickable(onClickLabel = stringResource(R.string.view_full_screen), role = Role.Image) { viewer?.open(image.viewerImage) },
                         )
                         // Drawn small; Material still gives it a 48 dp touch target.
                         FilledIconButton(
@@ -104,24 +132,29 @@ fun Composer(
                 }
             }
         }
-        Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Picker(
-                label = stringResource(R.string.model),
-                value = model ?: stringResource(R.string.default_model),
-                options = models,
-                display = { it },
-                onPick = onModel,
-                enabled = enabled && models.isNotEmpty(),
-            )
-            if (mode != null) {
+        // While dictating, the recording takes the pickers' place, so nothing below moves.
+        if (dictation !is Dictation.State.Idle) {
+            Recording(dictation, onCancel = viewModel.dictation::cancel)
+        } else {
+            Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Picker(
-                    label = stringResource(R.string.mode),
-                    value = mode.label(),
-                    options = Mode.entries,
-                    display = { it.label() },
-                    onPick = onMode,
-                    enabled = enabled,
+                    label = stringResource(R.string.model),
+                    value = model ?: stringResource(R.string.default_model),
+                    options = models,
+                    display = { it },
+                    onPick = onModel,
+                    enabled = enabled && models.isNotEmpty(),
                 )
+                if (mode != null) {
+                    Picker(
+                        label = stringResource(R.string.mode),
+                        value = mode.label(),
+                        options = Mode.entries,
+                        display = { it.label() },
+                        onPick = onMode,
+                        enabled = enabled,
+                    )
+                }
             }
         }
         Row(
@@ -136,8 +169,8 @@ fun Composer(
                 Icon(painterResource(R.drawable.ic_image), contentDescription = stringResource(R.string.attach_photos))
             }
             OutlinedTextField(
-                value = viewModel.draftText,
-                onValueChange = { viewModel.draftText = it },
+                value = viewModel.prompt,
+                onValueChange = { viewModel.prompt = it },
                 placeholder = { Text(stringResource(if (running) R.string.prompt_running else R.string.prompt_placeholder)) },
                 maxLines = 6,
                 enabled = enabled,
@@ -150,6 +183,9 @@ fun Composer(
                 ),
                 modifier = Modifier.weight(1f),
             )
+            if (dictate || dictation !is Dictation.State.Idle) {
+                DictationButton(dictation, enabled = enabled, onClick = { microphone.request { viewModel.dictate(onError) } })
+            }
             if (running) {
                 IconButton(onClick = onStop) {
                     Icon(painterResource(R.drawable.ic_stop), contentDescription = stringResource(R.string.stop), tint = MaterialTheme.malac.red)
@@ -167,6 +203,76 @@ fun Composer(
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
             }
         }
+    }
+}
+
+/** The microphone: starts dictation, and while recording stops it and inserts the text. */
+@Composable
+private fun DictationButton(state: Dictation.State, enabled: Boolean, onClick: () -> Unit) {
+    when (state) {
+        Dictation.State.Idle -> IconButton(onClick = onClick, enabled = enabled) {
+            Icon(painterResource(R.drawable.ic_mic), contentDescription = stringResource(R.string.dictate))
+        }
+        is Dictation.State.Recording -> FilledIconButton(
+            onClick = onClick,
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+        ) {
+            Icon(painterResource(R.drawable.ic_stop), contentDescription = stringResource(R.string.dictation_stop))
+        }
+        // The strip above says so in words.
+        Dictation.State.Transcribing -> Box(Modifier.size(48.dp).clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        }
+    }
+}
+
+/** The recording's length and level, or that it is being typed, with a way to cancel. */
+@Composable
+private fun Recording(state: Dictation.State, onCancel: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        when (state) {
+            is Dictation.State.Recording -> {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.malac.red))
+                Text(
+                    stringResource(R.string.dictation_recording, formatClock(state.millis)),
+                    style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                )
+                LevelMeter(state.level, Modifier.weight(1f))
+                TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+            }
+            else -> Text(
+                stringResource(R.string.dictation_transcribing),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.malac.text2,
+                modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+    }
+}
+
+/** How loud the microphone is, from 0 to 1, as a bar. Decoration: the buttons say what is going on. */
+@Composable
+fun LevelMeter(level: Float, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(MaterialTheme.colorScheme.outlineVariant)
+            .clearAndSetSemantics {},
+    ) {
+        Box(
+            Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(level.coerceIn(0f, 1f))
+                .background(MaterialTheme.colorScheme.onSurface),
+        )
     }
 }
 

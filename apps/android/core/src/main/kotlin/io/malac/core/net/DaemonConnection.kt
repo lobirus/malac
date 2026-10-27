@@ -128,6 +128,8 @@ class DaemonConnection(
     private suspend fun run() {
         while (true) {
             _status.value = Status.Connecting
+            // A listener id belongs to one connection; the next one asks again.
+            _state.update { it.copy(listener = null) }
             val closed = CompletableDeferred<Close>()
             // The token goes in a header, as for REST, so it stays out of URLs and logs.
             val request = Request.Builder()

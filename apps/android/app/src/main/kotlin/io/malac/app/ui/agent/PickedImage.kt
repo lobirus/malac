@@ -8,6 +8,7 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import io.malac.app.ui.components.ViewerImage
 import io.malac.core.protocol.Block
 import io.malac.core.protocol.ImageInput
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,13 @@ import kotlin.math.roundToInt
 /** A photo or screenshot ready to send: a JPEG at most [MAX_EDGE] pixels on its long side. */
 class PickedImage(val name: String, val input: ImageInput, val preview: ImageBitmap) {
     val block: Block.Image get() = Block.Image(input.mediaType, input.data)
+
+    /** The JPEG as it will be sent, for the full-screen viewer. */
+    val viewerImage: ViewerImage
+        get() {
+            val data = input.data
+            return ViewerImage("picked-${data.length}-${data.hashCode()}", name, input.mediaType) { Base64.decode(data, Base64.DEFAULT) }
+        }
 
     companion object {
         private const val MAX_EDGE = 2048
