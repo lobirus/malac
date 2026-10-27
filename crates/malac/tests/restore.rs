@@ -49,20 +49,23 @@ async fn a_restarted_daemon_restores_workspaces_lazily() {
     let agent = launched.agent.clone().unwrap();
     let tab_name = &launched.workspace.tab(&tab).unwrap().name;
     assert!(tab_name.ends_with(": start the dev server"), "{tab_name}");
-    let job = wait_for(&mut events, |m| match m {
-        ServerMessage::JobStarted { job } => Some(job.clone()),
-        _ => None,
+    // The job and the agent's events travel separately, so the turn can end
+    // before the job's broadcast arrives: wait for both, in either order.
+    let (mut started, mut finished) = (None, false);
+    wait_for(&mut events, |m| {
+        match m {
+            ServerMessage::JobStarted { job } => started = Some(job.clone()),
+            ServerMessage::Event { envelope, .. } if envelope.agent == agent => {
+                finished |= matches!(envelope.event, Event::TurnFinished { .. });
+            }
+            _ => {}
+        }
+        (started.is_some() && finished).then_some(())
     })
     .await;
+    let job = started.unwrap();
     assert_eq!(job.tab.as_deref(), Some(tab.as_str()));
     assert_eq!(job.job.agent.as_deref(), Some(agent.as_str()));
-    wait_for(&mut events, |m| match m {
-        ServerMessage::Event { envelope, .. } if envelope.agent == agent => {
-            matches!(envelope.event, Event::TurnFinished { .. }).then_some(())
-        }
-        _ => None,
-    })
-    .await;
     let reply = client
         .request(Command::TabCreate(TabSpec {
             cwd: other.clone(),
