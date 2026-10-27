@@ -24,6 +24,9 @@ pub const VOICES: &[&str] = &[
 pub const DEFAULT_VOICE: &str = "alloy";
 /// What `/audio/transcriptions` accepts at most.
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+/// A quarter of a second of 16 kHz 16-bit mono WAV, with its header:
+/// shorter recordings are a double tap, and providers call them corrupt.
+const MIN_WAV_BYTES: usize = 44 + 8_000;
 /// Longest text read aloud at once.
 pub const MAX_SPEECH_CHARS: usize = 4096;
 
@@ -37,7 +40,8 @@ pub fn audio_kind(model: &str, config: Option<AudioKind>) -> Option<AudioKind> {
     if has(&["moderation", "embed"]) {
         None
     } else if has(&["realtime"]) {
-        Some(AudioKind::Realtime)
+        // Realtime models that translate or transcribe do not converse.
+        (!has(&["translate", "whisper", "transcribe"])).then_some(AudioKind::Realtime)
     } else if has(&[
         "whisper",
         "transcribe",
@@ -201,13 +205,16 @@ pub async fn transcribe(
     if audio.is_empty() {
         bail!("the recording is empty");
     }
+    if is_wav(media_type) && audio.len() < MIN_WAV_BYTES {
+        bail!("the recording is too short; speak, then stop the recording");
+    }
     if audio.len() > MAX_AUDIO_BYTES {
         bail!("the recording is over {} MB", MAX_AUDIO_BYTES / 1024 / 1024);
     }
     let endpoint = endpoint(config, spec)?;
     let text = if endpoint.kind == Some(AudioKind::Input) {
         let format = match media_type {
-            "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+            _ if is_wav(media_type) => "wav",
             "audio/mpeg" | "audio/mp3" => "mp3",
             other => bail!("{spec} takes WAV or MP3 audio, not {other}"),
         };
@@ -268,6 +275,10 @@ pub async fn transcribe(
             .to_owned()
     };
     Ok(text.trim().to_owned())
+}
+
+fn is_wav(media_type: &str) -> bool {
+    matches!(media_type, "audio/wav" | "audio/x-wav" | "audio/wave")
 }
 
 fn extension(media_type: &str) -> &'static str {

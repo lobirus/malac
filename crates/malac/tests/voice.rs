@@ -107,13 +107,18 @@ async fn realtime(mut socket: WebSocket, heard: Heard) {
     }
 }
 
-/// A WAV header and a little silence.
+/// Half a second of 16 kHz silence as WAV.
 fn wav() -> Vec<u8> {
-    let mut wav = b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec();
+    let data = 16_000u32;
+    let mut wav = b"RIFF".to_vec();
+    wav.extend((36 + data).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
     wav.extend([
         16, 0, 0, 0, 1, 0, 1, 0, 0x80, 0x3e, 0, 0, 0, 0x7d, 0, 0, 2, 0, 16, 0,
     ]);
-    wav.extend(b"data\x00\x00\x00\x00");
+    wav.extend(b"data");
+    wav.extend(data.to_le_bytes());
+    wav.resize(44 + data as usize, 0);
     wav
 }
 

@@ -16,7 +16,7 @@ Sent files are copies, kept in `~/.malac/shared/` for 30 days, so they still ope
 | Speech | malac speaks when it needs you: approvals, questions, and when a long task finishes or something notable happens | A speech model (`gpt-4o-mini-tts`, `tts-1`), or your computer's own voice (`say` on macOS, `espeak-ng` on Linux) | No |
 | Talk mode | A spoken conversation: you talk, a voice model hands the work to malac, and tells you what malac did and what it needs | A Realtime model (`gpt-realtime`) | Yes |
 
-malac finds these models in your providers' model lists. Only OpenAI-style providers (OpenAI itself, and gateways such as LiteLLM in front of OpenAI, Groq or a local server) have audio APIs. A model whose name does not say what it does can be declared:
+malac finds these models in your providers' model lists. Only OpenAI-style providers (OpenAI itself, and gateways such as LiteLLM in front of OpenAI, Groq or a local server) have audio APIs. A gateway may name a model differently on its Realtime route: LiteLLM, for one, can take `gpt-4o-mini-transcribe` for transcription but want `openai/gpt-realtime` for talk mode, so if talk mode says the model is unknown, pick the provider-prefixed name. A model whose name does not say what it does can be declared:
 
 ```toml
 [models."lora/listener"]

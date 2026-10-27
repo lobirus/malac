@@ -23,6 +23,9 @@ use crate::connections::{self, Endpoint};
 use crate::daemon::ServeArgs;
 use crate::protocol::{VoiceFeature, VoiceStatus};
 
+/// Other models `malac voice` names per feature; `--json` lists them all.
+const SHOWN_ALTERNATIVES: usize = 4;
+
 /// Dictation records at this rate: every transcription model takes it.
 pub const DICTATION_RATE: u32 = 16_000;
 /// Talk mode's audio, both ways.
@@ -227,10 +230,19 @@ fn print_status(status: &VoiceStatus) {
             .filter(|m| Some(*m) != feature.model.as_deref())
             .collect();
         if !others.is_empty() {
-            println!(
-                "{}",
-                format!("{:22} also: {}", "", others.join(", ")).dark_grey()
-            );
+            let mut also = others
+                .iter()
+                .take(SHOWN_ALTERNATIVES)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if others.len() > SHOWN_ALTERNATIVES {
+                also.push_str(&format!(
+                    " and {} more (`malac voice status --json`)",
+                    others.len() - SHOWN_ALTERNATIVES
+                ));
+            }
+            println!("{}", format!("{:22} also: {also}", "").dark_grey());
         }
     }
     let language = status
