@@ -71,10 +71,43 @@ struct SessionContent<Content: View>: View {
         if let session = app.session {
             content(session)
                 .safeAreaInset(edge: .top, spacing: 0) { ConnectionBanner(session: session) }
-                .overlay(alignment: .bottom) { NoticeToast(session: session) }
+                .overlay(alignment: .bottom) {
+                    VStack(spacing: 0) {
+                        SpokenToast(speech: session.speech)
+                        NoticeToast(session: session)
+                    }
+                }
         } else {
             ContentUnavailableView("No daemon selected", systemImage: "server.rack",
                                    description: Text("Choose one in Daemons."))
+        }
+    }
+}
+
+/// The sentence the daemon is reading aloud on this device, while it plays.
+private struct SpokenToast: View {
+    let speech: SpeechPlayer
+
+    var body: some View {
+        if let line = speech.current {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "speaker.wave.2").foregroundStyle(Palette.text2).accessibilityHidden(true)
+                Text(line.text).font(.footnote).lineLimit(3)
+                Spacer(minLength: 0)
+                Button { speech.stop() } label: {
+                    Image(systemName: "stop.fill").font(.footnote).frame(width: 44, height: 44)
+                }
+                .foregroundStyle(Palette.text2)
+                .padding(.vertical, -12)
+                .accessibilityLabel("Stop speaking")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .card(Palette.surface)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+            .accessibilityElement(children: .contain)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 }

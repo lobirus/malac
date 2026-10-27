@@ -15,6 +15,8 @@ final class DaemonSession {
 
     let daemon: SavedDaemon
     let api: DaemonAPI
+    /// Plays what the daemon reads aloud on this device.
+    let speech: SpeechPlayer
 
     /// Published at most every 50 ms, so a stream of deltas does not redraw every list.
     private(set) var state = DaemonState()
@@ -25,36 +27,64 @@ final class DaemonSession {
     /// Requests this app answered and is waiting to hear back about.
     private(set) var answering: Set<String> = []
 
-    /// Set by the app: notifications are posted only while it is in the background.
-    @ObservationIgnored var inForeground = true
+    /// Set by the app: notifications are posted only while it is in the background,
+    /// and speech plays only while it is on screen.
+    @ObservationIgnored var inForeground = true {
+        didSet {
+            if !inForeground { speech.stop() }
+            syncListening()
+        }
+    }
     @ObservationIgnored private let connection: DaemonConnection
     @ObservationIgnored private let notifier: Notifier
     @ObservationIgnored private var working = DaemonState()
     @ObservationIgnored private var publishing: Task<Void, Never>?
     /// The workspace the user opened; a reconnect's snapshot is of the daemon's last used one.
     @ObservationIgnored private var browsing: String?
+    /// What this connection last told the daemon with `voice_listen`; nil on a new connection.
+    @ObservationIgnored private var listening: Bool?
+
+    /// "Speak on this device", stored per device and on unless switched off.
+    static let speakHereKey = "voice.speakHere"
+    static var speakHere: Bool { UserDefaults.standard.object(forKey: speakHereKey) as? Bool ?? true }
 
     init(daemon: SavedDaemon, endpoint: DaemonEndpoint, notifier: Notifier) {
         self.daemon = daemon
         self.notifier = notifier
         api = DaemonAPI(endpoint: endpoint)
+        speech = SpeechPlayer(api: api)
         connection = DaemonConnection(endpoint: endpoint)
         connection.onMessage = { [weak self] in self?.receive($0) }
-        connection.onStatus = { [weak self] in self?.status = $0 }
+        connection.onStatus = { [weak self] in self?.changed($0) }
     }
 
     var isOnline: Bool { status == .online }
 
     func start() { connection.start() }
 
-    func stop() { connection.stop() }
+    func stop() {
+        connection.stop()
+        speech.stop()
+    }
 
     func reconnectNow() { connection.reconnectNow() }
 
     // MARK: Messages
 
+    private func changed(_ status: DaemonConnection.Status) {
+        self.status = status
+        guard status != .online else { return }
+        // The next connection is a new listener, or none until it asks.
+        listening = nil
+        working.forgetListener()
+    }
+
     private func receive(_ message: ServerMessage) {
         for effect in working.apply(message) { handle(effect) }
+        switch message {
+        case .snapshot, .voice: syncListening()
+        default: break
+        }
         if case .snapshot(let snapshot) = message {
             if let browsing, snapshot.clientRef == nil, snapshot.workspace?.id != browsing {
                 if snapshot.workspaces.contains(where: { $0.id == browsing }) {
@@ -92,6 +122,44 @@ final class DaemonSession {
             notifier.removeApproval(id)
         case let .turnFinished(agent, status, text):
             if !inForeground { notifier.turnFinished(agent: agent.id, name: agent.displayName, status: status, text: text, daemon: daemon) }
+        case .speak(let line):
+            if inForeground, Self.speakHere { speech.enqueue(line) }
+        }
+    }
+
+    // MARK: Voice
+
+    /// Tells the daemon whether this device plays speech: when "Speak on this
+    /// device" is on, speech is ready and the app is on screen. Again after
+    /// every reconnect, since listeners are per connection.
+    func syncListening() {
+        guard isOnline else { return }
+        let wanted = Self.speakHere && inForeground && working.voice?.speech.isReady == true
+        guard wanted != (listening ?? false) else { return }
+        listening = wanted
+        if !wanted { speech.stop() }
+        Task { _ = try? await connection.request(.voiceListen(on: wanted)) }
+    }
+
+    /// Changes a voice setting on the daemon, for every client.
+    func setVoice(_ change: VoiceSetting) async {
+        do {
+            working.setVoice(try await api.setVoice([change]))
+            publish()
+            syncListening()
+        } catch {
+            notice = Notice(level: .error, text: "Could not change the voice settings: \(error.localizedDescription)")
+        }
+    }
+
+    /// Reads the providers' model lists again.
+    func refreshVoice() async {
+        do {
+            working.setVoice(try await api.voice(refresh: true))
+            publish()
+            syncListening()
+        } catch {
+            notice = Notice(level: .error, text: "Could not check the voice models: \(error.localizedDescription)")
         }
     }
 

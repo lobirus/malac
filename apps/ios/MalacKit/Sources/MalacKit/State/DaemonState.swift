@@ -24,6 +24,8 @@ public enum Effect: Hashable, Sendable {
     case approvalResolved(requestId: String)
     /// A top-level agent finished a turn.
     case turnFinished(AgentState, TurnStatus, text: String)
+    /// A sentence for this connection to read aloud.
+    case speak(SpokenLine)
 }
 
 /// The daemon as one connection sees it: the first message is a snapshot of
@@ -50,6 +52,10 @@ public struct DaemonState: Sendable {
     public private(set) var update: UpdateStatus?
     public private(set) var remote: RemoteStatus?
     public private(set) var awake: AwakeStatus?
+    /// Dictation, speech and talk mode; nil from daemons without voice.
+    public private(set) var voice: VoiceStatus?
+    /// This connection's listener id while it plays speech, from `voice_listening`.
+    public private(set) var listener: Int?
     /// Set by `shutdown`, cleared by the next snapshot.
     public private(set) var shutdownReason: String?
     /// Tab names and workspaces seen so far, to label approvals from other workspaces.
@@ -147,6 +153,16 @@ public struct DaemonState: Sendable {
         pending.removeAll { $0.id == id }
     }
 
+    /// The connection closed: a new one plays speech only after it sends `voice_listen` again.
+    public mutating func forgetListener() {
+        listener = nil
+    }
+
+    /// Voice settings from `GET` or `PUT /api/voice`.
+    public mutating func setVoice(_ status: VoiceStatus) {
+        voice = status
+    }
+
     // MARK: Reducer
 
     /// Applies one message and says what else should happen.
@@ -218,6 +234,13 @@ public struct DaemonState: Sendable {
             remote = status
         case .awake(let status):
             awake = status
+        case .voice(let status):
+            voice = status
+        case .voiceListening(_, let id):
+            listener = id
+        case .say(let line):
+            // Every client gets every sentence; only the one it names plays it.
+            if line.listener == listener { effects.append(.speak(line)) }
         case let .notice(level, text, _):
             effects.append(.notice(level, text))
         case .lagged:
@@ -242,6 +265,7 @@ public struct DaemonState: Sendable {
         update = snapshot.update ?? update
         remote = snapshot.remote
         awake = snapshot.awake
+        voice = snapshot.voice
         models = snapshot.models
         defaultModel = snapshot.defaultModel
         shutdownReason = nil

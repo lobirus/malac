@@ -26,7 +26,11 @@ struct TranscriptRow: View {
                 Text(text).font(.callout).foregroundStyle(Palette.text2)
             }
         case .tool(let call):
-            ToolRow(call: call, session: session, cwd: cwd)
+            if let shared = call.shared {
+                SharedFilesCard(shared: shared, session: session)
+            } else {
+                ToolRow(call: call, session: session, cwd: cwd)
+            }
         case .subagent(let call):
             SubagentCard(call: call, session: session)
         case .plan(let plan):
@@ -60,9 +64,9 @@ private struct UserBubble: View {
                     Text(at, style: .time).font(.caption).foregroundStyle(Palette.text3)
                 }
             }
-            if !message.images.isEmpty {
+            if !pictures.isEmpty {
                 ScrollView(.horizontal) {
-                    HStack { ForEach(Array(message.images.enumerated()), id: \.offset) { _, image in Thumbnail(image: image) } }
+                    HStack { ForEach(Array(pictures.enumerated()), id: \.offset) { _, picture in Thumbnail(image: picture.image, name: picture.name) } }
                 }
             }
             if !message.text.isEmpty {
@@ -75,7 +79,18 @@ private struct UserBubble: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .card()
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: pictures.isEmpty ? .combine : .contain)
+    }
+
+    /// The prompt's images, then those of attached image files.
+    private var pictures: [(image: ImageBlock, name: String)] {
+        let sent = message.images.enumerated().map { index, image in
+            (image, message.images.count == 1 ? "Image" : "Image \(index + 1)")
+        }
+        let attached = message.attachments.flatMap { attachment in
+            attachment.images.map { ($0, Format.baseName(attachment.path)) }
+        }
+        return sent + attached
     }
 }
 
@@ -105,20 +120,26 @@ struct Disclosure<Content: View>: View {
     }
 }
 
+/// A small image that opens in the full-screen viewer.
 struct Thumbnail: View {
     let image: ImageBlock
-    @State private var showing = false
+    var name = "Image"
+    @State private var viewing: ViewerImage?
 
     var body: some View {
         if let data = Data(base64Encoded: image.data), let picture = UIImage(data: data) {
-            Button { showing = true } label: {
-                Image(uiImage: picture).resizable().scaledToFill().frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 4))
+            Button {
+                viewing = ViewerImage(image: picture, data: data, name: name, mediaType: image.mediaType)
+            } label: {
+                Image(uiImage: picture).resizable().scaledToFill().frame(width: 72, height: 72)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Palette.border))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Image")
-            .sheet(isPresented: $showing) {
-                Image(uiImage: picture).resizable().scaledToFit().padding().presentationDragIndicator(.visible)
-            }
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel(name)
+            .accessibilityHint("Opens full screen")
+            .imageViewer($viewing)
         }
     }
 }

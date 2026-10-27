@@ -332,6 +332,8 @@ public struct Snapshot: Sendable, Decodable {
     public var defaultModel: String?
     public var remote: RemoteStatus?
     public var awake: AwakeStatus?
+    /// Dictation, speech and talk mode; nil from daemons without voice.
+    public var voice: VoiceStatus?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.fields()
@@ -346,6 +348,7 @@ public struct Snapshot: Sendable, Decodable {
         defaultModel = c.optional("default_model")
         remote = c.optional("remote")
         awake = c.optional("awake")
+        voice = c.optional("voice")
     }
 }
 

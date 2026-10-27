@@ -5,6 +5,7 @@ import SwiftUI
 struct TabScreen: View {
     let session: DaemonSession
     let tabId: String
+    @State private var talking = false
 
     var body: some View {
         let state = session.state
@@ -36,7 +37,19 @@ struct TabScreen: View {
                         Label("New agent", systemImage: "square.and.pencil")
                     }
                 }
+                if state.voice?.talk.isReady == true {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { talking = true } label: {
+                            Label("Talk", systemImage: "headphones")
+                        }
+                        .disabled(!session.isOnline)
+                        .accessibilityHint("Starts a spoken conversation through the tab's active agent")
+                    }
+                }
             }
+        }
+        .fullScreenCover(isPresented: $talking) {
+            TalkView(session: session, tab: tabId, agent: nil, title: tab?.name ?? "Tab")
         }
     }
 }

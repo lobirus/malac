@@ -68,6 +68,8 @@ public struct ToolCall: Hashable, Sendable {
     public var output: String?
     public var millis: Int?
     public var images: [ImageBlock] = []
+    /// What a `send_to_user` call sent: shown as the files themselves.
+    public var shared: SharedFiles?
     public var at: Date?
 
     public var isError: Bool { state == .failed || state == .denied }

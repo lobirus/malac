@@ -126,9 +126,22 @@ private struct DaemonRow: View {
     }
 }
 
-/// Remote access and keep-awake of the selected daemon.
+/// Remote access, keep-awake and voice of the selected daemon.
 private struct DaemonDetails: View {
     let session: DaemonSession
+
+    /// "Dictation, talk mode", "Off", or that no model can do any of it.
+    static func summary(_ voice: VoiceStatus) -> String {
+        let ready = [("Dictation", voice.dictation), ("speech", voice.speech), ("talk mode", voice.talk)]
+            .filter { $0.1.isReady }
+            .map(\.0)
+        if !ready.isEmpty {
+            let text = ready.joined(separator: ", ")
+            return text.prefix(1).uppercased() + text.dropFirst()
+        }
+        let available = [voice.dictation, voice.speech, voice.talk].contains { !$0.models.isEmpty }
+        return available ? "Off" : "No voice models"
+    }
 
     var body: some View {
         let state = session.state
@@ -166,6 +179,20 @@ private struct DaemonDetails: View {
                 Text("Keep awake")
             } footer: {
                 Text(awake.reason.isEmpty ? "Until the daemon restarts; `daemon.keep_awake` sets the default." : "\(awake.reason.prefix(1).uppercased() + awake.reason.dropFirst()). The choice lasts until the daemon restarts.")
+            }
+            .listRowBackground(Palette.surface)
+        }
+        if let voice = state.voice {
+            Section {
+                NavigationLink {
+                    VoiceSettingsView(session: session)
+                } label: {
+                    LabeledContent("Voice", value: Self.summary(voice))
+                }
+            } header: {
+                Text("Voice")
+            } footer: {
+                Text("Dictation, speech and talk mode, for every app connected to this daemon.")
             }
             .listRowBackground(Palette.surface)
         }

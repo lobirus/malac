@@ -227,6 +227,7 @@ public struct Transcript: Sendable {
             call.output = output
             call.millis = millis ?? call.millis
             if !images.isEmpty { call.images = images }
+            if call.name == "send_to_user", !isError { call.shared = SharedFiles.parse(output) }
             replace(.tool(call))
         case .subagent(var call)?:
             call.done = true

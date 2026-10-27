@@ -17,8 +17,18 @@ public struct DaemonEndpoint: Hashable, Sendable {
     }
 
     /// `ws://…/api/ws`, or `wss://` behind TLS. The token goes in a header, not the URL.
-    public var webSocketURL: URL {
-        var components = URLComponents(url: url("api/ws"), resolvingAgainstBaseURL: false)!
+    public var webSocketURL: URL { webSocket(url("api/ws")) }
+
+    /// Talk mode's socket, through the tab's active agent or the one named.
+    public func talkURL(tab: String?, agent: String?) -> URL {
+        var query: [URLQueryItem] = []
+        if let tab { query.append(URLQueryItem(name: "tab", value: tab)) }
+        if let agent { query.append(URLQueryItem(name: "agent", value: agent)) }
+        return webSocket(url("api/voice/talk", query: query))
+    }
+
+    private func webSocket(_ url: URL) -> URL {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         return components.url!
     }
@@ -57,16 +67,22 @@ public enum DaemonError: LocalizedError, Equatable {
 
 enum HTTP {
     static func send<T: Decodable>(_ request: URLRequest, session: URLSession, as type: T.Type) async throws -> T {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw DaemonError.invalidResponse }
-        guard (200 ..< 300).contains(http.statusCode) else {
-            throw error(status: http.statusCode, body: data)
-        }
+        let (data, _) = try await body(request, session: session)
         do {
             return try JSONDecoder.malac().decode(T.self, from: data)
         } catch {
             throw DaemonError.invalidResponse
         }
+    }
+
+    /// The body of a successful response, with its type.
+    static func body(_ request: URLRequest, session: URLSession) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw DaemonError.invalidResponse }
+        guard (200 ..< 300).contains(http.statusCode) else {
+            throw error(status: http.statusCode, body: data)
+        }
+        return (data, http)
     }
 
     /// Failures are `{"error": "…"}` or plain text.
@@ -131,6 +147,52 @@ public struct DaemonAPI: Sendable {
         let reply = try await HTTP.send(request, session: session, as: ServerMessage.self)
         if case .error(_, let message) = reply { throw DaemonError.command(message) }
         return reply
+    }
+
+    // MARK: Voice and shared files
+
+    /// What dictation, speech and talk mode offer; `refresh` reads the providers' model lists again first.
+    public func voice(refresh: Bool = false) async throws -> VoiceStatus {
+        try await get("api/voice", query: refresh ? [URLQueryItem(name: "refresh", value: "true")] : [])
+    }
+
+    /// Changes `[voice]` settings; the daemon broadcasts the result as `voice` too.
+    public func setVoice(_ changes: [VoiceSetting]) async throws -> VoiceStatus {
+        var request = endpoint.request(endpoint.url("api/voice"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try VoiceSetting.body(changes)
+        return try await HTTP.send(request, session: session, as: VoiceStatus.self)
+    }
+
+    /// Dictation: a recording (16 kHz mono 16-bit WAV) as text.
+    public func transcribe(wav: Data, language: String? = nil) async throws -> Transcription {
+        let query = language.map { [URLQueryItem(name: "language", value: $0)] } ?? []
+        // Transcription can take a while for a long recording.
+        var request = endpoint.request(endpoint.url("api/voice/transcribe", query: query), timeout: 120)
+        request.httpMethod = "POST"
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.httpBody = wav
+        return try await HTTP.send(request, session: session, as: Transcription.self)
+    }
+
+    /// The audio of a `say` broadcast (`audio/mpeg` or `audio/wav`).
+    public func spoken(_ id: String) async throws -> (data: Data, mediaType: String) {
+        let (data, response) = try await HTTP.body(endpoint.request(endpoint.url("api/voice/say/\(id)"), timeout: 60), session: session)
+        return (data, Self.mediaType(response) ?? "audio/mpeg")
+    }
+
+    /// A file an agent sent with `send_to_user`. `download` asks for HTML and
+    /// SVG as themselves rather than as text.
+    public func shared(_ id: String, download: Bool = false) async throws -> (data: Data, mediaType: String) {
+        let query = download ? [URLQueryItem(name: "download", value: "true")] : []
+        let (data, response) = try await HTTP.body(endpoint.request(endpoint.url("api/shared/\(id)", query: query), timeout: 120), session: session)
+        return (data, Self.mediaType(response) ?? "application/octet-stream")
+    }
+
+    private static func mediaType(_ response: HTTPURLResponse) -> String? {
+        (response.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";").first)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {

@@ -47,6 +47,8 @@ public enum Command: Hashable, Sendable {
     case jobKill(job: String)
     /// Until the daemon restarts.
     case keepAwake(KeepAwake)
+    /// This connection plays speech (`on`) or stops; the reply is `voice_listening`.
+    case voiceListen(on: Bool)
     case ping
 
     public var type: String {
@@ -67,6 +69,7 @@ public enum Command: Hashable, Sendable {
         case .jobOutput: "job_output"
         case .jobKill: "job_kill"
         case .keepAwake: "keep_awake"
+        case .voiceListen: "voice_listen"
         case .ping: "ping"
         }
     }
@@ -125,6 +128,8 @@ private struct Request: Encodable {
             try c.put(job, "job")
         case let .keepAwake(mode):
             try c.put(mode, "mode")
+        case let .voiceListen(on):
+            try c.put(on, "on")
         case .workspaceList, .jobList, .ping:
             break
         }

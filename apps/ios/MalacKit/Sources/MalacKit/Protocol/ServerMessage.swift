@@ -42,6 +42,12 @@ public enum ServerMessage: Sendable {
     case remote(RemoteStatus)
     /// Keep-awake took or released its assertion, or its mode changed.
     case awake(AwakeStatus)
+    /// Voice settings changed or the providers' model lists were read again.
+    case voice(VoiceStatus)
+    /// A sentence to read aloud, played by the connection whose listener it names.
+    case say(SpokenLine)
+    /// The reply to `voice_listen`: this connection's listener id, nil after `on: false`.
+    case voiceListening(clientRef: String?, listener: Int?)
     case reloaded
     /// The connection fell behind; send `snapshot` to resync.
     case lagged(skipped: Int)
@@ -56,7 +62,7 @@ public enum ServerMessage: Sendable {
         case .ack(let ack): ack.clientRef
         case .error(let ref, _), .pong(let ref), .launched(let ref, _, _, _), .workspaces(let ref, _),
              .workspaceOpened(let ref, _), .jobs(let ref, _), .jobOutput(let ref, _), .control(let ref),
-             .unknown(_, let ref):
+             .voiceListening(let ref, _), .unknown(_, let ref):
             ref
         default:
             nil
@@ -130,6 +136,19 @@ extension ServerMessage: Decodable {
             self = .remote(try c.value("remote"))
         case "awake":
             self = .awake(try c.value("awake"))
+        case "voice":
+            self = .voice(try c.value("voice"))
+        case "say":
+            self = .say(SpokenLine(
+                id: try c.value("id"),
+                text: c.value("text", default: ""),
+                reason: c.value("reason", default: ""),
+                tab: c.optional("tab"),
+                agent: c.optional("agent"),
+                listener: try c.value("listener")
+            ))
+        case "voice_listening":
+            self = .voiceListening(clientRef: ref, listener: c.optional("listener"))
         case "reloaded":
             self = .reloaded
         case "lagged":

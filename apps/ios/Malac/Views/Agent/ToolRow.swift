@@ -165,7 +165,11 @@ struct ToolRow: View {
             }
             if !call.images.isEmpty {
                 ScrollView(.horizontal) {
-                    HStack { ForEach(Array(call.images.enumerated()), id: \.offset) { _, image in Thumbnail(image: image) } }
+                    HStack {
+                        ForEach(Array(call.images.enumerated()), id: \.offset) { index, image in
+                            Thumbnail(image: image, name: call.images.count == 1 ? "\(ToolPresentation.title(call.name).title) image" : "\(ToolPresentation.title(call.name).title) image \(index + 1)")
+                        }
+                    }
                 }
             }
         }

@@ -24,6 +24,7 @@ private struct TranscriptScreen: View {
     let agentId: String
     @State private var model: TranscriptModel
     @State private var pinned = true
+    @State private var talking = false
 
     init(session: DaemonSession, agentId: String) {
         self.session = session
@@ -97,6 +98,18 @@ private struct TranscriptScreen: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+            if state.voice?.talk.isReady == true {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { talking = true } label: {
+                        Label("Talk", systemImage: "headphones")
+                    }
+                    .disabled(!session.isOnline)
+                    .accessibilityHint("Starts a spoken conversation through this agent")
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $talking) {
+            TalkView(session: session, tab: tab?.id, agent: agentId, title: agent?.displayName ?? "Agent")
         }
         .task(id: state.generation) { await model.load() }
         .onChange(of: session.revision) { model.rebuild() }
