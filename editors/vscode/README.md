@@ -16,6 +16,11 @@ The activity bar keeps malac's container (the pig) with the daemon's workspaces,
 - **Composer.** Enter sends, Shift+Enter starts a new line, ↑ recalls earlier prompts, Esc stops a running agent. The model picker sets the model of the agent (or of the next new agent), the mode button switches the tab between *Ask*, *Edits* and *Autopilot* (Shift+Tab cycles), and **Stop** cancels the turn.
 - **Current file.** A chip shows the active editor's file, `README.md`, or with a selection `README.md:12-30`. A saved file goes with the next message as an attachment; selected lines (or a file with unsaved changes) go inline with their path and line numbers. Click the chip to leave the file out; it stays off until you turn it on again.
 - **Slash commands.** Type `/` for a list: the chat's own `/model`, `/mode`, `/compact`, `/clear` and `/cost`, then `/context` and the tab's custom commands (from `.malac/commands`, `.claude/commands`, plugins and skills, as the daemon reports them). Custom commands go to the agent as typed and the daemon expands them.
+- **Files malac sends you.** Ask for a screenshot or a file ("send me a screenshot of the settings page") and malac's `send_to_user` tool puts it in the chat: images inline, other files as a card with **Open** (a copy opens in VS Code) and **Save as…**, with the agent's caption above them. The extension fetches them from the daemon, so they work with a daemon on another machine too.
+- **Image viewer.** Click any image in the chat (screenshots in tool results, attached images, images malac sent) for a full-screen viewer: it fits the image, zooms around the pointer with the wheel or a trackpad pinch, pans by dragging, and double-click switches between fit and 100%. `+`, `-`, `0` (fit) and `1` (100%) work from the keyboard, the arrow keys pan, Esc closes. **Open in editor** opens a copy in VS Code's image preview; **Save as…** saves it.
+- **Dictation.** When the daemon has a transcription model, the composer has a microphone button (and **malac: Dictate**, ⌥⇧⌘D / Ctrl+Alt+Shift+D). Speak, then click it again or press Enter; the text goes in at the cursor for you to edit and send. Esc drops the recording. VS Code webviews may not use the microphone, so the extension records through `malac voice dictate` on this computer.
+- **Speech.** With speech on, malac reads approvals, questions and notable results aloud on this computer (through `malac voice play`), one sentence after another, and shows the sentence in the status bar. Of the devices with "speak on this device" on (`malac.speakOnThisDevice`), it plays on the one you used last.
+- **Talk mode.** With a Realtime model, the headset button in the chat header (or **malac: Talk**) opens a terminal running `malac voice talk` for the chat's tab and agent: you talk, the voice model hands the work to malac and tells you what it did.
 - **Files and images.** Type `@` to pick workspace files. Drop files from the Explorer (VS Code wants Shift held while dragging into a panel) or from Finder; they are attached by path. Drop or paste screenshots and images (PNG, JPEG, GIF, WebP); they go with the message as images. Other files without a path are saved by the extension and attached from there.
 - **Agents and tabs.** The header switches between the tab's agents (subagents are indented) and other tabs; **+** starts a new agent. When the daemon reports that a tab is one part of a larger repository, a hint offers to open a tab at the repository root.
 
@@ -43,6 +48,9 @@ The status bar shows how many agents are running and approvals waiting, and warn
 | **malac: Stop Agent** | Stops the chat's agent, or picks a running one. |
 | **malac: Open Full UI** | The whole web UI in an editor panel. |
 | **malac: Restart Daemon** | `malac daemon restart`, e.g. after updating malac. Asks first when agents or jobs run. |
+| **malac: Dictate** (⌥⇧⌘D / Ctrl+Alt+Shift+D) | Starts dictating into the chat in use; again stops and inserts the text. |
+| **malac: Talk** | Talk mode in a terminal, through the chat's agent. |
+| **malac: Voice Settings** | Turns dictation, speech and talk mode on or off and picks their models, voices and the dictation language (the daemon's `[voice]` settings), plus this computer's speech switch. Also in the chat's **…** menu. |
 | **malac: Reconnect to Daemon**, **Show Log**, **Run in Terminal** | |
 
 ## The daemon and the folder
@@ -66,10 +74,15 @@ When the workspace folder has no tab, the chat offers to open one. If the folder
 | `malac.approvalNotifications` | `true` | Approval notifications when the chat cannot show them. |
 | `malac.chat.includeCurrentFile` | `true` | Whether the current-file chip starts out on. |
 | `malac.editorTitleButton` | `true` | The malac button in the editor title bar. |
+| `malac.speakOnThisDevice` | `true` | Play malac's speech on this computer when speech is on. Not synced between machines. |
+
+Voice needs a malac with the `voice` commands on the computer the extension runs on, and the daemon to have a model for the feature (see [docs/voice.md](../../docs/voice.md)). The buttons appear only when the daemon reports a feature ready; when this window cannot use them (malac is missing or too old, or the window is remote, with the extension away from your microphone) they say why. With a saved connection the commands get `-C <name>`.
 
 ## How it works
 
-The extension host holds the only daemon connection (one WebSocket plus the REST API; see [docs/protocol.md](../../docs/protocol.md)) and keeps a model of the daemon's state that the chat, the trees, the status bar and the notifications share. The chat webview is plain TypeScript with no framework; it talks only to the extension host through `postMessage`, so it needs no network access and its Content Security Policy allows nothing but its own scripts and styles. That also works in remote windows (SSH, containers), where the daemon runs next to the extension host.
+The extension host holds the only daemon connection (one WebSocket plus the REST API; see [docs/protocol.md](../../docs/protocol.md)) and keeps a model of the daemon's state that the chat, the trees, the status bar and the notifications share. The chat webview is plain TypeScript with no framework; it talks only to the extension host through `postMessage`, so it needs no network access and its Content Security Policy allows nothing but its own scripts and styles. That also works in remote windows (SSH, containers), where the daemon runs next to the extension host. Files malac sends come the same way: the extension host fetches `/api/shared/{id}` with its token and hands the webview the data.
+
+Webview frames get no microphone (VS Code's permissions policy for them leaves it out), so voice runs through the malac CLI on the extension host's machine: `malac voice dictate --json` until Enter (a newline on its stdin) or Esc (killed), `malac voice play <file>` for each `say` broadcast addressed to this connection's listener id (`voice_listen` is sent again after every reconnect), and `malac voice talk` in a terminal. The extension runs them only after `malac --help` lists `voice`, since an older malac would take the words as a prompt.
 
 ```
 src/
@@ -78,8 +91,9 @@ src/
   model/                 state store, tree nodes, context chip, folder plan, usage, status (no vscode imports)
   chat/                  chat controller (no vscode imports), webview page, message types; the side-bar view,
                          editor tabs (panel.ts) and the surfaces that route commands to them
-  ui/                    tree providers, usage view, status bar, notifications, job logs, full UI panel
-  webview/*.mts          the chat page: transcript, composer, menus, markdown, drop and paste handling
+  voice/                 the voice CLI (dictation, playback, support check), dictation per window, speech queue (no vscode imports)
+  ui/                    tree providers, usage view, status bar, notifications, job logs, full UI panel, voice commands and settings
+  webview/*.mts          the chat page: transcript, shared files, image viewer, composer, menus, markdown, drop and paste handling
 test/                    node --test unit tests
 harness/serve.ts         the chat page in a browser against a real daemon
 harness/activate.ts      activation smoke test with a stand-in vscode module (npm run smoke)
@@ -104,6 +118,6 @@ MALAC_HOME=/tmp/malac-home MALAC_BIN=malac HARNESS_CWD=/path/to/project npm run 
 # POST /harness/editor {"path": "...", "selection": {...}} sets the fake active editor
 ```
 
-`HARNESS_FALLBACK_WS=1` uses the extension's built-in WebSocket client (what older VS Code versions get) instead of Node's.
+`HARNESS_FALLBACK_WS=1` uses the extension's built-in WebSocket client (what older VS Code versions get) instead of Node's. `HARNESS_VOICE_BIN` points the microphone button at a malac with the voice commands (or a stand-in that prints `{"text": …}`).
 
-`npm run smoke` activates the compiled extension with a stand-in `vscode` module against the daemon in `MALAC_HOME` and checks that every command and view is registered, where the chat goes for `VSCODE_VERSION` (default 1.139.1; try 1.99.3 for the activity-bar fallback), the status bar, editor tabs and their restore. `SMOKE_PROMPT=1` adds one real prompt from an editor tab.
+`npm run smoke` activates the compiled extension with a stand-in `vscode` module against the daemon in `MALAC_HOME` and checks that every command and view is registered, where the chat goes for `VSCODE_VERSION` (default 1.139.1; try 1.99.3 for the activity-bar fallback), the status bar, editor tabs and their restore. `SMOKE_PROMPT=1` adds one real prompt from an editor tab. `SMOKE_VOICE=1` (with `MALAC_BIN` a malac that has the voice commands) checks dictation, talk mode and Voice Settings; `SMOKE_SAY_PROMPT` adds a prompt whose approval must be spoken.

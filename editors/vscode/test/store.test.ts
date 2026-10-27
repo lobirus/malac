@@ -80,3 +80,22 @@ test("job events update the job table", () => {
   store.apply({ type: "job_finished", job: { ...job, status: "exited", exit_code: 0 } });
   assert.equal(store.jobs.get("j1")!.status, "exited");
 });
+
+const feature = (enabled: boolean, model: string | null, models: string[] = model ? [model] : []) => ({ enabled, model, configured: null, voice: null, models });
+
+test("voice status comes with the snapshot and voice broadcasts; say passes through", () => {
+  const { store, changes } = start();
+  assert.equal(store.voice === null, true, "an older daemon has none");
+  const voice = { dictation: feature(true, "fake/whisper-1"), speech: feature(false, "system"), talk: feature(true, null), language: "en", voices: ["alloy"], checked: null };
+  store.apply({ type: "snapshot", daemon: store.daemon, workspaces: [], workspace: null, pending: [], jobs: [], models: [], default_model: null, voice } as unknown as ServerMessage);
+  assert.equal(store.voice?.dictation.model, "fake/whisper-1");
+  assert.ok(changes.at(-1)!.voice);
+  store.apply({ type: "voice", voice: { ...voice, speech: feature(true, "system") } });
+  assert.equal(store.voice?.speech.enabled, true);
+  assert.deepEqual(changes.at(-1), { voice: true });
+  const say = { type: "say", id: "s1", text: "Done.", reason: "finished", tab: "t1", agent: "a1", listener: 3 };
+  store.apply(say);
+  assert.deepEqual(changes.at(-1)!.say, say);
+  store.setVoice({ ...voice, talk: feature(false, null) });
+  assert.equal(store.voice?.talk.enabled, false);
+});

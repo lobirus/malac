@@ -1,13 +1,14 @@
 // The composer: the context chip, attachments, the prompt with "@" file
-// picking, the model picker, the mode switch, stop and send. Accepts drops
-// and pastes of files and images.
+// picking, the model picker, the mode switch, dictation, stop and send.
+// Accepts drops and pastes of files and images.
 
 import type { ChatState, FromWebview } from "../chat/messages.js";
 import type { ImageInput, Mode } from "../protocol.js";
-import { baseName, h, icon, relativeTo, setChildren, truncate } from "./dom.mjs";
+import { baseName, formatClock, h, icon, relativeTo, setChildren, truncate } from "./dom.mjs";
 import { closeMenu, MenuItem, menuButton } from "./menu.mjs";
 import { matchCommands, slashQuery, sourceLabel, type Completion } from "./slash.mjs";
 import { acceptsDrag, codeDragToUriList, convertTransfer, IMAGE_TYPES, MAX_IMAGE_BYTES, pastedImageName, toBase64 } from "./transfer.mjs";
+import { openViewer } from "./viewer.mjs";
 
 export const MODES: { mode: Mode; label: string; icon: string; help: string }[] = [
   { mode: "ask", label: "Ask", icon: "hand", help: "Confirm edits and commands" },
@@ -16,6 +17,17 @@ export const MODES: { mode: Mode; label: string; icon: string; help: string }[] 
 ];
 
 const HISTORY_LIMIT = 50;
+const DICTATE_KEYS = typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌥⇧⌘D" : "Ctrl+Alt+Shift+D";
+
+/** Puts dictated text at the cursor, with a space on either side where words would touch. */
+export function insertDictation(value: string, start: number, end: number, text: string): { value: string; caret: number } {
+  const before = value.slice(0, start);
+  const after = value.slice(end);
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const trail = after && !/^\s/.test(after) ? " " : "";
+  const inserted = `${lead}${text}${trail}`;
+  return { value: before + inserted + after, caret: before.length + lead.length + text.length };
+}
 
 interface PathChip {
   path: string;
@@ -43,6 +55,9 @@ export class Composer {
   private modeButton: HTMLButtonElement;
   private sendButton: HTMLButtonElement;
   private stopButton: HTMLButtonElement;
+  private micButton: HTMLButtonElement;
+  private dictationStatus: HTMLElement;
+  private dictation: { state: "recording" | "transcribing"; started: number; timer: ReturnType<typeof setInterval> | undefined } | null = null;
   private picker: HTMLElement;
   private fileInput: HTMLInputElement;
   private paths: PathChip[] = [];
@@ -89,12 +104,30 @@ export class Composer {
       icon("stop", 14),
     );
     this.sendButton = h("button", { class: "send", type: "submit", title: "Send (Enter)", "aria-label": "Send" }, icon("send", 16));
+    this.micButton = h(
+      "button",
+      { class: "icon-button mic", type: "button", title: `Dictate (${DICTATE_KEYS})`, "aria-label": "Dictate", "aria-pressed": "false", hidden: true, onclick: () => this.toggleDictation() },
+      icon("mic", 16),
+    );
+    this.dictationStatus = h("span", { class: "dictation-status", role: "status", "aria-live": "polite", hidden: true });
     setChildren(
       form,
       this.picker,
       this.chips,
       this.input,
-      h("div", { class: "toolbar" }, mentionButton, imageButton, this.modelButton, this.modeButton, h("span", { class: "spacer" }), this.stopButton, this.sendButton),
+      h(
+        "div",
+        { class: "toolbar" },
+        mentionButton,
+        imageButton,
+        this.modelButton,
+        this.modeButton,
+        h("span", { class: "spacer" }),
+        this.dictationStatus,
+        this.micButton,
+        this.stopButton,
+        this.sendButton,
+      ),
       this.fileInput,
     );
     this.bind(dropZone);
@@ -153,6 +186,7 @@ export class Composer {
     const agent = state.agent;
     const running = Boolean(agent?.running);
     this.stopButton.hidden = !running;
+    this.renderDictation();
     const tabName = state.tab?.name;
     this.input.placeholder = !state.tab
       ? "Open a tab to start"
@@ -176,6 +210,83 @@ export class Composer {
     this.modeButton.disabled = !state.tab;
     this.modeButton.setAttribute("aria-label", `Permission mode: ${mode.label}. ${mode.help}`);
     this.renderChips();
+  }
+
+  // Dictation: the extension host records through the malac CLI (webviews may not use the microphone).
+
+  private toggleDictation(): void {
+    const blocked = this.host.state()?.voice.blocked;
+    if (blocked && !this.dictation) {
+      this.host.toast("warning", blocked);
+      return;
+    }
+    this.input.focus();
+    this.host.post({ type: "dictation", action: this.dictation?.state === "recording" ? "stop" : "toggle" });
+  }
+
+  /** The recording's progress from the extension host. */
+  dictationUpdate(update: { state: "recording" | "transcribing" | "done"; started?: number; text?: string; error?: string }): void {
+    clearInterval(this.dictation?.timer);
+    if (update.state === "done") {
+      this.dictation = null;
+      if (update.error) this.host.toast("error", update.error);
+      else if (update.text) this.insertText(update.text);
+      else if (update.text === "") this.host.toast("info", "Nothing was heard. Check the microphone, then try again.");
+    } else {
+      const started = update.started ?? this.dictation?.started ?? Date.now();
+      this.dictation = { state: update.state, started, timer: update.state === "recording" ? setInterval(() => this.renderDictation(), 500) : undefined };
+      if (update.state === "recording") this.input.focus();
+    }
+    this.renderDictation();
+  }
+
+  private renderDictation(): void {
+    const dictation = this.dictation;
+    const recording = dictation?.state === "recording";
+    const voice = this.host.state()?.voice;
+    this.micButton.hidden = !voice?.dictation && !dictation;
+    this.micButton.setAttribute("aria-disabled", String(Boolean(voice?.blocked) && !dictation));
+    this.micButton.classList.toggle("recording", recording);
+    this.micButton.setAttribute("aria-pressed", String(recording));
+    this.micButton.setAttribute("aria-label", recording ? "Stop dictating" : "Dictate");
+    this.micButton.title = recording ? "Stop dictating (Enter); Esc cancels" : `Dictate (${DICTATE_KEYS})`;
+    this.micButton.disabled = dictation?.state === "transcribing";
+    this.dictationStatus.hidden = !dictation;
+    if (!dictation) return setChildren(this.dictationStatus);
+    if (recording) {
+      setChildren(
+        this.dictationStatus,
+        h("span", { class: "rec-dot", "aria-hidden": "true" }),
+        h("span", { class: "rec-time" }, formatClock((Date.now() - dictation.started) / 1000)),
+        h("span", { class: "rec-hint" }, "Enter stops, Esc cancels"),
+      );
+    } else {
+      setChildren(this.dictationStatus, h("span", { class: "spinner" }), "Transcribing");
+    }
+  }
+
+  private insertText(text: string): void {
+    const { value, caret } = insertDictation(this.input.value, this.input.selectionStart, this.input.selectionEnd, text);
+    this.input.value = value;
+    this.input.focus();
+    this.input.setSelectionRange(caret, caret);
+    this.autosize();
+    this.persist();
+  }
+
+  /** Enter ends a recording and Esc drops it, wherever the focus is in the composer. */
+  private onDictationKey(event: KeyboardEvent): void {
+    if (!this.dictation || event.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.host.post({ type: "dictation", action: "cancel" });
+    } else if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
+      // While the text is on its way, Enter would send a prompt without it.
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.dictation.state === "recording") this.host.post({ type: "dictation", action: "stop" });
+    }
   }
 
   private modelItems(): MenuItem[] {
@@ -263,7 +374,17 @@ export class Composer {
         h(
           "span",
           { class: "chip image", role: "listitem", title: image.name },
-          h("img", { src: `data:${image.media_type};base64,${image.data}`, alt: "" }),
+          h(
+            "button",
+            {
+              class: "chip-thumb",
+              type: "button",
+              "aria-label": `View ${image.name}`,
+              onclick: (event: MouseEvent) =>
+                openViewer({ src: `data:${image.media_type};base64,${image.data}`, name: image.name, media_type: image.media_type, data: image.data }, event.currentTarget as HTMLElement),
+            },
+            h("img", { src: `data:${image.media_type};base64,${image.data}`, alt: "" }),
+          ),
           h("span", { class: "chip-label" }, truncate(image.name, 28)),
           h(
             "button",
@@ -479,6 +600,7 @@ export class Composer {
       event.preventDefault();
       this.submit();
     });
+    this.form.addEventListener("keydown", (event) => this.onDictationKey(event), true);
     this.input.addEventListener("keydown", (event) => this.onKey(event));
     this.input.addEventListener("input", () => {
       this.autosize();

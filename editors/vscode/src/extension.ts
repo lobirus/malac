@@ -26,6 +26,7 @@ import { JOB_SCHEME, JobLogProvider, jobUri } from "./ui/jobLog";
 import { StatusBar } from "./ui/statusBar";
 import { JobsTree, SessionsTree, WorkspacesTree } from "./ui/trees";
 import { UsageView } from "./ui/usageView";
+import { VoiceFeatures } from "./ui/voice";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("malac", { log: true });
@@ -61,9 +62,26 @@ export function activate(context: vscode.ExtensionContext): void {
   const secondary = supportsSecondarySidebar(vscode.version);
   void vscode.commands.executeCommand("setContext", "malac.noSecondarySidebar", !secondary);
   const env = new ChatEnvironment(context, output, version);
+  // Talk mode follows the chat in use, which exists once the surfaces do.
+  let chats: ChatSurfaces | undefined;
+  const voice = new VoiceFeatures(context, store, client, {
+    command,
+    home: () => config().get<string>("home")?.trim() || undefined,
+    connection: () => {
+      const setting = parseConnectionSetting(config().get("connection"));
+      return setting.kind === "saved" ? setting.name : null;
+    },
+    chat: () => {
+      const controller = chats?.target().controller;
+      return { tab: controller?.currentTab ?? null, agent: controller?.currentAgent ?? null };
+    },
+    log: (line) => output.appendLine(`[voice] ${line}`),
+  });
   const surfaces = new ChatSurfaces(env, store, client, chatViewId(vscode.version), () => ({
     includeCurrentFile: config().get<boolean>("chat.includeCurrentFile", true),
+    voice,
   }));
+  chats = surfaces;
   const chat = surfaces.chat;
   const chatView = surfaces.side;
   folders = new FolderTabs(context, store, client, chat);
@@ -131,6 +149,7 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => panel?.dispose() },
     env,
     surfaces,
+    voice,
     workspacesTree,
     jobsTree,
     sessionsTree,
@@ -322,6 +341,28 @@ export function activate(context: vscode.ExtensionContext): void {
     launcher.dispose();
     client.reconnect({ allowStart: true });
     cliVersion = await detectVersion(command(), log);
+    void voice.recheck();
+  });
+
+  register("malac.dictate", async () => {
+    // A second press stops the recording, wherever it started.
+    if (voice.dictation.owner) {
+      voice.dictation.stop();
+      return;
+    }
+    const target = surfaces.target();
+    await target.reveal();
+    target.controller.dictate();
+  });
+
+  register("malac.talk", async (tab?: unknown, agent?: unknown) => {
+    await whenOnline();
+    await voice.talk(typeof tab === "string" ? tab : null, typeof agent === "string" ? agent : null);
+  });
+
+  register("malac.voiceSettings", async () => {
+    await whenOnline();
+    await voice.settings();
   });
 
   register("malac.reconnect", () => client.reconnect({ allowStart: true }));

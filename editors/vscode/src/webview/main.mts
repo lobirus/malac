@@ -1,11 +1,12 @@
 // The chat webview: renders the state the extension host sends and relays
 // what the user does. It never talks to the daemon itself.
 
-import type { AgentSummary, Banner, ChatState, FromWebview, ToWebview } from "../chat/messages.js";
+import type { AgentSummary, Banner, ChatState, FromWebview, MediaFile, ToWebview } from "../chat/messages.js";
 import { Composer } from "./composer.mjs";
 import { formatCost, formatTokens, h, icon, pig, setChildren, tildePath, truncate } from "./dom.mjs";
 import { closeMenu, MenuItem, menuButton } from "./menu.mjs";
 import { Transcript } from "./transcript.mjs";
+import { setViewerHost } from "./viewer.mjs";
 
 interface VsCodeApi {
   postMessage(message: unknown): void;
@@ -55,10 +56,36 @@ function toast(level: "info" | "warning" | "error", message: string): void {
   setTimeout(() => node.remove(), level === "error" ? 8000 : 4500);
 }
 
+// Files malac sent, fetched by the extension host (which holds the token) once per id; the newest are kept.
+const SHARED_KEPT = 40;
+const shared = new Map<string, { promise: Promise<{ media_type: string; data: string }>; resolve: (file: { media_type: string; data: string }) => void; reject: (error: Error) => void }>();
+
+function sharedFile(id: string): Promise<{ media_type: string; data: string }> {
+  let entry = shared.get(id);
+  if (!entry) {
+    let resolve!: (file: { media_type: string; data: string }) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<{ media_type: string; data: string }>((yes, no) => ((resolve = yes), (reject = no)));
+    entry = { promise, resolve, reject };
+    shared.set(id, entry);
+    if (shared.size > SHARED_KEPT) shared.delete(shared.keys().next().value!);
+    post({ type: "loadShared", id });
+  }
+  return entry.promise;
+}
+
+function media(action: "open" | "save", file: MediaFile): void {
+  post({ type: "media", action, file });
+}
+
+setViewerHost({ media });
+
 const transcript = new Transcript($("transcript"), scroller, {
   post,
   cwd: () => state?.tab?.cwd ?? "",
   agents: () => state?.agents ?? [],
+  shared: sharedFile,
+  media,
 });
 transcript.onPinnedChange = (pinned) => {
   jump.hidden = pinned;
@@ -83,8 +110,17 @@ const composer = new Composer(
 
 const agentButton = menuButton({ class: "agent-switch", label: "Agents and tabs", title: "Switch agent or tab", build: agentMenu, placement: "below" });
 const newButton = h("button", { class: "icon-button", type: "button", title: "New agent", "aria-label": "New agent", onclick: () => post({ type: "selectAgent", agent: null }) }, icon("plus", 16));
+const talkButton = h("button", { class: "icon-button", type: "button", title: "Talk to malac", "aria-label": "Talk to malac", hidden: true, onclick: talk }, icon("headphones", 16));
 const meter = h("span", { class: "meter" });
-setChildren(header, agentButton, meter, newButton);
+setChildren(header, agentButton, meter, talkButton, newButton);
+
+/** Talk mode runs in a terminal (`malac voice talk`), through the agent the chat shows. */
+function talk(): void {
+  if (!state) return;
+  if (state.voice.blocked) return toast("warning", state.voice.blocked);
+  if (!state.tab) return toast("warning", "Open a malac tab for this folder first.");
+  post({ type: "command", command: "malac.talk", args: [state.tab.id, state.agent?.id ?? null] });
+}
 
 function agentMenu(): MenuItem[] {
   if (!state) return [];
@@ -128,6 +164,8 @@ function renderHeader(): void {
   );
   agentButton.setAttribute("aria-label", `${agent ? `Agent ${agent.name}, ${STATUS_TEXT[status]}` : "New agent"}${state.tab ? ` in tab ${state.tab.name}` : ""}. Switch agent or tab`);
   newButton.disabled = !state.tab;
+  talkButton.hidden = !state.voice.talk;
+  talkButton.setAttribute("aria-disabled", String(Boolean(state.voice.blocked) || !state.tab));
   if (agent && (agent.usage || agent.contextTokens)) {
     const u = agent.usage;
     const tokens = u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens;
@@ -290,6 +328,20 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
       break;
     case "toast":
       toast(message.level, message.message);
+      break;
+    case "shared": {
+      const entry = shared.get(message.id);
+      if (!entry) break;
+      if (message.data && message.media_type) entry.resolve({ media_type: message.media_type, data: message.data });
+      else {
+        // Asked again next time it renders (after a reconnect, say).
+        shared.delete(message.id);
+        entry.reject(new Error(message.error ?? "Cannot load the file"));
+      }
+      break;
+    }
+    case "dictation":
+      composer.dictationUpdate(message);
       break;
   }
 });

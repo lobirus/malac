@@ -10,13 +10,14 @@
 // Environment: HARNESS_PORT (7811), HARNESS_CWD (the project the fake editor
 // and "@" search use), HARNESS_FALLBACK_WS=1 (use the built-in WebSocket
 // client instead of the runtime's), HARNESS_CONNECTION (a saved connection in
-// connections.json, which makes the daemon count as remote).
+// connections.json, which makes the daemon count as remote), HARNESS_VOICE_BIN
+// (a malac with the voice commands, or a stand-in, for the microphone button).
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
-import { ChatController, ChatHost } from "../src/chat/controller";
+import { ChatController, ChatHost, ChatVoice } from "../src/chat/controller";
 import { chatHtml } from "../src/chat/html";
 import type { FromWebview, ToWebview } from "../src/chat/messages";
 import { DaemonClient } from "../src/connection/client";
@@ -28,7 +29,9 @@ import { statusSummary } from "../src/model/status";
 import { DaemonStore } from "../src/model/store";
 import { jobNodes, sessionNodes, TreeNode, workspaceTree } from "../src/model/tree";
 import { usageHtml, usageModel } from "../src/model/usage";
-import type { SessionSummary, UsageReport } from "../src/protocol";
+import { featureReady, type SessionSummary, type UsageReport } from "../src/protocol";
+import { Dictation } from "../src/voice/cli";
+import { DictationManager } from "../src/voice/dictation";
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const PORT = Number(process.env.HARNESS_PORT ?? 7811);
@@ -103,6 +106,20 @@ const host: ChatHost = {
     fs.writeFileSync(target, data);
     return target;
   },
+  // Opening and saving write to the scratch home; VS Code opens or asks instead.
+  async openMedia(name, data, key) {
+    const dir = path.join(HOME, "harness-open", key || "image");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, path.basename(name)), data);
+    console.log(`[host] open ${path.join(dir, path.basename(name))} (${data.length} bytes)`);
+  },
+  async saveMedia(name, data) {
+    const dir = path.join(HOME, "harness-saved");
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, path.basename(name));
+    fs.writeFileSync(target, data);
+    return target;
+  },
   runCommand(command, args) {
     console.log(`[host] command ${command} ${JSON.stringify(args)}`);
     if (command === "malac.reconnect") client.reconnect({ allowStart: true });
@@ -126,7 +143,18 @@ const host: ChatHost = {
   dropHint: "Drop files here (hold Shift while dragging in VS Code)",
 };
 
-const chat = new ChatController(store, client, host);
+// Dictation through HARNESS_VOICE_BIN; talk mode needs VS Code's terminal, so the button only logs.
+const dictation = new DictationManager(async () => {
+  if (!process.env.HARNESS_VOICE_BIN) throw new Error("Set HARNESS_VOICE_BIN to a malac with voice commands to dictate in the harness.");
+  return new Dictation({ command: process.env.HARNESS_VOICE_BIN, home: HOME, connect: process.env.HARNESS_CONNECTION ?? null }, { log: (line) => console.log(`[dictate] ${line}`) });
+});
+const voice: ChatVoice = {
+  offer: () => ({ dictation: featureReady(store.voice?.dictation), talk: featureReady(store.voice?.talk), blocked: null }),
+  dictation,
+  onChange: () => ({ dispose() {} }),
+};
+
+const chat = new ChatController(store, client, host, { voice });
 
 // When the snapshot has no tab for the project, make one (what the folder offer does in VS Code).
 store.onChange.event((change) => {

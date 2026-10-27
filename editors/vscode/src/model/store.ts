@@ -11,10 +11,12 @@ import {
   JobView,
   Mode,
   PendingApproval,
+  SayMessage,
   ServerMessage,
   Snapshot,
   TabView,
   Usage,
+  VoiceStatus,
   WorkspaceSummary,
   WorkspaceView,
 } from "../protocol";
@@ -66,6 +68,10 @@ export interface Change {
   closedTab?: string;
   mode?: boolean;
   finished?: { agent: string; status: string }[];
+  /** The voice settings or the models that can do them changed. */
+  voice?: boolean;
+  /** A sentence to read aloud (for whichever connection's listener it names). */
+  say?: SayMessage;
 }
 
 export type DisplayStatus = "waiting" | "running" | "failed" | "completed" | "cancelled" | "idle" | "saved";
@@ -82,6 +88,8 @@ export class DaemonStore {
   jobs = new Map<string, JobView>();
   models: string[] = [];
   defaultModel: string | null = null;
+  /** Null until a daemon with voice support reports it. */
+  voice: VoiceStatus | null = null;
   loaded = false;
   /** Bumped by every snapshot; transcripts loaded before it are stale. */
   generation = 0;
@@ -112,6 +120,12 @@ export class DaemonStore {
       }
     }
     if (changed.size) this.onChange.fire({ agents: changed, tabs: true });
+  }
+
+  /** Voice settings from `PUT /api/voice` (the `voice` broadcast follows, but the reply is first). */
+  setVoice(voice: VoiceStatus): void {
+    this.voice = voice;
+    this.onChange.fire({ voice: true });
   }
 
   reset(): void {
@@ -203,6 +217,11 @@ export class DaemonStore {
         return null;
       case "notice":
         return { notice: { level: String(message.level), message: String(message.message), tab: (message.tab as string) ?? null } };
+      case "voice":
+        this.voice = (message.voice as VoiceStatus) ?? null;
+        return { voice: true };
+      case "say":
+        return { say: message as unknown as SayMessage };
       case "shutdown":
         return { shutdown: String(message.reason ?? "stopped") };
       default:
@@ -217,6 +236,7 @@ export class DaemonStore {
     this.jobs = new Map((snapshot.jobs ?? []).map((j) => [j.id, j]));
     this.models = snapshot.models ?? [];
     this.defaultModel = snapshot.default_model ?? null;
+    this.voice = snapshot.voice ?? null;
     // Views of other workspaces are refetched on demand.
     this.views.clear();
     for (const agent of this.agents.values()) {
@@ -228,7 +248,7 @@ export class DaemonStore {
     if (snapshot.workspace) this.setView(snapshot.workspace);
     this.loaded = true;
     this.generation += 1;
-    return { snapshot: true, workspaces: true, tabs: true, pending: true, jobs: true };
+    return { snapshot: true, workspaces: true, tabs: true, pending: true, jobs: true, voice: true };
   }
 
   private setView(view: WorkspaceView): void {

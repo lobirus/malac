@@ -14,7 +14,8 @@ import { formatCost, formatTokens } from "../model/format";
 import { builtinAction, slashCommands } from "../model/slash";
 import { AgentState, Change, DaemonStore, displayName } from "../model/store";
 import { type AttachmentReport, type Envelope, type ImageInput, type Message, type Mode, totalTokens } from "../protocol";
-import type { AgentSummary, Banner, ChatState, FromWebview, ToWebview } from "./messages";
+import type { DictationManager } from "../voice/dictation";
+import type { AgentSummary, Banner, ChatState, FromWebview, MediaFile, ToWebview, VoiceOffer } from "./messages";
 import { RecordedFilter, replayEvents } from "./replay";
 
 export interface ChatHost {
@@ -25,6 +26,10 @@ export interface ChatHost {
   openFile(path: string, line?: number): void;
   /** Saves a dropped file that has no path and returns where it went. */
   saveUpload(name: string, data: Buffer): Promise<string>;
+  /** Opens a file malac sent (or an image) in an editor, from a temporary copy; `key` names the copy. */
+  openMedia(name: string, data: Buffer, key: string): Promise<void>;
+  /** Asks where to save a file and saves it; the path, or null when the user cancelled. */
+  saveMedia(name: string, data: Buffer): Promise<string | null>;
   runCommand(command: string, args: unknown[]): void;
   remember(key: string, value: unknown): void;
   recall<T>(key: string): T | undefined;
@@ -35,7 +40,19 @@ export interface ChatHost {
   dropHint: string;
 }
 
+/** Voice for the chat: what it offers and the window's dictation. */
+export interface ChatVoice {
+  offer(): VoiceOffer;
+  readonly dictation: DictationManager;
+  /** What `offer` returns changed (beyond the store's voice status). */
+  onChange(listener: () => void): Disposable;
+}
+
+const NO_VOICE: VoiceOffer = { dictation: false, talk: false, blocked: null };
 const STATE_DEBOUNCE_MS = 40;
+/** Shared files kept in memory per chat, for thumbnails that render again. */
+const SHARED_CACHE = 40;
+const SHARED_ID = /^[\w.-]{1,128}$/;
 const EVENT_FLUSH_MS = 30;
 /** Commands the webview may run through banner buttons. */
 const ALLOWED_COMMANDS = /^(malac\.[\w.]+|workbench\.action\.openSettings)$/;
@@ -69,24 +86,36 @@ export class ChatController implements Disposable {
   private readonly files: FileAccess | undefined;
   /** Whether this chat fills in session titles after a snapshot (one chat per window does). */
   private readonly titles: boolean;
+  private readonly voice: ChatVoice | undefined;
+  private shared = new Map<string, Promise<{ data: Buffer; type: string }>>();
 
   constructor(
     private readonly store: DaemonStore,
     private readonly client: DaemonClient,
     private readonly host: ChatHost,
-    { includeCurrentFile = true, files, titles = true }: { includeCurrentFile?: boolean; files?: FileAccess; titles?: boolean } = {},
+    { includeCurrentFile = true, files, titles = true, voice }: { includeCurrentFile?: boolean; files?: FileAccess; titles?: boolean; voice?: ChatVoice } = {},
   ) {
     this.files = files;
     this.titles = titles;
+    this.voice = voice;
     this.contextEnabled = host.recall<boolean>("chat.context") ?? includeCurrentFile;
     this.tabId = host.recall<string>("chat.tab") ?? null;
     this.disposables.push(
       store.onChange.event((change) => this.onStoreChange(change)),
       client.onStatus.event(() => this.scheduleState()),
     );
+    if (voice) {
+      this.disposables.push(
+        voice.onChange(() => this.scheduleState()),
+        voice.dictation.onUpdate.event(({ owner, ...update }) => {
+          if (owner === this) this.host.post({ type: "dictation", ...update });
+        }),
+      );
+    }
   }
 
   dispose(): void {
+    this.voice?.dictation.cancel(this);
     clearTimeout(this.stateTimer);
     clearTimeout(this.eventTimer);
     for (const d of this.disposables) d.dispose();
@@ -160,6 +189,15 @@ export class ChatController implements Disposable {
     this.scheduleState();
   }
 
+  /** Starts dictating into this chat's composer, or stops the recording ("malac: Dictate"). */
+  dictate(): void {
+    if (!this.voice) return;
+    const offer = this.voice.offer();
+    if (offer.blocked) this.toast("warning", offer.blocked);
+    else if (!offer.dictation && !this.voice.dictation.owner) this.toast("info", "Dictation is off, or no model can transcribe speech. Turn it on and pick a model in malac: Voice Settings.");
+    else void this.voice.dictation.toggle(this);
+  }
+
   stop(agent = this.currentAgent): boolean {
     if (!agent) return false;
     return this.client.send({ type: "cancel", agent });
@@ -229,6 +267,17 @@ export class ChatController implements Disposable {
       case "openAgent":
         this.selectAgent(message.agent);
         return;
+      case "loadShared":
+        void this.loadShared(message.id);
+        return;
+      case "media":
+        void this.media(message.action, message.file);
+        return;
+      case "dictation":
+        if (message.action === "toggle") this.dictate();
+        else if (message.action === "stop") this.voice?.dictation.stop();
+        else this.voice?.dictation.cancel(this);
+        return;
       case "command":
         if (message.command === OPEN_TAB && typeof message.args?.[0] === "string") void this.openTab(message.args[0]);
         else if (message.command === DISMISS_ROOT && typeof message.args?.[0] === "string") this.dismissRootHint(message.args[0]);
@@ -239,6 +288,44 @@ export class ChatController implements Disposable {
 
   private toast(level: "info" | "warning" | "error", message: string): void {
     this.host.post({ type: "toast", level, message });
+  }
+
+  /** A file `send_to_user` shared, fetched once (`/api/shared/{id}`, with the token the webview never sees). */
+  private sharedFile(id: string): Promise<{ data: Buffer; type: string }> {
+    if (!SHARED_ID.test(id)) return Promise.reject(new Error("not a shared file"));
+    let file = this.shared.get(id);
+    if (!file) {
+      file = this.client.download(`/api/shared/${encodeURIComponent(id)}?download=true`);
+      file.catch(() => this.shared.delete(id));
+      this.shared.set(id, file);
+      if (this.shared.size > SHARED_CACHE) this.shared.delete(this.shared.keys().next().value!);
+    }
+    return file;
+  }
+
+  private async loadShared(id: string): Promise<void> {
+    try {
+      const { data, type } = await this.sharedFile(id);
+      this.host.post({ type: "shared", id, media_type: type, data: data.toString("base64") });
+    } catch (error) {
+      const gone = error instanceof HttpError && error.status === 404;
+      this.host.post({ type: "shared", id, error: gone ? "No longer on the daemon (shared files are kept 30 days)" : error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private async media(action: "open" | "save", file: MediaFile): Promise<void> {
+    try {
+      const data = file.id ? (await this.sharedFile(file.id)).data : Buffer.from(file.data ?? "", "base64");
+      if (action === "open") {
+        await this.host.openMedia(file.name, data, file.id ?? "");
+      } else {
+        const saved = await this.host.saveMedia(file.name, data);
+        if (saved) this.toast("info", `Saved ${saved}`);
+      }
+    } catch (error) {
+      const gone = error instanceof HttpError && error.status === 404;
+      this.toast("error", `Cannot ${action} ${file.name}: ${gone ? "it is no longer on the daemon" : error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private setModel(model: string): void {
@@ -385,6 +472,8 @@ export class ChatController implements Disposable {
     if (change.snapshot) {
       this.shown = undefined;
       this.outbox = [];
+      // Another daemon may have other files under the same ids.
+      this.shared.clear();
       if (this.titles) {
         void this.client
           .get<{ sessions: { id: string; title: string }[] }>("/api/sessions?limit=200&subagents=true")
@@ -538,6 +627,7 @@ export class ChatController implements Disposable {
       dropHint: this.remote ? `Drop files here; they are uploaded to the daemon at ${this.client.address?.url}` : this.host.dropHint,
       commands: slashCommands(entry?.tab.project).map(({ name, description, hint, source }) => ({ name, description, hint, source })),
       remote: this.remote ? (this.client.address?.url ?? null) : null,
+      voice: this.voice?.offer() ?? NO_VOICE,
     };
   }
 

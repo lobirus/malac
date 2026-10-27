@@ -7,7 +7,7 @@ import type { DaemonClient } from "../connection/client";
 import type { DaemonStore } from "../model/store";
 import { lastUsedSurface } from "../model/surfaces";
 import type { PendingApproval } from "../protocol";
-import { ChatController } from "./controller";
+import { ChatController, ChatVoice } from "./controller";
 import type { ChatEnvironment } from "./environment";
 import { ChatPanel, createChatPanel, PanelState, panelOptions } from "./panel";
 import { ChatView } from "./view";
@@ -25,7 +25,7 @@ export class ChatSurfaces implements vscode.Disposable, vscode.WebviewPanelSeria
     private readonly store: DaemonStore,
     private readonly client: DaemonClient,
     sideId: string,
-    private readonly options: () => { includeCurrentFile: boolean },
+    private readonly options: () => { includeCurrentFile: boolean; voice?: ChatVoice },
   ) {
     this.side = new ChatView(env, sideId);
     this.chat = new ChatController(store, client, this.side, options());

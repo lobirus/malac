@@ -8,7 +8,10 @@
 // FOLDER_TAB sets malac.folderTab (default "folder"); EXPECT_TAB is the tab
 // directory the chat should end up in (default HARNESS_CWD); VSCODE_VERSION
 // is what `vscode.version` reports (default 1.139.1); SMOKE_PROMPT=1 sends
-// one real prompt from an editor tab.
+// one real prompt from an editor tab; SMOKE_VOICE=1 checks dictation, talk
+// mode and the voice settings (MALAC_BIN must have the voice commands, or be
+// a stand-in for them); SMOKE_SAY_PROMPT, a prompt that makes the agent ask
+// for approval, checks that the approval is spoken here (and then denies it).
 
 import * as fs from "node:fs";
 import Module from "node:module";
@@ -36,6 +39,9 @@ const commands = new Map<string, (...args: unknown[]) => unknown>();
 const treeViews = new Map<string, { provider: { getChildren(n?: unknown): unknown; getTreeItem(n: unknown): unknown }; view: Record<string, unknown> }>();
 const webviewProviders = new Map<string, { resolveWebviewView(view: unknown): void }>();
 const statusItems: Record<string, unknown>[] = [];
+const terminals: Record<string, unknown>[] = [];
+const statusMessages: string[] = [];
+const quickPicks: { items: { label: string; description?: string }[]; title?: string }[] = [];
 const serializers = new Map<string, { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> }>();
 const panels: MockPanel[] = [];
 const VERSION = process.env.VSCODE_VERSION ?? "1.139.1";
@@ -168,6 +174,9 @@ const vscode = {
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   ProgressLocation: { Notification: 15, Window: 10 },
+  QuickPickItemKind: { Separator: -1, Default: 0 },
+  ConfigurationTarget: { Global: 1, Workspace: 2 },
+  ExtensionKind: { UI: 1, Workspace: 2 },
   ViewColumn: { Beside: -2, Active: -1 },
   Range: class {},
   TabInputText: class {},
@@ -197,12 +206,23 @@ const vscode = {
     },
     onDidChangeActiveTextEditor: noEvent,
     onDidChangeTextEditorSelection: noEvent,
+    onDidCloseTerminal: noEvent,
+    setStatusBarMessage: (text: string) => {
+      statusMessages.push(text);
+      return { dispose() {} };
+    },
     showInformationMessage: async (text: string) => void messages.push(`[info] ${text}`),
     showWarningMessage: async (text: string) => void messages.push(`[warning] ${text}`),
     showErrorMessage: async (text: string) => void messages.push(`[error] ${text}`),
-    showQuickPick: async () => undefined,
+    showQuickPick: async (items: { label: string; description?: string }[], options?: { title?: string }) => {
+      quickPicks.push({ items: await items, title: options?.title });
+      return undefined;
+    },
     withProgress: async (_: unknown, task: () => Promise<unknown>) => task(),
-    createTerminal: () => ({ show() {} }),
+    createTerminal: (options: Record<string, unknown>) => {
+      terminals.push(options);
+      return { exitStatus: undefined, show() {}, dispose() {} };
+    },
   },
   workspace: {
     workspaceFolders: [{ uri: Uri.file(CWD), name: path.basename(CWD), index: 0 }],
@@ -349,12 +369,55 @@ async function main(): Promise<void> {
   executed.length = 0;
   await commands.get("malac.focusChat")!();
   check("Focus Chat goes to the side chat", executed.includes(`${chatId}.focus`), executed.join(", "));
+  if (process.env.SMOKE_VOICE) await voiceChecks(webview.posted, webview.receive, chatId);
   check("no error notifications", !messages.some((m) => m.startsWith("[error]")), messages.filter((m) => m.startsWith("[error]")).join(" | "));
   for (const m of messages.filter((m) => !m.startsWith("[log]"))) console.log(`     ${m}`);
 
   for (const d of context.subscriptions) d.dispose();
   extension.deactivate();
   setTimeout(() => process.exit(), 200);
+}
+
+/** Dictation, talk mode and the voice settings against the daemon's voice status. */
+async function voiceChecks(posted: { type: string; state?: Record<string, unknown> }[], receive: (m: unknown) => void, chatId: string): Promise<void> {
+  const latest = () => [...posted].reverse().find((m) => m.type === "state")?.state as { voice: { dictation: boolean; talk: boolean; blocked: string | null }; tab: { id: string } } | undefined;
+  await new Promise((r) => setTimeout(r, 500));
+  const offer = latest()?.voice;
+  check("the chat offers the mic and talk buttons", Boolean(offer?.dictation && offer.talk && !offer.blocked), JSON.stringify(offer));
+  const dictations = () => posted.filter((m) => m.type === "dictation") as unknown as { state: string; text?: string; error?: string }[];
+  await commands.get("malac.dictate")!();
+  for (let i = 0; i < 50 && !dictations().length; i += 1) await new Promise((r) => setTimeout(r, 100));
+  check("malac: Dictate starts recording in the side chat", dictations().at(-1)?.state === "recording" && executed.includes(`${chatId}.focus`), JSON.stringify(dictations().at(-1)));
+  await new Promise((r) => setTimeout(r, 300));
+  await commands.get("malac.dictate")!();
+  for (let i = 0; i < 100 && dictations().at(-1)?.state !== "done"; i += 1) await new Promise((r) => setTimeout(r, 100));
+  const done = dictations().at(-1);
+  check("pressing it again stops, and the text goes to the composer", done?.state === "done" && Boolean(done.text), JSON.stringify(done));
+  receive({ type: "dictation", action: "toggle" });
+  await new Promise((r) => setTimeout(r, 500));
+  receive({ type: "dictation", action: "cancel" });
+  for (let i = 0; i < 50 && dictations().at(-1)?.state !== "done"; i += 1) await new Promise((r) => setTimeout(r, 100));
+  check("Esc in the composer cancels without text", dictations().at(-1)?.state === "done" && !dictations().at(-1)?.text);
+  await commands.get("malac.talk")!(latest()!.tab.id, null);
+  const terminal = terminals.at(-1);
+  check(
+    "malac: Talk opens a terminal running malac voice talk for the tab",
+    terminal?.shellPath === settings["malac.path"] && JSON.stringify(terminal?.shellArgs) === JSON.stringify(["voice", "talk", "--tab", latest()!.tab.id]),
+    JSON.stringify(terminal),
+  );
+  await commands.get("malac.voiceSettings")!();
+  const labels = quickPicks.at(-1)?.items.map((i) => `${i.label.trim()}${i.description ? ` = ${i.description}` : ""}`) ?? [];
+  check("malac: Voice Settings lists each feature, its model and voice, and this device's switch", ["Dictation", "Speech", "Talk mode", "Speak on this device", "Language"].every((name) => labels.some((l) => l.includes(name))), labels.join(" | "));
+  for (const label of labels) console.log(`     ${label}`);
+  const prompt = process.env.SMOKE_SAY_PROMPT;
+  if (!prompt) return;
+  receive({ type: "submit", text: prompt, attachments: [], images: [] });
+  const until = Date.now() + 30_000;
+  while (Date.now() < until && !statusMessages.some((m) => m.startsWith("$(unmute)"))) await new Promise((r) => setTimeout(r, 250));
+  check("the approval is spoken on this device", statusMessages.some((m) => m.startsWith("$(unmute)")), statusMessages.join(" | "));
+  const pending = (latest() as unknown as { pending: { id: string }[] }).pending;
+  for (const request of pending) receive({ type: "approve", request: request.id, decision: "deny" });
+  await new Promise((r) => setTimeout(r, 500));
 }
 
 void main();

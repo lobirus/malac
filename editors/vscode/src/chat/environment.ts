@@ -2,8 +2,9 @@
 // VS Code side: the active editor for the context chip, the workspace's files
 // for "@", dropped uploads, persisted settings and the log.
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { EditorSnapshot } from "../model/context";
@@ -16,6 +17,8 @@ import type { ToWebview } from "./messages";
 const FILE_CACHE_MS = 30_000;
 const FILE_LIMIT = 20_000;
 const UPLOAD_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+/** Folders in the extension's storage whose entries are kept for a week: dropped files, copies of files opened from the chat, and speech that was playing when VS Code closed. */
+const PRUNED = ["uploads", "open", "voice"];
 
 export const DROP_HINT = "Drop files here (hold Shift while dragging in VS Code)";
 
@@ -131,10 +134,27 @@ export class ChatEnvironment implements vscode.Disposable {
   async saveUpload(name: string, data: Buffer): Promise<string> {
     const dir = path.join(this.context.globalStorageUri.fsPath, "uploads", new Date().toISOString().replace(/[:.]/g, "-"));
     await fs.mkdir(dir, { recursive: true });
-    const safe = path.basename(name).replace(/[^\w.\- ]+/g, "_") || "file";
-    const target = path.join(dir, safe);
+    const target = path.join(dir, safeName(name));
     await fs.writeFile(target, data);
     return target;
+  }
+
+  /** Copies the file to the extension's storage and opens it as VS Code would (its image preview zooms too). */
+  async openMedia(name: string, data: Buffer, key: string): Promise<void> {
+    const folder = key.replace(/[^\w.-]+/g, "_") || createHash("sha256").update(data).digest("hex").slice(0, 16);
+    const dir = path.join(this.context.globalStorageUri.fsPath, "open", folder);
+    await fs.mkdir(dir, { recursive: true });
+    const target = path.join(dir, safeName(name));
+    await fs.writeFile(target, data);
+    await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(target), { preview: true });
+  }
+
+  async saveMedia(name: string, data: Buffer): Promise<string | null> {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
+    const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.joinPath(folder, safeName(name)), saveLabel: "Save", title: `Save ${name}` });
+    if (!uri) return null;
+    await vscode.workspace.fs.writeFile(uri, data);
+    return uri.scheme === "file" ? uri.fsPath : uri.toString();
   }
 
   runCommand(command: string, args: unknown[]): void {
@@ -157,17 +177,19 @@ export class ChatEnvironment implements vscode.Disposable {
     return this.version();
   }
 
-  /** Dropped files are kept for a week. */
+  /** Dropped files and opened copies are kept for a week. */
   private async pruneUploads(): Promise<void> {
-    const root = path.join(this.context.globalStorageUri.fsPath, "uploads");
-    try {
-      for (const entry of await fs.readdir(root, { withFileTypes: true })) {
-        const full = path.join(root, entry.name);
-        const stat = await fs.stat(full);
-        if (Date.now() - stat.mtimeMs > UPLOAD_MAX_AGE_MS) await fs.rm(full, { recursive: true, force: true });
+    for (const name of PRUNED) {
+      const root = path.join(this.context.globalStorageUri.fsPath, name);
+      try {
+        for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+          const full = path.join(root, entry.name);
+          const stat = await fs.stat(full);
+          if (Date.now() - stat.mtimeMs > UPLOAD_MAX_AGE_MS) await fs.rm(full, { recursive: true, force: true });
+        }
+      } catch {
+        // Nothing there yet.
       }
-    } catch {
-      // Nothing uploaded yet.
     }
   }
 }
@@ -199,6 +221,14 @@ export abstract class SurfaceHost implements ChatHost {
     return this.env.saveUpload(name, data);
   }
 
+  openMedia(name: string, data: Buffer, key: string): Promise<void> {
+    return this.env.openMedia(name, data, key);
+  }
+
+  saveMedia(name: string, data: Buffer): Promise<string | null> {
+    return this.env.saveMedia(name, data);
+  }
+
   runCommand(command: string, args: unknown[]): void {
     this.env.runCommand(command, args);
   }
@@ -218,6 +248,12 @@ export abstract class SurfaceHost implements ChatHost {
   clientVersion(): string | undefined {
     return this.env.clientVersion();
   }
+}
+
+/** A file name that is safe in a folder of its own. */
+function safeName(name: string): string {
+  const base = path.basename(name).replace(/[^\w.\- ()]+/g, "_");
+  return /^\.*$/.test(base) ? "file" : base;
 }
 
 /** `files.exclude` and `search.exclude` together, plus build output that is never worth attaching. */

@@ -28,6 +28,8 @@ const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
 const STOPPED_POLL_MS = 3000;
 const REQUEST_TIMEOUT_MS = 60_000;
+/** Shared files are at most 50 MB; anything larger is not one. */
+const DOWNLOAD_LIMIT = 64 * 1024 * 1024;
 /** Failed attempts after which a lost daemon is started again. */
 const RESTART_AFTER = 2;
 
@@ -146,6 +148,34 @@ export class DaemonClient {
 
   async post<T>(path: string, body: unknown): Promise<T> {
     return this.http<T>("POST", path, body);
+  }
+
+  async put<T>(path: string, body: unknown): Promise<T> {
+    return this.http<T>("PUT", path, body);
+  }
+
+  /** A file from the REST API (a shared file, speech audio) with its type. */
+  async download(path: string, maxBytes = DOWNLOAD_LIMIT): Promise<{ data: Buffer; type: string }> {
+    const endpoint = this.endpoint;
+    if (!endpoint) throw new Error("Not connected to the malac daemon");
+    const response = await fetch(`${endpoint.url}${path}`, {
+      headers: { Authorization: `Bearer ${endpoint.token}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      let message = text || `${response.status} ${response.statusText}`;
+      try {
+        message = (JSON.parse(text) as { error?: string }).error ?? message;
+      } catch {
+        // Not JSON.
+      }
+      throw new HttpError(response.status, message);
+    }
+    if (Number(response.headers.get("content-length") ?? 0) > maxBytes) throw new Error(`the file is larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length > maxBytes) throw new Error(`the file is larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
+    return { data, type: (response.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim() };
   }
 
   async http<T>(method: string, path: string, body?: unknown): Promise<T> {

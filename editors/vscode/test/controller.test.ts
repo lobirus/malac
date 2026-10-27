@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChatController, ChatHost } from "../src/chat/controller";
+import { ChatController, ChatHost, ChatVoice } from "../src/chat/controller";
 import type { ToWebview } from "../src/chat/messages";
-import type { ConnectionStatus, DaemonClient } from "../src/connection/client";
+import { HttpError, type ConnectionStatus, type DaemonClient } from "../src/connection/client";
 import type { FileAccess } from "../src/model/attachments";
 import { Emitter } from "../src/model/emitter";
 import { DaemonStore } from "../src/model/store";
+import type { Dictation, DictationResult } from "../src/voice/cli";
+import { DictationManager } from "../src/voice/dictation";
 import type { ProjectSummary, ServerMessage } from "../src/protocol";
 
 const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost: 0 };
 
-function setup({ project, address, files }: { project?: ProjectSummary; address?: { url: string; token: string; source: string }; files?: FileAccess } = {}) {
+function setup({ project, address, files, voice }: { project?: ProjectSummary; address?: { url: string; token: string; source: string }; files?: FileAccess; voice?: ChatVoice } = {}) {
   const store = new DaemonStore();
   const sent: Record<string, unknown>[] = [];
   const replies: ((command: Record<string, unknown>) => ServerMessage)[] = [];
@@ -33,7 +35,14 @@ function setup({ project, address, files }: { project?: ProjectSummary; address?
       if (path.startsWith("/api/sessions/")) return { history: [{ role: "user", content: [{ type: "text", text: "earlier" }] }] };
       return { sessions: [] };
     },
+    async download(path: string) {
+      downloads.push(path);
+      if (path.startsWith("/api/shared/gone")) throw new HttpError(404, "not found");
+      return { data: Buffer.from("PNGDATA"), type: "image/png" };
+    },
   } as unknown as DaemonClient;
+  const downloads: string[] = [];
+  const opened: { name: string; data: string; key: string }[] = [];
   const posted: ToWebview[] = [];
   const memory = new Map<string, unknown>();
   let editor: ReturnType<ChatHost["editor"]> = null;
@@ -43,6 +52,8 @@ function setup({ project, address, files }: { project?: ProjectSummary; address?
     findFiles: async () => [],
     openFile: () => {},
     saveUpload: async (name) => `/uploads/${name}`,
+    openMedia: async (name, data, key) => void opened.push({ name, data: data.toString(), key }),
+    saveMedia: async (name) => `/saved/${name}`,
     runCommand: () => {},
     remember: (k, v) => memory.set(k, v),
     recall: <T,>(k: string) => memory.get(k) as T | undefined,
@@ -50,7 +61,7 @@ function setup({ project, address, files }: { project?: ProjectSummary; address?
     clientVersion: () => "1.0.1",
     dropHint: "",
   };
-  const chat = new ChatController(store, client, host, { files });
+  const chat = new ChatController(store, client, host, { files, voice });
   store.apply({
     type: "snapshot",
     daemon: { version: "1.0.1", pid: 1, started: "", version_mismatch: false, clients: 1, attached: false, remote: false },
@@ -84,7 +95,7 @@ function setup({ project, address, files }: { project?: ProjectSummary; address?
     models: ["lora/fast", "lora/smart"],
     default_model: "lora/fast",
   });
-  return { store, chat, sent, replies, posted, memory, setEditor: (e: typeof editor) => (editor = e) };
+  return { store, chat, sent, replies, posted, memory, downloads, opened, setEditor: (e: typeof editor) => (editor = e) };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 60));
@@ -288,4 +299,103 @@ test("an attachment a remote daemon cannot take stops the prompt", async () => {
   assert.equal(sent.find((c) => c.type === "prompt"), undefined);
   const result = posted.find((m) => m.type === "sent");
   assert.ok(result && result.type === "sent" && !result.ok && /src is a folder/.test(result.error ?? ""));
+});
+
+test("shared files load through the extension host, once, and open or save from there", async () => {
+  const { chat, posted, downloads, opened } = setup();
+  chat.receive({ type: "ready" });
+  chat.receive({ type: "loadShared", id: "0193f0c2" });
+  chat.receive({ type: "loadShared", id: "0193f0c2" });
+  await tick();
+  const shared = posted.filter((m) => m.type === "shared");
+  assert.equal(shared.length, 2);
+  assert.ok(shared[0].type === "shared" && shared[0].media_type === "image/png" && Buffer.from(shared[0].data!, "base64").toString() === "PNGDATA");
+  assert.deepEqual(downloads, ["/api/shared/0193f0c2?download=true"], "fetched once");
+  chat.receive({ type: "media", action: "open", file: { id: "0193f0c2", name: "shot.png", media_type: "image/png" } });
+  chat.receive({ type: "media", action: "open", file: { name: "tool-image.png", media_type: "image/png", data: Buffer.from("TOOL").toString("base64") } });
+  chat.receive({ type: "media", action: "save", file: { id: "0193f0c2", name: "shot.png", media_type: "image/png" } });
+  await tick();
+  assert.deepEqual(
+    opened.sort((a, b) => a.name.localeCompare(b.name)),
+    [
+      { name: "shot.png", data: "PNGDATA", key: "0193f0c2" },
+      { name: "tool-image.png", data: "TOOL", key: "" },
+    ],
+  );
+  assert.ok(posted.some((m) => m.type === "toast" && m.message === "Saved /saved/shot.png"));
+  chat.receive({ type: "loadShared", id: "gone1" });
+  chat.receive({ type: "loadShared", id: "../../etc/passwd" });
+  await tick();
+  const errors = posted.filter((m) => m.type === "shared" && m.error).map((m) => m.type === "shared" && m.error);
+  assert.deepEqual(errors, ["No longer on the daemon (shared files are kept 30 days)", "not a shared file"]);
+  assert.equal(downloads.length, 2, "a bad id is never requested");
+});
+
+/** A recording that finishes when told to. */
+function fakeDictation(): Dictation & { finish(result: DictationResult): void; stops: number; cancels: number } {
+  let finish!: (result: DictationResult) => void;
+  const fake = {
+    started: 1000,
+    stopping: false,
+    stops: 0,
+    cancels: 0,
+    result: new Promise<DictationResult>((resolve) => (finish = resolve)),
+    stop() {
+      fake.stopping = true;
+      fake.stops += 1;
+    },
+    cancel() {
+      fake.cancels += 1;
+      finish({ cancelled: true });
+    },
+    finish: (result: DictationResult) => finish(result),
+  };
+  return fake as unknown as Dictation & { finish(result: DictationResult): void; stops: number; cancels: number };
+}
+
+test("dictation records for the chat that asked and hands it the text", async () => {
+  const recordings: ReturnType<typeof fakeDictation>[] = [];
+  const dictation = new DictationManager(async () => {
+    const recording = fakeDictation();
+    recordings.push(recording);
+    return recording;
+  });
+  const voice: ChatVoice = { offer: () => ({ dictation: true, talk: false, blocked: null }), dictation, onChange: () => ({ dispose() {} }) };
+  const { chat, posted } = setup({ voice });
+  chat.receive({ type: "ready" });
+  await tick();
+  assert.deepEqual(lastState(posted).voice, { dictation: true, talk: false, blocked: null });
+  chat.receive({ type: "dictation", action: "toggle" });
+  await tick();
+  assert.deepEqual(posted.filter((m) => m.type === "dictation").at(-1), { type: "dictation", state: "recording", started: 1000 });
+  chat.receive({ type: "dictation", action: "toggle" });
+  await tick();
+  assert.equal(recordings[0].stops, 1, "toggling again stops it");
+  assert.equal(posted.filter((m) => m.type === "dictation").at(-1)?.type === "dictation" && (posted.filter((m) => m.type === "dictation").at(-1) as { state: string }).state, "transcribing");
+  recordings[0].finish({ text: " make the button blue " });
+  await tick();
+  assert.deepEqual(posted.filter((m) => m.type === "dictation").at(-1), { type: "dictation", state: "done", text: "make the button blue" });
+  chat.receive({ type: "dictation", action: "toggle" });
+  await tick();
+  chat.receive({ type: "dictation", action: "cancel" });
+  await tick();
+  assert.equal(recordings[1].cancels, 1);
+  assert.deepEqual(posted.filter((m) => m.type === "dictation").at(-1), { type: "dictation", state: "done" }, "a cancelled recording inserts nothing");
+});
+
+test("dictation explains what stands in the way", async () => {
+  const dictation = new DictationManager(async () => {
+    throw new Error("This malac has no voice commands.");
+  });
+  let blocked: string | null = "Voice is not available in this remote window.";
+  const voice: ChatVoice = { offer: () => ({ dictation: true, talk: true, blocked }), dictation, onChange: () => ({ dispose() {} }) };
+  const { chat, posted } = setup({ voice });
+  chat.receive({ type: "ready" });
+  chat.receive({ type: "dictation", action: "toggle" });
+  await tick();
+  assert.ok(posted.some((m) => m.type === "toast" && m.message === "Voice is not available in this remote window."));
+  blocked = null;
+  chat.receive({ type: "dictation", action: "toggle" });
+  await tick();
+  assert.deepEqual(posted.filter((m) => m.type === "dictation").at(-1), { type: "dictation", state: "done", error: "This malac has no voice commands." });
 });

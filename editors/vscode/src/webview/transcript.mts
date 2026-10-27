@@ -1,10 +1,12 @@
 // One agent's conversation: saved history plus live events, rendered as
 // messages, tool cards (with approvals inline), subagent cards and plans.
 
-import type { AgentSummary, FromWebview, PendingView } from "../chat/messages.js";
+import type { AgentSummary, FromWebview, MediaFile, PendingView } from "../chat/messages.js";
 import type { Block, Envelope, ImageInput, Message, Usage } from "../protocol.js";
 import { baseName, clockTime, firstLine, formatCost, formatDuration, formatTokens, h, icon, plural, relativeTo, setChildren, toolIcon, truncate } from "./dom.mjs";
 import { renderMarkdown } from "./markdown.mjs";
+import { SharedCard } from "./shared.mjs";
+import { openViewer } from "./viewer.mjs";
 
 const PIN_THRESHOLD_PX = 48;
 const DRAFT_RENDER_MS = 80;
@@ -40,6 +42,9 @@ export interface TranscriptContext {
   post(message: FromWebview): void;
   cwd(): string;
   agents(): AgentSummary[];
+  /** A file malac sent, through the extension host. */
+  shared(id: string): Promise<{ media_type: string; data: string }>;
+  media(action: "open" | "save", file: MediaFile): void;
 }
 
 function toolTitle(name: string): { title: string; tag: string | null } {
@@ -57,16 +62,17 @@ function resultText(content: Block[] | undefined): string {
   return (content ?? []).map((b) => (b.type === "text" ? b.text : b.type === "image" ? `[${b.media_type} image]` : "")).join("");
 }
 
-function imageNode(image: { media_type: string; data: string }, alt: string): HTMLElement | null {
+/** A thumbnail that opens the image viewer. */
+function imageNode(image: { media_type: string; data: string; name?: string }, alt: string): HTMLElement | null {
   if (!IMAGE_TYPES.has(image.media_type)) return null;
   const src = `data:${image.media_type};base64,${image.data}`;
-  const img = h("img", { src, alt, loading: "lazy" });
-  return h("a", { class: "thumb", href: src, title: alt, "aria-label": `${alt} (opens full size)`, onclick: (e: Event) => toggleZoom(e, img) }, img);
-}
-
-function toggleZoom(event: Event, img: HTMLImageElement): void {
-  event.preventDefault();
-  img.closest(".thumb")?.classList.toggle("zoomed");
+  const name = image.name || `${alt.toLowerCase().replace(/\s+/g, "-")}.${image.media_type.split("/")[1].replace("jpeg", "jpg")}`;
+  const button: HTMLButtonElement = h(
+    "button",
+    { class: "thumb", type: "button", title: alt, "aria-label": `${alt}, opens the image viewer`, onclick: () => openViewer({ src, name, media_type: image.media_type, data: image.data }, button) },
+    h("img", { src, alt, loading: "lazy" }),
+  );
+  return button;
 }
 
 function copyButton(text: () => string, label = "Copy"): HTMLButtonElement {
@@ -594,7 +600,7 @@ export class Transcript {
   }
 
   get isEmpty(): boolean {
-    return !this.root.querySelector(".msg, .tool, .spawn, .todo, .notice");
+    return !this.root.querySelector(".msg, .tool, .spawn, .todo, .notice, .shared");
   }
 
   follow(force = false): void {
@@ -785,6 +791,8 @@ export class Transcript {
       const spawn = new SpawnCard(block, this);
       this.spawns.push(spawn);
       card = spawn;
+    } else if (block.name === "send_to_user") {
+      card = new SharedCard(this.context);
     } else if (block.name === "todo") {
       const todo = new TodoCard(block);
       this.lastTodo?.supersede();

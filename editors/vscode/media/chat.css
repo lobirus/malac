@@ -204,6 +204,7 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .dot.running,
+  .rec-dot,
   .spinner {
     animation: none !important;
   }
@@ -487,10 +488,17 @@ button {
 
 .thumb {
   display: block;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  background: none;
   overflow: hidden;
   line-height: 0;
+  cursor: zoom-in;
+}
+
+.thumb:hover:not(:disabled) {
+  border-color: var(--vscode-focusBorder);
 }
 
 .thumb img {
@@ -499,9 +507,187 @@ button {
   object-fit: cover;
 }
 
-.thumb.zoomed img {
-  max-width: 100%;
-  max-height: none;
+/* Files malac sent: the caption, images at a readable size, other files as cards. */
+
+.shared {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shared-caption {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.shared-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Sized by the viewport, not the button, so the button wraps the image exactly. */
+.shared-thumb img {
+  display: block;
+  max-width: min(360px, calc(100vw - 40px));
+  max-height: 240px;
+}
+
+.shared-thumb.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 160px;
+  height: 100px;
+  background: var(--subtle-bg);
+  color: var(--muted);
+  cursor: default;
+}
+
+.shared-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--subtle-bg);
+}
+
+.shared-file-icon {
+  color: var(--muted);
+}
+
+.shared-file-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 140px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.shared-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.shared-file-text .muted {
+  font-size: 11px;
+}
+
+.shared-file-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.shared-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--vscode-errorForeground);
+  font-size: 12px;
+}
+
+/* The image viewer: the whole webview, the image on the editor background. */
+
+.viewer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  /* Over the chat and its menus, under the toasts that report Open and Save. */
+  z-index: 35;
+  outline: none;
+}
+
+.viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.viewer-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.viewer-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.viewer-zoom {
+  min-width: 44px;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.viewer-zoom:hover {
+  background: var(--hover);
+  color: var(--vscode-foreground);
+}
+
+.viewer-separator {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.viewer-stage {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+.viewer-stage.pannable {
+  cursor: grab;
+}
+
+.viewer-stage.pannable.dragging {
+  cursor: grabbing;
+}
+
+.viewer-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  -webkit-user-drag: none;
+}
+
+.viewer-img.pixelated {
+  image-rendering: pixelated;
+}
+
+.viewer-error {
+  margin: 24px;
+  color: var(--muted);
+  text-align: center;
 }
 
 /* Markdown */
@@ -1338,6 +1524,15 @@ button {
   border-radius: 2px;
 }
 
+.chip-thumb {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
 .chip-remove {
   display: inline-flex;
   align-items: center;
@@ -1457,6 +1652,49 @@ button {
 
 .stop {
   color: var(--vscode-errorForeground);
+}
+
+/* Dictation: the microphone button and, while it records, the time and the keys. */
+
+.mic[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+.mic.recording {
+  color: var(--vscode-errorForeground);
+  background: var(--hover);
+}
+
+.dictation-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rec-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-errorForeground);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.rec-time {
+  color: var(--vscode-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A narrow side bar keeps the time; the keys are in the button's tooltip. */
+@media (max-width: 480px) {
+  .rec-hint {
+    display: none;
+  }
 }
 
 /* "@" picker and menus */
@@ -1637,6 +1875,8 @@ button {
 
 body.vscode-high-contrast .tool,
 body.vscode-high-contrast .msg.user,
-body.vscode-high-contrast .chip {
+body.vscode-high-contrast .chip,
+body.vscode-high-contrast .shared-file,
+body.vscode-high-contrast .viewer-bar {
   border-color: var(--vscode-contrastBorder);
 }

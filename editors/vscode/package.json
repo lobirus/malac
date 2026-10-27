@@ -199,6 +199,24 @@
         "icon": "$(output)"
       },
       {
+        "command": "malac.dictate",
+        "title": "Dictate",
+        "category": "malac",
+        "icon": "$(mic)"
+      },
+      {
+        "command": "malac.talk",
+        "title": "Talk",
+        "category": "malac",
+        "icon": "$(mic-filled)"
+      },
+      {
+        "command": "malac.voiceSettings",
+        "title": "Voice Settings",
+        "category": "malac",
+        "icon": "$(settings-gear)"
+      },
+      {
         "command": "malac.agent.open",
         "title": "Open in Chat",
         "category": "malac",
@@ -417,6 +435,11 @@
           "group": "2_daemon@3"
         },
         {
+          "command": "malac.voiceSettings",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
+          "group": "3_voice@1"
+        },
+        {
           "command": "malac.newTabForFolder",
           "when": "view == malac.workspaces",
           "group": "navigation@1"
@@ -585,6 +608,11 @@
         "key": "ctrl+alt+shift+k",
         "mac": "cmd+alt+shift+k",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "malac.dictate",
+        "key": "ctrl+alt+shift+d",
+        "mac": "cmd+alt+shift+d"
       }
     ],
     "configuration": {
@@ -649,6 +677,12 @@
           "type": "boolean",
           "default": true,
           "description": "Show the malac button in the editor title bar. Click opens malac; Alt+click opens it in a new editor tab."
+        },
+        "malac.speakOnThisDevice": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "Play malac's speech (approvals, questions, notable results) on this computer when speech is on in **malac: Voice Settings**. Of the devices with this on, speech plays on the one you used last. Not synced between machines."
         }
       }
     },

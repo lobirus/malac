@@ -48,6 +48,25 @@ export interface Banner {
   actions: { label: string; command: string; args?: unknown[]; primary?: boolean }[];
 }
 
+/** The voice buttons the chat shows: each only while the daemon has the feature ready. */
+export interface VoiceOffer {
+  /** The microphone button in the composer. */
+  dictation: boolean;
+  /** The talk button in the header. */
+  talk: boolean;
+  /** Why voice cannot work in this window (shown when a button is used); null when it can. */
+  blocked: string | null;
+}
+
+/** A file to open in an editor or save: a shared one by id, else the data itself. */
+export interface MediaFile {
+  id?: string;
+  name: string;
+  media_type: string;
+  /** Base64, for images that are not shared files (tool results, attachments). */
+  data?: string;
+}
+
 export interface ChatState {
   connection: { state: ConnectionState; detail: string };
   banners: Banner[];
@@ -78,6 +97,7 @@ export interface ChatState {
   commands: SlashCompletion[];
   /** The daemon's address when it runs on another machine: files are uploaded to it. */
   remote: string | null;
+  voice: VoiceOffer;
 }
 
 export type ToWebview =
@@ -94,7 +114,11 @@ export type ToWebview =
   | { type: "attach"; paths: { path: string; label: string }[]; images?: ImageInput[] }
   | { type: "focus"; text?: string }
   | { type: "sent"; ok: boolean; error?: string; notes?: string[] }
-  | { type: "toast"; level: "info" | "warning" | "error"; message: string };
+  | { type: "toast"; level: "info" | "warning" | "error"; message: string }
+  /** A shared file's contents (for images shown inline), or why it cannot be shown. */
+  | { type: "shared"; id: string; media_type?: string; data?: string; error?: string }
+  /** The chat's recording: started, being transcribed, or done (with the text or an error). */
+  | { type: "dictation"; state: "recording" | "transcribing" | "done"; started?: number; text?: string; error?: string };
 
 export type FromWebview =
   | { type: "ready" }
@@ -116,4 +140,7 @@ export type FromWebview =
   | { type: "openFile"; path: string; line?: number }
   | { type: "openAgent"; agent: string }
   | { type: "command"; command: string; args?: unknown[] }
-  | { type: "loadImages"; agent: string };
+  | { type: "loadImages"; agent: string }
+  | { type: "loadShared"; id: string }
+  | { type: "media"; action: "open" | "save"; file: MediaFile }
+  | { type: "dictation"; action: "toggle" | "stop" | "cancel" };

@@ -118,6 +118,58 @@ export interface JobView {
   tab: string | null;
 }
 
+/** One voice feature. Ready when `enabled` and `model` is set. */
+export interface VoiceFeature {
+  enabled: boolean;
+  /** The model in use: `configured`, else the first of `models`; null when nothing can do it. */
+  model: string | null;
+  configured?: string | null;
+  /** For speech and talk mode. */
+  voice?: string | null;
+  /** `provider/model` names that can do it; speech may list `system`. */
+  models: string[];
+}
+
+/** What dictation, speech and talk mode offer (snapshot `voice`, `voice` broadcasts, `/api/voice`). */
+export interface VoiceStatus {
+  dictation: VoiceFeature;
+  speech: VoiceFeature;
+  talk: VoiceFeature;
+  language?: string | null;
+  voices: string[];
+  checked?: string | null;
+}
+
+export type VoiceFeatureName = "dictation" | "speech" | "talk";
+
+export function featureReady(feature: VoiceFeature | null | undefined): boolean {
+  return Boolean(feature?.enabled && feature.model);
+}
+
+/** A sentence to read aloud, for the connection whose listener id it names. */
+export interface SayMessage {
+  type: "say";
+  id: string;
+  text: string;
+  reason: "approval" | "agent" | "finished" | "failed" | string;
+  tab: string | null;
+  agent: string | null;
+  listener: number;
+}
+
+/** `PUT /api/voice`: any of these; null or "" removes a setting. */
+export interface VoiceSettings {
+  dictation?: boolean | null;
+  dictation_model?: string | null;
+  language?: string | null;
+  speech?: boolean | null;
+  speech_model?: string | null;
+  speech_voice?: string | null;
+  talk?: boolean | null;
+  talk_model?: string | null;
+  talk_voice?: string | null;
+}
+
 export interface Snapshot {
   type: "snapshot";
   client_ref?: string;
@@ -130,6 +182,8 @@ export interface Snapshot {
   control?: unknown;
   models: string[];
   default_model: string | null;
+  /** Older daemons have none. */
+  voice?: VoiceStatus | null;
 }
 
 export type Block =

@@ -7,7 +7,7 @@ import * as vscode from "vscode";
 import type { DaemonClient } from "../connection/client";
 import type { DaemonStore } from "../model/store";
 import { tabTitle } from "../model/surfaces";
-import { ChatController } from "./controller";
+import { ChatController, ChatVoice } from "./controller";
 import { ChatEnvironment, SurfaceHost } from "./environment";
 import type { FromWebview, ToWebview } from "./messages";
 
@@ -36,11 +36,11 @@ export class ChatPanel extends SurfaceHost implements vscode.Disposable {
     client: DaemonClient,
     readonly panel: vscode.WebviewPanel,
     start: { tab: string | null; agent: string | null | undefined },
-    options: { includeCurrentFile: boolean },
+    options: { includeCurrentFile: boolean; voice?: ChatVoice },
   ) {
     super(env);
     this.local.set("chat.tab", start.tab);
-    this.controller = new ChatController(store, client, this, { includeCurrentFile: options.includeCurrentFile, titles: false });
+    this.controller = new ChatController(store, client, this, { includeCurrentFile: options.includeCurrentFile, voice: options.voice, titles: false });
     if (start.tab && start.agent !== undefined) this.controller.selectTab(start.tab, start.agent);
     const media = vscode.Uri.joinPath(env.context.extensionUri, "media");
     panel.iconPath = { light: vscode.Uri.joinPath(media, "pig-light.svg"), dark: vscode.Uri.joinPath(media, "pig-dark.svg") };
