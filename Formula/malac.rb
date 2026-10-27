@@ -1,8 +1,8 @@
 class Malac < Formula
   desc "Multi-Agent Loop for Autonomous Coding"
   homepage "https://github.com/lobirus/malac"
-  url "https://github.com/lobirus/malac/archive/refs/tags/v1.1.1.tar.gz"
-  sha256 "c77dcd0f1819796f7e238ac55eba94f8e7ce82f05b4f8000087c7f8e039604b0"
+  url "https://github.com/lobirus/malac/archive/refs/tags/v1.2.0.tar.gz"
+  sha256 "fc9ee26173b10b98fc0012d391ec63d0eeea34dab92fca136acbc32d84cc9dc5"
   license "MIT"
   head "https://github.com/lobirus/malac.git", branch: "main"
 
