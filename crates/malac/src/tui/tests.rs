@@ -183,6 +183,7 @@ fn snapshot() -> Snapshot {
         default_model: Some("lora/smart".into()),
         remote: Default::default(),
         awake: Default::default(),
+        voice: Default::default(),
     }
 }
 
@@ -1777,6 +1778,405 @@ async fn at_lists_the_daemons_files_when_it_is_elsewhere() {
     );
 }
 
+// Voice and the files malac sends.
+
+/// Dictation, speech and talk mode all ready, as a daemon with an audio
+/// provider reports them.
+fn voice_ready() -> crate::protocol::VoiceStatus {
+    let feature = |model: &str, voice: Option<&str>| crate::protocol::VoiceFeature {
+        enabled: true,
+        model: Some(model.into()),
+        configured: None,
+        voice: voice.map(Into::into),
+        models: vec![model.into()],
+    };
+    crate::protocol::VoiceStatus {
+        dictation: feature("audio/whisper-1", None),
+        speech: feature("audio/tts-1", Some("alloy")),
+        talk: feature("audio/gpt-realtime", Some("marin")),
+        language: None,
+        voices: vec!["alloy".into(), "marin".into()],
+        checked: None,
+    }
+}
+
+fn voice_app() -> App {
+    let mut app = app();
+    // Whatever another test left in terminal.json.
+    app.speak = true;
+    app.on_message(ServerMessage::Voice {
+        voice: voice_ready(),
+    });
+    app
+}
+
+fn voice_calls(app: &App) -> Vec<String> {
+    std::mem::take(&mut *app.backend.voice.lock().unwrap())
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+fn flash(app: &App) -> String {
+    app.flash
+        .as_ref()
+        .map(|f| f.text.clone())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn dictation_types_into_the_prompt() {
+    let mut app = app();
+    // Without a model the key says what is missing.
+    let action = app.on_key(ctrl('x'), false).unwrap();
+    app.perform(action).await;
+    assert!(app.dictation.is_none());
+    assert!(flash(&app).contains("dictation is off"), "{}", flash(&app));
+    assert!(!render(&mut app, 100, 24).contains("^X dictate"));
+
+    let mut app = voice_app();
+    sent(&app);
+    assert!(render(&mut app, 100, 24).contains("enter send · @ attach a file · ^X dictate"));
+    type_text(&mut app, "make");
+    let action = app.on_key(ctrl('x'), false).unwrap();
+    assert_eq!(action, Action::Dictate);
+    app.perform(action).await;
+    assert_eq!(voice_calls(&app), ["dictate"]);
+    let frame = render(&mut app, 100, 24);
+    assert!(
+        frame.contains("● recording 0:00 · ^X or enter stops · esc cancels"),
+        "{frame}"
+    );
+    // Enter stops it rather than sending the prompt.
+    key(&mut app, KeyCode::Enter).await;
+    assert!(sent(&app).is_empty());
+    assert!(render(&mut app, 100, 24).contains("transcribing…"));
+    app.on_update(Update::Dictated(Ok("the button green".into())));
+    assert!(app.dictation.is_none());
+    assert_eq!(app.editor.text(), "make the button green");
+    assert!(!render(&mut app, 100, 24).contains("transcribing"));
+
+    // Esc throws a recording away; a late answer changes nothing.
+    key(&mut app, KeyCode::F(1)).await;
+    app.overlay = None;
+    let action = app.on_key(ctrl('x'), false).unwrap();
+    app.perform(action).await;
+    key(&mut app, KeyCode::Esc).await;
+    assert!(app.dictation.is_none());
+    app.on_update(Update::Dictated(Ok("ignored".into())));
+    assert_eq!(app.editor.text(), "make the button green");
+
+    // Failures say why.
+    let action = app.on_key(ctrl('x'), false).unwrap();
+    app.perform(action).await;
+    app.on_update(Update::Dictated(Err("no microphone".into())));
+    assert_eq!(flash(&app), "dictation: no microphone");
+}
+
+#[tokio::test]
+async fn speech_plays_the_sentences_meant_for_this_terminal() {
+    let mut app = voice_app();
+    assert_eq!(
+        sent_json(&app),
+        [json!({"type": "voice_listen", "on": true})]
+    );
+    app.on_update(Update::Reply(
+        Reply::Listen,
+        Ok(ServerMessage::VoiceListening {
+            client_ref: None,
+            listener: Some(7),
+        }),
+    ));
+    assert_eq!(app.listener, Some(7));
+    let say = |id: &str, reason: &str, listener: u64| ServerMessage::Say {
+        id: id.into(),
+        text: "malac needs your approval to run cargo publish.".into(),
+        reason: reason.into(),
+        tab: Some(TAB.into()),
+        agent: Some(AGENT.into()),
+        listener,
+    };
+    app.on_message(say("s1", "approval", 7));
+    app.on_message(say("s2", "approval", 8));
+    assert_eq!(voice_calls(&app), ["say s1"]);
+    let frame = render(&mut app, 100, 24);
+    assert!(frame.contains("said aloud: malac needs your approval to run cargo publish."));
+    // What the agent says with `say` already shows as the tool call.
+    app.on_message(say("s3", "agent", 7));
+    assert_eq!(voice_calls(&app), ["say s3"]);
+
+    // `/speak off` stops listening; reconnecting listens again when on.
+    type_text(&mut app, "/speak off");
+    key(&mut app, KeyCode::Enter).await;
+    assert!(!app.speak);
+    assert_eq!(
+        sent_json(&app),
+        [json!({"type": "voice_listen", "on": false})]
+    );
+    app.on_message(say("s4", "approval", 7));
+    assert!(voice_calls(&app).is_empty());
+    type_text(&mut app, "/speak");
+    key(&mut app, KeyCode::Enter).await;
+    assert!(app.speak);
+    assert_eq!(flash(&app), "this terminal speaks when malac does");
+    assert_eq!(
+        sent_json(&app),
+        [json!({"type": "voice_listen", "on": true})]
+    );
+    app.disconnected();
+    assert_eq!(app.listener, None);
+}
+
+#[tokio::test]
+async fn voice_status_and_settings() {
+    let mut app = voice_app();
+    type_text(&mut app, "/voice");
+    key(&mut app, KeyCode::Enter).await;
+    let frame = render(&mut app, 120, 30);
+    assert!(
+        frame.contains("dictation  ready       audio/whisper-1  Ctrl-X in the prompt"),
+        "{frame}"
+    );
+    assert!(frame.contains(
+        "speech     ready       audio/tts-1 · voice alloy  on this terminal · /speak off"
+    ));
+    assert!(frame.contains("talk       ready       audio/gpt-realtime · voice marin  /talk"));
+    assert!(frame.contains("change: /voice <setting> <value>"));
+
+    type_text(&mut app, "/voice speech false");
+    key(&mut app, KeyCode::Enter).await;
+    assert_eq!(voice_calls(&app), [r#"set {"speech":false}"#]);
+    type_text(&mut app, "/voice talk_voice cedar");
+    key(&mut app, KeyCode::Enter).await;
+    assert_eq!(voice_calls(&app), [r#"set {"talk_voice":"cedar"}"#]);
+    type_text(&mut app, "/voice loudness 11");
+    key(&mut app, KeyCode::Enter).await;
+    assert!(voice_calls(&app).is_empty());
+    assert!(render(&mut app, 120, 30).contains("no voice setting `loudness`"));
+
+    // The daemon's answer updates what the interface shows.
+    sent(&app);
+    app.on_update(Update::Reply(
+        Reply::Listen,
+        Ok(ServerMessage::VoiceListening {
+            client_ref: None,
+            listener: Some(3),
+        }),
+    ));
+    let mut off = voice_ready();
+    off.speech.enabled = false;
+    app.on_update(Update::Rest(
+        Rest::VoiceSet,
+        Ok(serde_json::to_value(&off).unwrap()),
+    ));
+    assert_eq!(flash(&app), "voice settings saved");
+    assert!(!app.voice.speech.enabled);
+    // Speech went off, so this terminal stops listening.
+    assert_eq!(
+        sent_json(&app),
+        [json!({"type": "voice_listen", "on": false})]
+    );
+    assert_eq!(app.listener, None);
+
+    // The View menu has the switches.
+    let items = app.menu_items(4);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for label in [
+        "Dictate",
+        "Talk mode",
+        "Speak on this terminal",
+        "Speech",
+        "Voice settings…",
+    ] {
+        assert!(labels.contains(&label), "{labels:?}");
+    }
+    let speech = items.iter().find(|i| i.label == "Speech").unwrap();
+    assert_eq!(speech.checked, Some(false));
+    assert_eq!(
+        speech.action,
+        Some(Action::SetVoice("speech".into(), "true".into()))
+    );
+}
+
+fn shared_tag(id: &str, name: &str, media_type: &str, size: u64) -> String {
+    malac_core::shared::SharedFile {
+        id: id.into(),
+        name: name.into(),
+        media_type: media_type.into(),
+        size,
+    }
+    .tag()
+}
+
+fn tool_result(app: &mut App, call: &str, tool: &str, output: String) {
+    emit(
+        app,
+        Event::ToolStarted {
+            call_id: call.into(),
+            tool: tool.into(),
+            summary: String::new(),
+            input: json!({}),
+        },
+    );
+    emit(
+        app,
+        Event::ToolFinished {
+            call_id: call.into(),
+            tool: tool.into(),
+            output,
+            is_error: false,
+            millis: 40,
+        },
+    );
+}
+
+#[tokio::test]
+async fn files_malac_sends_show_and_open() {
+    let mut app = app();
+    type_text(&mut app, "/open");
+    key(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        flash(&app),
+        "nothing to open: malac has sent no files or images here"
+    );
+
+    tool_result(
+        &mut app,
+        "c1",
+        "browser_screenshot",
+        "Took a screenshot.\n[image/png image]".into(),
+    );
+    let output = format!(
+        "Sent to the user: shot.png, notes.txt.\n<caption>The settings page after the fix</caption>\n{}\n{}",
+        shared_tag("0193a1", "shot.png", "image/png", 84_211),
+        shared_tag("0193a2", "notes.txt", "text/plain", 18),
+    );
+    tool_result(&mut app, "c2", "send_to_user", output);
+    let frame = render(&mut app, 100, 24);
+    assert!(
+        frame.contains("● sent you 2 files  The settings page after the fix"),
+        "{frame}"
+    );
+    assert!(frame.contains("shot.png  82.2 KB · image"), "{frame}");
+    assert!(frame.contains("notes.txt  18 B · TXT file"));
+    assert!(!frame.contains("<shared"));
+    assert!(frame.contains("1 image · /open"));
+
+    // `/open` is the newest, `/open 3` the screenshot before them.
+    type_text(&mut app, "/open");
+    key(&mut app, KeyCode::Enter).await;
+    type_text(&mut app, "/open 3");
+    key(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        voice_calls(&app),
+        ["open notes.txt", "open browser_screenshot image 1"]
+    );
+    type_text(&mut app, "/open 4");
+    key(&mut app, KeyCode::Enter).await;
+    assert!(flash(&app).starts_with("there are 3 files and images here"));
+
+    // A click on a file's row opens that file.
+    let (x, y) = find(&frame, "shot.png");
+    let action = click(&mut app, x, y, MouseButton::Left).unwrap();
+    app.perform(action).await;
+    assert_eq!(voice_calls(&app), ["open shot.png"]);
+    // So does the context menu, and `o` on a selected entry.
+    click(&mut app, x, y, MouseButton::Right);
+    let action = app.on_key(press(KeyCode::Char('o')), false).unwrap();
+    assert!(matches!(action, Action::OpenEntry(_, 0)), "{action:?}");
+    app.overlay = None;
+    let (x, y) = find(&frame, "browser_screenshot");
+    click(&mut app, x, y, MouseButton::Right);
+    let frame = render(&mut app, 100, 24);
+    assert!(frame.contains("Open image"));
+}
+
+#[tokio::test]
+async fn talk_mode_shows_in_the_transcript_and_the_status_line() {
+    let mut app = app();
+    type_text(&mut app, "/talk");
+    key(&mut app, KeyCode::Enter).await;
+    assert!(app.talk.is_none());
+    assert!(flash(&app).contains("talk mode is off"), "{}", flash(&app));
+
+    let mut app = voice_app();
+    type_text(&mut app, "/talk");
+    key(&mut app, KeyCode::Enter).await;
+    assert_eq!(flash(&app), "not connected to the daemon");
+
+    app.talk = Some(super::voice::TalkView {
+        talk: crate::voice::Talk::idle(),
+        session: 1,
+        agent: Some(AGENT.into()),
+        state: crate::voice::TalkState::Connecting,
+    });
+    use crate::voice::{TalkEvent, TalkState};
+    app.on_update(Update::Talk(
+        1,
+        TalkEvent::Ready {
+            model: "audio/gpt-realtime".into(),
+            voice: "marin".into(),
+        },
+    ));
+    app.on_update(Update::Talk(1, TalkEvent::State(TalkState::Speaking)));
+    app.on_update(Update::Talk(
+        1,
+        TalkEvent::Said {
+            you: true,
+            text: "make the button green".into(),
+        },
+    ));
+    app.on_update(Update::Talk(
+        1,
+        TalkEvent::Tool("Asked malac: make the button green".into()),
+    ));
+    // Another session's events are not this one's.
+    app.on_update(Update::Talk(9, TalkEvent::Closed("old".into())));
+    assert!(app.talk.is_some());
+    app.flash = None;
+    let frame = render(&mut app, 110, 24);
+    assert!(
+        frame.contains("talk mode · audio/gpt-realtime · voice marin"),
+        "{frame}"
+    );
+    assert!(frame.contains("you · make the button green"));
+    assert!(frame.contains("voice · Asked malac: make the button green"));
+    assert!(
+        frame.contains("● talk · speaking · microphone paused · Esc ends"),
+        "{frame}"
+    );
+    // Dictation waits for talk mode to end, and Esc ends it.
+    let action = app.on_key(ctrl('x'), false).unwrap();
+    app.perform(action).await;
+    assert!(app.dictation.is_none());
+    assert_eq!(app.on_key(press(KeyCode::Esc), false), Some(Action::Talk));
+    app.on_update(Update::Talk(1, TalkEvent::Closed("talk mode ended".into())));
+    assert!(app.talk.is_none());
+    assert_eq!(flash(&app), "talk mode ended");
+}
+
+#[tokio::test]
+async fn help_lists_the_voice_keys_and_commands() {
+    let mut app = app();
+    key(&mut app, KeyCode::F(1)).await;
+    let frame = render(&mut app, 120, 50);
+    assert!(frame.contains("Ctrl-X"), "{frame}");
+    assert!(frame.contains("dictate: speak"));
+    for _ in 0..6 {
+        key(&mut app, KeyCode::PageDown).await;
+    }
+    let frame = render(&mut app, 120, 50);
+    for command in [
+        "/open [n]",
+        "/talk",
+        "/speak [on|off]",
+        "/voice [setting value]",
+    ] {
+        assert!(frame.contains(command), "{command}: {frame}");
+    }
+}
+
 // Against a real daemon.
 
 /// Replies with queued messages, as a provider.
@@ -1960,6 +2360,100 @@ async fn two_terminals_share_a_workspace() {
     b.until("B has it", |app| app.tabs.len() == 2).await;
     assert_eq!(b.app.active, 0, "B stays where it was");
     assert_eq!(b.app.tabs[1].cwd, notes.canonicalize().unwrap());
+
+    hub.request_stop("test");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_and_images_open_through_the_daemon() {
+    let home = scratch_home();
+    let dir = home.join("project/voice-files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("notes.txt"), "remember the milk\n").unwrap();
+    let png = b"\x89PNG\r\n\x1a\nnot really an image".to_vec();
+    std::fs::write(dir.join("dot.png"), &png).unwrap();
+    let script = Arc::new(Script::default());
+    script.0.lock().unwrap().extend([
+        Message::assistant(vec![Block::ToolUse {
+            id: "r1".into(),
+            name: "read".into(),
+            input: json!({"path": "dot.png"}),
+        }]),
+        Message::assistant(vec![Block::ToolUse {
+            id: "s1".into(),
+            name: "send_to_user".into(),
+            input: json!({"files": ["notes.txt"], "message": "the notes"}),
+        }]),
+        Message::assistant(vec![Block::text("shared them")]),
+    ]);
+    let args = ServeArgs {
+        port: Some(0),
+        host: Some("127.0.0.1".into()),
+        ..Default::default()
+    };
+    let daemon = Daemon::start(&args, false).await.unwrap();
+    daemon.hub().insert_provider("mock", script.clone());
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+
+    let mut term = Term::open(
+        &file,
+        Launch {
+            workspace: WorkspaceChoice::New,
+            cwd: dir.clone(),
+            name: Some("files".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    term.app.send("share the notes".into());
+    term.until("the turn ends", |app| shows(app, "shared them"))
+        .await;
+    let frame = render(&mut term.app, 100, 30);
+    assert!(frame.contains("sent you a file  the notes"), "{frame}");
+    assert!(frame.contains("notes.txt  18 B · TXT file"), "{frame}");
+    assert!(frame.contains("1 image · /open"), "{frame}");
+
+    // The newest is the shared file, downloaded from the daemon.
+    let opened = |name: &str| {
+        let name = name.to_owned();
+        move |app: &App| {
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text == format!("opened {name}"))
+        }
+    };
+    term.app.perform(Action::OpenFile(1)).await;
+    term.until("the notes open", opened("notes.txt")).await;
+    let path = super::voice::OPENED
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "remember the milk\n"
+    );
+    // Before it, the image `read` returned, from the saved conversation.
+    term.app.perform(Action::OpenFile(2)).await;
+    term.until("the image opens", opened("read image 1")).await;
+    let path = super::voice::OPENED
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(path.extension().unwrap(), "png");
+    assert_eq!(std::fs::read(&path).unwrap(), png);
+    let opened = std::mem::take(&mut *super::voice::OPENED.lock().unwrap());
+    for path in opened {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+    let _ = std::fs::remove_dir(std::env::temp_dir().join("malac-open"));
 
     hub.request_stop("test");
     server.await.unwrap().unwrap();

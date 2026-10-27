@@ -162,6 +162,11 @@ pub enum Command {
     KeepAwake {
         mode: KeepAwake,
     },
+    /// This connection plays speech (`on`) or stops. The daemon speaks on
+    /// the listening connection that sent a command last.
+    VoiceListen {
+        on: bool,
+    },
     Ping,
 }
 
@@ -395,6 +400,27 @@ pub enum ServerMessage {
     Awake {
         awake: AwakeStatus,
     },
+    /// What dictation, speech and talk mode offer changed.
+    Voice {
+        voice: VoiceStatus,
+    },
+    /// A sentence to read aloud, on the connection whose `listener` it is:
+    /// fetch its audio from `/api/voice/say/{id}` and play it.
+    Say {
+        id: String,
+        text: String,
+        /// `approval`, `agent` (its `say` tool), `finished` or `failed`.
+        reason: String,
+        tab: Option<TabId>,
+        agent: Option<AgentId>,
+        listener: u64,
+    },
+    /// The reply to `voice_listen`: this connection's listener id, or null.
+    VoiceListening {
+        #[serde(default)]
+        client_ref: Option<String>,
+        listener: Option<u64>,
+    },
     /// Settings were applied; refetch cached resources.
     Reloaded,
     /// The connection fell behind and missed `skipped` messages; resync.
@@ -420,7 +446,8 @@ impl ServerMessage {
             | ServerMessage::WorkspaceOpened { client_ref, .. }
             | ServerMessage::Jobs { client_ref, .. }
             | ServerMessage::JobOutput { client_ref, .. }
-            | ServerMessage::Control { client_ref, .. } => client_ref.as_deref(),
+            | ServerMessage::Control { client_ref, .. }
+            | ServerMessage::VoiceListening { client_ref, .. } => client_ref.as_deref(),
             _ => None,
         }
     }
@@ -437,7 +464,8 @@ impl ServerMessage {
             | ServerMessage::WorkspaceOpened { client_ref, .. }
             | ServerMessage::Jobs { client_ref, .. }
             | ServerMessage::JobOutput { client_ref, .. }
-            | ServerMessage::Control { client_ref, .. } => *client_ref = reference,
+            | ServerMessage::Control { client_ref, .. }
+            | ServerMessage::VoiceListening { client_ref, .. } => *client_ref = reference,
             _ => {}
         }
         self
@@ -465,6 +493,8 @@ pub struct Snapshot {
     pub remote: RemoteStatus,
     #[serde(default)]
     pub awake: AwakeStatus,
+    #[serde(default)]
+    pub voice: VoiceStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -654,6 +684,41 @@ pub enum TunnelState {
     Running,
     Failed,
     Stopped,
+}
+
+/// Dictation, speech and talk mode: whether each is on and which model it uses.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceStatus {
+    pub dictation: VoiceFeature,
+    pub speech: VoiceFeature,
+    pub talk: VoiceFeature,
+    /// Language hint for dictation.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Voices speech and talk models know.
+    #[serde(default)]
+    pub voices: Vec<String>,
+    /// When the providers' model lists were last read.
+    #[serde(default)]
+    pub checked: Option<DateTime<Utc>>,
+}
+
+/// One voice feature. It is ready when `enabled` and `model` is set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceFeature {
+    pub enabled: bool,
+    /// The model in use: `configured`, else the first of `models`. Null
+    /// when no model can do it.
+    pub model: Option<String>,
+    /// The model the settings name, if any.
+    #[serde(default)]
+    pub configured: Option<String>,
+    /// For speech and talk mode.
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// Models that can do it, as `provider/model`; speech may list `system`.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// Whether the daemon keeps the machine from sleeping, and why.

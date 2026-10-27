@@ -92,6 +92,10 @@ pub enum Event {
         status: TurnStatus,
         text: String,
     },
+    /// A sentence the agent wants read aloud (`say`).
+    Say {
+        text: String,
+    },
     AgentFinished {
         status: TurnStatus,
         report: String,

@@ -34,6 +34,7 @@ use super::awake::{self, Awake, Runner, SystemRunner, Work};
 use super::store::{Store, Tab, Workspace};
 use super::tunnel;
 use super::uploads;
+use super::voice::Voice;
 use crate::protocol::{
     AgentView, AttachmentInput, AwakeStatus, Command, ControlStatus, DaemonInfo, DaemonStatus,
     ImageInput, JobView, Launch, PairLink, Pairing, PendingApproval, RemoteStatus, RemoteUrl,
@@ -74,6 +75,8 @@ struct Listen {
 pub struct Conn {
     pub workspace: Option<WorkspaceId>,
     pub version: Option<String>,
+    /// Its listener id while it plays speech (`voice_listen`).
+    pub listener: Option<u64>,
 }
 
 pub struct Hub {
@@ -103,6 +106,7 @@ pub struct Hub {
     /// The tunnel's last status, readable without waiting.
     tunnel_status: Mutex<Option<TunnelStatus>>,
     listen: Mutex<Listen>,
+    voice: Arc<Voice>,
 }
 
 struct State {
@@ -216,15 +220,35 @@ impl Hub {
             tunnel: tokio::sync::Mutex::new(None),
             tunnel_status: Mutex::new(None),
             listen: Mutex::default(),
+            voice: Arc::default(),
         })
     }
 
     fn start_tasks(self: &Arc<Self>) {
+        let base = self.base_config();
+        self.voice_changed(&base, false);
+        let hub = self.clone();
+        tokio::spawn(async move { hub.refresh_voice().await });
         self.forward_jobs();
         self.forward_host_events();
         self.start_update_checks();
         self.start_control();
         self.watch_awake();
+    }
+
+    pub fn voice(&self) -> &Arc<Voice> {
+        &self.voice
+    }
+
+    /// The daemon's configuration: the user's, without a project's.
+    pub fn base_config(&self) -> Config {
+        self.base.read().unwrap().clone()
+    }
+
+    /// Rereads the user's configuration without reloading tabs.
+    pub fn refresh_base(&self) -> Result<()> {
+        *self.base.write().unwrap() = base_config()?;
+        Ok(())
     }
 
     pub fn is_attached(&self) -> bool {
@@ -363,7 +387,7 @@ impl Hub {
         }
     }
 
-    fn publish(&self, message: &ServerMessage) {
+    pub(crate) fn publish(&self, message: &ServerMessage) {
         match serde_json::to_string(message) {
             Ok(text) => {
                 let _ = self.out.send(Arc::from(text));
@@ -621,6 +645,7 @@ impl Hub {
             default_model,
             remote: self.remote_status(),
             awake: self.awake_status(),
+            voice: self.voice.status(),
         }
     }
 
@@ -981,7 +1006,7 @@ impl Hub {
         let (workspace, tab_id) = (workspace.to_owned(), tab.to_owned());
         let task = tokio::spawn(async move {
             loop {
-                let (message, turn) = match events.recv().await {
+                let (message, turn, envelope) = match events.recv().await {
                     Ok(envelope) => {
                         let turn = matches!(
                             envelope.event,
@@ -992,15 +1017,18 @@ impl Hub {
                             workspace: Some(workspace.clone()),
                             envelope: Box::new(Envelope::clone(&envelope)),
                         };
-                        (message, turn)
+                        (message, turn, Some(envelope))
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        (ServerMessage::Lagged { skipped }, false)
+                        (ServerMessage::Lagged { skipped }, false, None)
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
                 let Some(hub) = hub.upgrade() else { break };
                 hub.publish(&message);
+                if let Some(envelope) = envelope {
+                    hub.voice_observe(&tab_id, &envelope);
+                }
                 if turn {
                     hub.running_changed(&workspace);
                     hub.activity.notify_one();
@@ -1197,6 +1225,7 @@ impl Hub {
             bail!("saved, but {running} agents are running; stop them or wait, then apply again");
         }
         *self.base.write().unwrap() = base_config()?;
+        self.voice_changed(&self.base_config(), false);
         let tabs: Vec<TabId> = self.runtimes.lock().unwrap().keys().cloned().collect();
         for tab in tabs {
             self.unload(&tab).await;
@@ -1224,6 +1253,9 @@ impl Hub {
         conn: &mut Conn,
         command: Command,
     ) -> Result<Option<ServerMessage>> {
+        if let Some(listener) = conn.listener.filter(|_| !matches!(command, Command::Ping)) {
+            self.voice.touch(listener);
+        }
         let reply = match command {
             Command::Prompt {
                 tab,
@@ -1387,6 +1419,20 @@ impl Hub {
                 let hub = self.clone();
                 tokio::task::spawn_blocking(move || hub.update_awake(Some(mode))).await?;
                 self.ack(None, None)
+            }
+            Command::VoiceListen { on } => {
+                match (on, conn.listener) {
+                    (true, None) => conn.listener = Some(self.voice.listen()),
+                    (false, Some(listener)) => {
+                        self.voice.unlisten(listener);
+                        conn.listener = None;
+                    }
+                    _ => {}
+                }
+                ServerMessage::VoiceListening {
+                    client_ref: None,
+                    listener: conn.listener,
+                }
             }
             Command::Ping => ServerMessage::Pong { client_ref: None },
         };

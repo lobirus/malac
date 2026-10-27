@@ -54,6 +54,7 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub context: ContextConfig,
     pub plugins: PluginsConfig,
+    pub voice: VoiceConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +97,22 @@ pub struct ModelConfig {
     pub vision: Option<bool>,
     pub thinking_budget: Option<u32>,
     pub temperature: Option<f32>,
+    /// What the model does with sound, for models whose name does not say.
+    pub audio: Option<AudioKind>,
+}
+
+/// How a model handles sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioKind {
+    /// Speech to text through `/audio/transcriptions`, like `whisper-1`.
+    Transcription,
+    /// A chat model that takes audio input, like `gpt-4o-audio-preview`.
+    Input,
+    /// Text to speech through `/audio/speech`, like `gpt-4o-mini-tts`.
+    Speech,
+    /// Spoken conversation through the Realtime API, like `gpt-realtime`.
+    Realtime,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -457,6 +474,45 @@ impl Default for PluginsConfig {
     }
 }
 
+/// Speaking with malac. Each feature is offered only when a model can do it;
+/// unset models mean the first suitable one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceConfig {
+    /// Dictation: a microphone button that types what you say.
+    pub dictation: bool,
+    /// `provider/model` that turns speech into text.
+    pub dictation_model: Option<String>,
+    /// Language hint for dictation, like `en`; unset lets the model tell.
+    pub language: Option<String>,
+    /// malac speaks: approvals, questions and results worth mentioning.
+    pub speech: bool,
+    /// `provider/model` that reads text aloud, or `system` for the
+    /// operating system's voice (`say`, `espeak-ng`).
+    pub speech_model: Option<String>,
+    pub speech_voice: Option<String>,
+    /// Talk mode: a spoken conversation through an end-to-end voice model.
+    pub talk: bool,
+    pub talk_model: Option<String>,
+    pub talk_voice: Option<String>,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            dictation: true,
+            dictation_model: None,
+            language: None,
+            speech: false,
+            speech_model: None,
+            speech_voice: None,
+            talk: true,
+            talk_model: None,
+            talk_voice: None,
+        }
+    }
+}
+
 /// `$MALAC_HOME`, or `~/.malac`.
 pub fn home_dir() -> PathBuf {
     std::env::var_os("MALAC_HOME")
@@ -494,7 +550,12 @@ impl Config {
             merge(&mut merged, user);
         }
         let project_path = project_root(cwd).join(".malac").join("config.toml");
-        if let Some(mut project) = read_table(&project_path)? {
+        let home = dirs::home_dir();
+        let project_file = (!is_user_config(&project_path, &user_config_path(), home.as_deref()))
+            .then(|| read_table(&project_path))
+            .transpose()?
+            .flatten();
+        if let Some(mut project) = project_file {
             let trusted = merged
                 .get("trust_project_config")
                 .and_then(toml::Value::as_bool)
@@ -565,6 +626,13 @@ impl Config {
             "no model configured; run `malac provider add` or set `model` in ~/.malac/config.toml",
         )
     }
+}
+
+/// Whether a project's `.malac/config.toml` is really a user's: a project at
+/// the home directory finds `~/.malac/config.toml`, which is user settings
+/// even when `MALAC_HOME` points elsewhere.
+fn is_user_config(project: &Path, user: &Path, home: Option<&Path>) -> bool {
+    project == user || home.is_some_and(|home| project == home.join(".malac").join("config.toml"))
 }
 
 /// A project may name instruction files inside itself only: one that pointed
@@ -785,6 +853,23 @@ mod tests {
         assert_eq!(expand_env("Bearer ${MALAC_TEST_VAR}!"), "Bearer abc!");
         assert_eq!(expand_env("no vars"), "no vars");
         assert_eq!(expand_env("${UNTERMINATED"), "${UNTERMINATED");
+    }
+
+    #[test]
+    fn a_project_at_home_is_not_a_project_config() {
+        let home = Path::new("/Users/me");
+        let user = Path::new("/tmp/scratch/config.toml");
+        assert!(is_user_config(
+            &home.join(".malac/config.toml"),
+            user,
+            Some(home)
+        ));
+        assert!(is_user_config(user, user, Some(home)));
+        assert!(!is_user_config(
+            Path::new("/src/app/.malac/config.toml"),
+            user,
+            Some(home)
+        ));
     }
 
     #[test]

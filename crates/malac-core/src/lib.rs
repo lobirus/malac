@@ -19,8 +19,10 @@ pub mod prompt;
 pub mod provider;
 pub mod runtime;
 pub mod session;
+pub mod shared;
 pub mod tools;
 pub mod update;
+pub mod voice;
 
 pub use agent::{AgentHandle, AgentSnapshot, AgentStatus};
 pub use config::Config;

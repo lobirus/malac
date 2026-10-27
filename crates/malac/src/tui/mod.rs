@@ -23,6 +23,7 @@ mod text;
 mod theme;
 mod transcript;
 mod ui;
+mod voice;
 
 #[cfg(test)]
 mod tests;

@@ -124,13 +124,21 @@ impl DaemonFile {
     /// The WebSocket request. The token goes in a header, so proxy and
     /// tunnel logs never see it in a URL.
     fn ws_request(&self) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+        self.socket_request(&format!("/api/ws?version={}", update::CURRENT))
+    }
+
+    /// A request for one of the daemon's WebSockets, such as talk mode's
+    /// `/api/voice/talk`, with the token in a header.
+    pub fn socket_request(
+        &self,
+        path: &str,
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let base = self
             .url
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
-        let mut request =
-            format!("{base}/api/ws?version={}", update::CURRENT).into_client_request()?;
+        let mut request = format!("{base}{path}").into_client_request()?;
         request.headers_mut().insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", self.token).parse()?,
@@ -459,4 +467,94 @@ pub async fn post<T: DeserializeOwned>(
         .send()
         .await?;
     decode(response).await
+}
+
+/// One-off REST `PUT` with a JSON body.
+pub async fn put<T: DeserializeOwned>(
+    file: &DaemonFile,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<T> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = http
+        .put(format!("{}{path}", file.url))
+        .bearer_auth(&file.token)
+        .json(body)
+        .send()
+        .await?;
+    decode(response).await
+}
+
+/// One-off REST `POST` of raw bytes, such as a recording, answered with JSON.
+pub async fn upload<T: DeserializeOwned>(
+    file: &DaemonFile,
+    path: &str,
+    media_type: &str,
+    body: Vec<u8>,
+) -> Result<T> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let response = http
+        .post(format!("{}{path}", file.url))
+        .bearer_auth(&file.token)
+        .header(reqwest::header::CONTENT_TYPE, media_type)
+        .body(body)
+        .send()
+        .await?;
+    decode(response).await
+}
+
+/// One-off REST `GET` of a file, such as speech audio or a shared file:
+/// its bytes and its type.
+pub async fn download(file: &DaemonFile, path: &str) -> Result<(Vec<u8>, String)> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let response = http
+        .get(format!("{}{path}", file.url))
+        .bearer_auth(&file.token)
+        .send()
+        .await?;
+    bytes(response).await
+}
+
+/// One-off REST `POST` with a JSON body, answered with a file.
+pub async fn post_for_bytes(
+    file: &DaemonFile,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<(Vec<u8>, String)> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let response = http
+        .post(format!("{}{path}", file.url))
+        .bearer_auth(&file.token)
+        .json(body)
+        .send()
+        .await?;
+    bytes(response).await
+}
+
+async fn bytes(response: reqwest::Response) -> Result<(Vec<u8>, String)> {
+    let status = response.status();
+    let media_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let body = response.bytes().await?.to_vec();
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let message = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
+            .unwrap_or(text);
+        bail!("{message} ({status})");
+    }
+    Ok((body, media_type))
 }

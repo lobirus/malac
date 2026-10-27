@@ -47,6 +47,7 @@ Keys are looked up in `api_key_env` first, then in `~/.malac/credentials.toml` (
 | `vision` | assumed `true` | Set `false` to route images through `vision_model` |
 | `thinking_budget` | none | Anthropic extended thinking budget |
 | `temperature` | provider default | |
+| `audio` | from the name | What the model does with sound, for voice features: `transcription`, `input` (a chat model that takes audio), `speech` or `realtime`. Names with `whisper`/`transcribe`, `tts`/`speech`, `realtime` or `audio` are recognised without it. |
 
 Agents that can delegate get an "Available models" section in their system prompt: every model in the providers' `models` lists, plus any model here with a `description`, with that description and a line on matching models to tasks. `agent_spawn` takes the chosen one as `model`.
 
@@ -182,6 +183,22 @@ Plugin commands are named `<plugin>:<command>`; the part after `:` works alone w
 | `defaults` | `true` | Enable the plugins that ship with malac: [ponytail](https://ponytail.dev) (`ponytail@malac`) and malac's design guidance (`design@malac`) |
 
 Plugins, marketplaces and their files are described in [plugins.md](plugins.md). Turn one built-in plugin off with `malac plugin disable ponytail@malac`, all of them with `defaults = false`.
+
+## `[voice]`
+
+Dictation, speech and talk mode, described in [voice.md](voice.md). Each feature is offered only when a model can do it; an unset model means the first suitable one in the providers' model lists. Every app's Voice settings and `malac voice set` write these keys.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dictation` | `true` | A microphone button that types what you say |
+| `dictation_model` | first found | `provider/model` that transcribes: a transcription model, else a chat model that takes audio |
+| `language` | detected | Language hint for dictation, like `en` |
+| `speech` | `false` | malac speaks approvals, questions and results worth mentioning, and agents get a `say` tool |
+| `speech_model` | first found | A speech model, or `system` for the machine's own voice (`say`, `espeak-ng`) |
+| `speech_voice` | `alloy` | The speech model's voice (or a system voice name) |
+| `talk` | `true` | Talk mode, a spoken conversation through an end-to-end voice model |
+| `talk_model` | first found | A Realtime model, like `openai/gpt-realtime` |
+| `talk_voice` | `alloy` | The voice it speaks with |
 
 ## `[update]`
 

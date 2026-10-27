@@ -7,8 +7,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::style::Paint;
+use malac_core::attach::human_size;
 use malac_core::event::{AgentId, Envelope, Event, Level, TodoStatus, TurnStatus};
 use malac_core::message::Usage;
+use malac_core::shared;
 use malac_core::tools::truncate_chars;
 use tokio::sync::{broadcast, mpsc};
 
@@ -20,6 +22,9 @@ pub struct Renderer {
     pub show_thinking: bool,
     /// Signalled after the main agent's turn summary has been printed.
     pub turn_done: mpsc::UnboundedSender<()>,
+    /// The address of a daemon on another machine, whose shared files are
+    /// shown as links; `None` shows them where they are on this one.
+    pub shared_from: Option<String>,
 }
 
 #[derive(Default)]
@@ -149,6 +154,16 @@ impl Renderer {
                 );
             }
             Event::ToolFinished {
+                tool,
+                output,
+                is_error: false,
+                ..
+            } if tool == "send_to_user" && !shared::parse_tags(output).is_empty() => {
+                for line in shared_lines(output, self.shared_from.as_deref()) {
+                    println!("  {} {line}", "⎿".dark_grey());
+                }
+            }
+            Event::ToolFinished {
                 output,
                 is_error,
                 millis,
@@ -272,6 +287,35 @@ impl View {
     }
 }
 
+/// What `send_to_user` sent: its caption, then each file's name, size and
+/// where to find it: a path on this machine, or a link to the daemon's.
+fn shared_lines(output: &str, remote: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(caption) = output
+        .split_once("<caption>")
+        .and_then(|(_, rest)| rest.split_once("</caption>"))
+        .map(|(caption, _)| caption.trim())
+        .filter(|c| !c.is_empty())
+    {
+        lines.push(caption.to_owned());
+    }
+    for file in shared::parse_tags(output) {
+        let place = match remote {
+            Some(url) => format!("{}/api/shared/{}", url.trim_end_matches('/'), file.id),
+            None => shared::open(&file.id)
+                .map(|(path, _)| path.display().to_string())
+                .unwrap_or_else(|_| format!("~/.malac/shared/{}", file.id)),
+        };
+        lines.push(format!(
+            "{} · {} · {}",
+            file.name.bold(),
+            human_size(file.size),
+            place.underlined()
+        ));
+    }
+    lines
+}
+
 fn print_notice(level: Level, message: &str, prefix: &str) {
     match level {
         Level::Info => println!("{}", format!("{prefix}{message}").dark_grey()),
@@ -327,4 +371,22 @@ pub fn spawn_json(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_files_show_where_they_are() {
+        let output = "Sent to the user: a.png.\n<caption>The fix</caption>\n\
+                      <shared id=\"0193ab\" name=\"a.png\" type=\"image/png\" size=\"2048\"/>";
+        let remote = shared_lines(output, Some("https://box.example/"));
+        assert_eq!(remote[0], "The fix");
+        assert!(remote[1].contains("a.png"));
+        assert!(remote[1].contains("2.0 KB"), "{}", remote[1]);
+        assert!(remote[1].contains("https://box.example/api/shared/0193ab"));
+        let local = shared_lines(output, None);
+        assert!(local[1].contains("shared/0193ab"), "{}", local[1]);
+    }
 }

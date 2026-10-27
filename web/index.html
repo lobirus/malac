@@ -73,6 +73,7 @@
         <div id="tabs" class="tabs-host"></div>
         <div class="topbar-end">
           <button id="update-button" class="update-chip" type="button" hidden aria-haspopup="dialog"></button>
+          <button id="speak-toggle" class="icon-button" type="button" hidden aria-pressed="true" aria-label="Speak on this device"></button>
           <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch theme" title="Switch theme (D)"></button>
           <button id="help-button" class="icon-button" type="button" aria-label="Keyboard shortcuts and about" title="Keyboard shortcuts (?)"></button>
           <a id="settings-button" class="icon-button" href="#settings" aria-label="Settings" title="Settings (,)"></a>
@@ -99,8 +100,13 @@
               <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
               <span id="composer-model" class="composer-model"></span>
               <span class="composer-hint"><kbd>Enter</kbd> to send, <kbd>Shift</kbd> <kbd>Enter</kbd> for a new line</span>
-              <button id="stop" class="button danger" type="button" hidden title="Stop (Esc)"></button>
-              <button id="send" class="button primary icon-only" type="submit" aria-label="Send" title="Send (Enter)"></button>
+              <span id="dictation" class="dictation" role="status" hidden></span>
+              <span class="composer-actions">
+                <button id="talk" class="icon-button" type="button" hidden aria-label="Talk mode" title="Talk mode"></button>
+                <button id="dictate" class="icon-button" type="button" hidden aria-pressed="false" aria-label="Dictate"></button>
+                <button id="stop" class="button danger" type="button" hidden title="Stop (Esc)"></button>
+                <button id="send" class="button primary icon-only" type="submit" aria-label="Send" title="Send (Enter)"></button>
+              </span>
             </div>
           </div>
         </form>

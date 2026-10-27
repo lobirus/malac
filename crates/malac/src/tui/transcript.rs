@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use malac_core::attach as core_attach;
 use malac_core::event::{AgentId, Envelope, Event, Level, Todo, TodoStatus, TurnStatus};
 use malac_core::message::{Message, Role, Usage};
+use malac_core::shared::{SharedFile, parse_tags};
 use malac_core::{AgentSnapshot, Block};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,6 +19,7 @@ use super::attach;
 use super::markdown;
 use super::text::{self, RowText, sanitize};
 use super::theme::theme;
+use super::voice;
 use crate::render::tokens;
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -578,7 +580,8 @@ impl AgentView {
     fn apply(&mut self, event: &Event, show_thinking: bool) {
         let t = &mut self.transcript;
         match event {
-            Event::AgentStarted { .. } => {}
+            // `say` shows as its tool call; the daemon reads it aloud.
+            Event::AgentStarted { .. } | Event::Say { .. } => {}
             Event::ModelChanged { model } => {
                 self.model = model.clone();
                 t.push(Entry::Notice(Level::Info, format!("model: {model}")));
@@ -1141,9 +1144,55 @@ fn header(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> 
     Line::from(spans)
 }
 
+/// The caption `send_to_user` put above its files, if any.
+pub fn caption(output: &str) -> Option<&str> {
+    let start = output.find("<caption>")? + "<caption>".len();
+    let end = start + output[start..].find("</caption>")?;
+    Some(output[start..end].trim()).filter(|c| !c.is_empty())
+}
+
+/// Files malac sent: the caption, then a row per file that opens it.
+fn render_shared(tool: &ToolCall, files: &[SharedFile], width: usize, out: &mut Out) {
+    let t = theme();
+    let what = match files.len() {
+        1 => "sent you a file".to_owned(),
+        n => format!("sent you {n} files"),
+    };
+    let mut left = vec![
+        Span::raw(NEST),
+        Span::styled("● ", t.faint()),
+        Span::styled(what, t.dim().add_modifier(Modifier::BOLD)),
+    ];
+    if let Some(caption) = caption(&tool.output) {
+        left.push(Span::raw("  "));
+        left.push(Span::raw(sanitize(caption).into_owned()));
+    }
+    let meta = vec![Span::styled("click or /open", t.faint())];
+    out.push(header(left, meta, width), 4);
+    for file in files {
+        let detail = format!(
+            "  {} · {}",
+            core_attach::human_size(file.size),
+            voice::kind_label(file)
+        );
+        let row = vec![
+            Span::raw(format!("{NEST}  ")),
+            Span::styled(sanitize(&file.name).into_owned(), t.fg(t.accent)),
+            Span::styled(detail, t.dim()),
+        ];
+        out.push(text::truncate_line(Line::from(row), width), 6);
+    }
+}
+
 /// A tool call: one quiet line until expanded.
 fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mut Out) {
     let t = theme();
+    if tool.name == "send_to_user" && tool.state == ToolState::Done {
+        let files = parse_tags(&tool.output);
+        if !files.is_empty() {
+            return render_shared(tool, &files, width, out);
+        }
+    }
     let (mark, mark_style) = match tool.state {
         ToolState::Asking => ("?", t.fg(t.warning).add_modifier(Modifier::BOLD)),
         ToolState::Running => (ctx.spinner(), t.fg(t.accent)),
@@ -1166,6 +1215,14 @@ fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mu
                 ));
             } else if output_lines > 1 {
                 meta.push(Span::styled(format!("{output_lines} lines  "), t.faint()));
+            }
+            let images = voice::image_count(&tool.output);
+            if images > 0 && tool.state == ToolState::Done {
+                let noun = if images == 1 { "image" } else { "images" };
+                meta.push(Span::styled(
+                    format!("{images} {noun} · /open  "),
+                    t.faint(),
+                ));
             }
             if tool.millis > 0 {
                 meta.push(Span::styled(

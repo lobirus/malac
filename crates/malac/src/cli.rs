@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use malac_core::permission::Mode;
 
 use crate::protocol::{Launch, TabOptions, WorkspaceChoice};
-use crate::{commands, daemon, plugins, project, remotes, repl, tui, web};
+use crate::{commands, daemon, plugins, project, remotes, repl, tui, voice, web};
 
 /// Multi-Agent Loop for Autonomous Coding. `malac <prompt>` starts working
 /// on the prompt right away; `malac` alone opens an interactive session.
@@ -189,6 +189,9 @@ enum Command {
     },
     /// Give the daemon a public address through cloudflared, ngrok or Tailscale.
     Tunnel(remotes::TunnelArgs),
+    /// Dictation, speech and talk mode: their status and settings, and
+    /// using them from the terminal.
+    Voice(voice::VoiceArgs),
     /// Run the computer and browser control service (`malac-control`).
     Control {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -238,6 +241,7 @@ fn prompt_starts_with_subcommand(args: &[OsString], err: &clap::Error) -> bool {
         "control",
         "remote",
         "tunnel",
+        "voice",
     ];
     first_positional.is_some_and(|a| names.contains(&a.to_string_lossy().as_ref()))
 }
@@ -270,6 +274,7 @@ pub async fn main() -> i32 {
         Some(Command::Context(args)) => project::context(args).map(|_| 0),
         Some(Command::Remote { action }) => remotes::remote(action).await,
         Some(Command::Tunnel(args)) => remotes::tunnel(args).await,
+        Some(Command::Voice(args)) => voice::run(args).await,
         Some(Command::Control { args }) => commands::control(&args),
     };
     match result {

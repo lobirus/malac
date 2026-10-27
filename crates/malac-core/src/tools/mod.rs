@@ -8,6 +8,7 @@ mod mcp;
 mod memory;
 mod search;
 mod settings;
+mod share;
 mod shell;
 mod skill;
 mod todo;
@@ -28,6 +29,7 @@ use crate::message::Block;
 use crate::runtime::Runtime;
 
 pub use mcp::McpTool;
+pub use settings::edit as edit_config_text;
 pub(crate) use shell::shell_command;
 
 /// Output beyond this is cut from the middle before it reaches the model.
@@ -117,6 +119,38 @@ pub struct ToolContext {
     pub files: FileTracker,
     /// Variables the agent's shell commands get, like `SKILL_DIR`.
     pub env: SessionEnv,
+    /// The newest images tool results returned, for `send_to_user`.
+    pub images: RecentImages,
+}
+
+/// The last few images an agent's tools returned, as (media type, base64).
+#[derive(Clone, Default)]
+pub struct RecentImages(Arc<Mutex<std::collections::VecDeque<(String, String)>>>);
+
+impl RecentImages {
+    const KEEP: usize = 8;
+
+    pub fn push(&self, output: &ToolOutput) {
+        let mut images = self.0.lock().unwrap();
+        for block in &output.content {
+            if let Block::Image { media_type, data } = block {
+                if images.len() == Self::KEEP {
+                    images.pop_front();
+                }
+                images.push_back((media_type.clone(), data.clone()));
+            }
+        }
+    }
+
+    /// Up to `count` of the newest, oldest first.
+    pub fn newest(&self, count: usize) -> Vec<(String, String)> {
+        let images = self.0.lock().unwrap();
+        images
+            .iter()
+            .skip(images.len().saturating_sub(count))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Environment variables for an agent's shell commands, set as it works
@@ -219,6 +253,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(agents::List),
         Arc::new(settings::Settings),
         Arc::new(settings::Configure),
+        Arc::new(share::SendToUser),
+        Arc::new(share::Say),
     ]
 }
 

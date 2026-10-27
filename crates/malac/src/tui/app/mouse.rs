@@ -311,8 +311,13 @@ impl App {
                 self.copy_selection();
                 None
             }
-            Drag::Transcript { entry, .. } => {
+            Drag::Transcript { entry, start, .. } => {
                 let index = entry?;
+                if self.is_file_card(index) {
+                    // The card's first row names it; each row after is a file.
+                    let line = self.entry_line(index, start)?;
+                    return Some(Action::OpenEntry(index, line.saturating_sub(1)));
+                }
                 match &self.shown()?.transcript.items().get(index)?.entry {
                     Entry::Agent(card) => Some(Action::OpenAgent(card.id.clone())),
                     Entry::Tool(_) | Entry::Thinking { .. } => Some(Action::ToggleEntry(index)),
@@ -324,6 +329,14 @@ impl App {
                 None
             }
         }
+    }
+
+    /// The row within entry `index` that a transcript point is on.
+    fn entry_line(&self, index: usize, at: Point) -> Option<usize> {
+        let transcript = &self.shown()?.transcript;
+        let item = transcript.items().get(index)?;
+        let first = transcript.row_of(index) + usize::from(item.gap());
+        Some(at.row.saturating_sub(first))
     }
 
     fn select_word(&mut self, at: Point) {
@@ -418,7 +431,20 @@ impl App {
                 Action::CopyCode(index, Some(line)),
             ));
         }
+        let openable = self.entry_openable(index);
+        if let Some(first) = openable.first() {
+            let label = match first {
+                Openable::Image { .. } => "Open image",
+                Openable::Shared(_) => "Open",
+            };
+            let file = match self.is_file_card(index) {
+                true => line.saturating_sub(1).min(openable.len() - 1),
+                false => 0,
+            };
+            items.push(Item::new(label, 'o', Action::OpenEntry(index, file)));
+        }
         match &item.entry {
+            Entry::Tool(tool) if tool.name == "send_to_user" && !openable.is_empty() => {}
             Entry::Tool(tool) => {
                 let label = if tool.expanded { "Collapse" } else { "Expand" };
                 items.push(Item::new(label, 'e', Action::ToggleEntry(index)));

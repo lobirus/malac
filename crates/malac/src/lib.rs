@@ -3,6 +3,7 @@
 //! or front ends, use [`client`] and the message types in [`protocol`].
 
 mod approve;
+mod audio;
 mod cli;
 pub mod client;
 mod commands;
@@ -19,6 +20,7 @@ mod render;
 mod repl;
 mod style;
 mod tui;
+mod voice;
 mod web;
 
 pub use cli::{RunArgs, SessionOptions, main};

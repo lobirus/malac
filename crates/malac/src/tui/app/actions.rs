@@ -94,6 +94,19 @@ pub enum Action {
     RevokeDevice(String),
     RevokeNow(String),
     KeepAwake(KeepAwake),
+    /// Starts dictation, or stops it and types what was said.
+    Dictate,
+    /// Starts or ends talk mode.
+    Talk,
+    /// Whether this terminal speaks.
+    Speak(bool),
+    ShowVoice,
+    /// A voice setting and its new value, as `/voice` takes them.
+    SetVoice(String, String),
+    /// Opens the nth newest file or image malac sent, from 1.
+    OpenFile(usize),
+    /// Opens a file or image of a transcript entry: the entry and which one.
+    OpenEntry(usize, usize),
 }
 
 impl App {
@@ -197,6 +210,7 @@ impl App {
                     .checked(mode == KeepAwake::Off),
                 );
                 items.push(Item::note(self.awake_summary()));
+                items.extend(self.voice_items());
                 if self.control.enabled {
                     items.push(Item::separator());
                     items.push(Item::note(self.control_summary()));
@@ -269,6 +283,40 @@ impl App {
             true => "add a daemon: malac remote add <name> <url> --pair <code>",
             false => "more: malac remote add <name> <url> --pair <code>",
         }));
+        items
+    }
+
+    /// The View menu's voice section: what this terminal does with it, and
+    /// the daemon's switches.
+    fn voice_items(&self) -> Vec<Item> {
+        use crate::voice::ready;
+        let v = &self.voice;
+        let mut items = vec![
+            Item::separator(),
+            Item::new("Dictate", 'd', Action::Dictate)
+                .hint("^X")
+                .enabled(ready(&v.dictation) && self.talk.is_none()),
+            Item::new("Talk mode", 'o', Action::Talk)
+                .hint("/talk")
+                .checked(self.talk.is_some())
+                .enabled(ready(&v.talk) || self.talk.is_some()),
+            Item::new("Speak on this terminal", 'r', Action::Speak(!self.speak))
+                .hint("/speak")
+                .checked(self.speak),
+        ];
+        for (label, key, name, feature) in [
+            ("Dictation", 'i', "dictation", &v.dictation),
+            ("Speech", 'h', "speech", &v.speech),
+            ("Talk", 'a', "talk", &v.talk),
+        ] {
+            let value = (!feature.enabled).to_string();
+            items.push(
+                Item::new(label, key, Action::SetVoice(name.to_owned(), value))
+                    .hint(feature.model.as_deref().unwrap_or("no model"))
+                    .checked(feature.enabled),
+            );
+        }
+        items.push(Item::new("Voice settings…", 'v', Action::ShowVoice).hint("/voice"));
         items
     }
 
@@ -724,7 +772,7 @@ impl App {
     }
 
     /// The tab's id, or a flash saying it is not ready.
-    fn tab_id(&mut self) -> Option<TabId> {
+    pub(super) fn tab_id(&mut self) -> Option<TabId> {
         let id = self.tab().id.clone();
         if id.is_none() {
             self.flash("this tab is still being created");
@@ -1181,6 +1229,13 @@ impl App {
                 self.overlay = Some(Overlay::Remote(RemoteDialog::new()));
                 self.backend.devices();
             }
+            Action::Dictate => self.dictate(),
+            Action::Talk => self.toggle_talk(),
+            Action::Speak(on) => self.set_speak(on),
+            Action::ShowVoice => self.show_voice(),
+            Action::SetVoice(key, value) => self.set_voice(&key, &value),
+            Action::OpenFile(n) => self.open_nth(n),
+            Action::OpenEntry(index, file) => self.open_entry(index, file),
             Action::KeepAwake(mode) => {
                 self.backend.command(Command::KeepAwake { mode });
                 self.flash(match mode {

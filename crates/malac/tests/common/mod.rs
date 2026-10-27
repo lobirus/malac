@@ -61,7 +61,13 @@ keep_awake = "off"
             ),
         )
         .unwrap();
-        unsafe { std::env::set_var("MALAC_HOME", &dir) };
+        unsafe {
+            std::env::set_var("MALAC_HOME", &dir);
+            // The built-in providers must not reach real APIs with the developer's keys.
+            for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+                std::env::remove_var(key);
+            }
+        }
         dir
     })
 }

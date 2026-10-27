@@ -50,6 +50,7 @@
   --diff-add: light-dark(#ebf7ef, rgb(74 222 128 / 0.1));
   --diff-del: light-dark(#fcecec, rgb(248 113 113 / 0.1));
   --overlay: light-dark(rgb(10 10 10 / 0.3), rgb(0 0 0 / 0.66));
+  --viewer: light-dark(#f0f0f0, #050505);
   --selection: light-dark(rgb(22 163 74 / 0.18), rgb(74 222 128 / 0.24));
 
   --tok-keyword: var(--red);
@@ -1713,20 +1714,6 @@ button.chip:hover {
   gap: 8px;
 }
 
-.modal.lightbox {
-  width: auto;
-  max-width: min(1200px, 100%);
-}
-
-.modal.lightbox img {
-  display: block;
-  max-width: 100%;
-  max-height: 76dvh;
-  margin: 0 auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-
 .modal.help {
   width: min(680px, 100%);
 }
@@ -2128,15 +2115,6 @@ button.chip:hover {
 
 .attachment {
   position: relative;
-}
-
-.attachment img {
-  display: block;
-  width: 56px;
-  height: 56px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  object-fit: cover;
 }
 
 .attachment-remove {
@@ -3514,6 +3492,7 @@ dl.kv.paths dt {
 .thumbs {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 8px;
   margin: 4px 0 8px;
 }
@@ -3541,6 +3520,44 @@ dl.kv.paths dt {
 
 .thumb:hover {
   border-color: var(--border-strong);
+}
+
+.thumb.loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 160px;
+  height: 120px;
+}
+
+.thumb.loading img {
+  display: none;
+}
+
+.thumb.broken {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 10px 12px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+
+.attachment .thumb {
+  display: block;
+  border: 0;
+}
+
+.attachment .thumb img {
+  width: 56px;
+  height: 56px;
+  max-width: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  object-fit: cover;
 }
 
 /* Markdown */
@@ -4558,6 +4575,570 @@ dl.kv.paths dt {
   color: var(--green);
 }
 
+/* Files an agent sent (send_to_user): images inline, other files as cards. */
+
+.share-card {
+  margin: 0 0 16px;
+}
+
+.share-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  margin-bottom: 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.share-head .icon {
+  flex: none;
+}
+
+.share-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-card[data-state="error"] .share-head {
+  color: var(--red);
+}
+
+.share-card .tool-error-line {
+  padding: 0 0 0 20px;
+  white-space: normal;
+}
+
+.share-caption {
+  margin: 0 0 8px;
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.share-card .thumbs {
+  margin: 0 0 8px;
+}
+
+.share-files {
+  display: grid;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.file-card-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-2);
+}
+
+.file-card-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-card-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-card-meta {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.file-card-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+}
+
+/* The image viewer: above the page and its dialogs, below toasts. */
+
+.viewer {
+  position: fixed;
+  z-index: 75;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--viewer);
+  color: var(--text);
+  outline: none;
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+
+.viewer-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--topbar);
+  padding: env(safe-area-inset-top, 0px) max(8px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.viewer-title {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.viewer-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-count {
+  flex: none;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.viewer-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewer-zoom {
+  min-width: 56px;
+  justify-content: center;
+}
+
+.viewer-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.viewer-action {
+  margin-left: 2px;
+}
+
+.viewer-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.viewer-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  cursor: zoom-in;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+}
+
+.viewer-stage.zoomed .viewer-image {
+  cursor: grab;
+}
+
+.viewer-stage.dragging .viewer-image {
+  cursor: grabbing;
+}
+
+.viewer-stage.animate .viewer-image {
+  transition: transform 0.18s ease;
+}
+
+.viewer-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.viewer-status strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.viewer-nav {
+  position: absolute;
+  top: calc(50% + var(--topbar) / 2);
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  transform: translateY(-50%);
+}
+
+.viewer-nav:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.viewer-nav.prev {
+  left: max(12px, env(safe-area-inset-left, 0px));
+}
+
+.viewer-nav.next {
+  right: max(12px, env(safe-area-inset-right, 0px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewer-stage.animate .viewer-image {
+    transition: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .viewer .icon-button,
+  .viewer .button.small {
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
+@media (max-width: 640px) {
+  .viewer-bar {
+    gap: 4px;
+    padding-left: max(12px, env(safe-area-inset-left, 0px));
+  }
+
+  .viewer-step,
+  .viewer-sep,
+  .viewer-action-label {
+    display: none;
+  }
+
+  .viewer-action {
+    width: 44px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-2);
+  }
+
+  .viewer-title {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .viewer-nav {
+    top: auto;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    transform: none;
+  }
+}
+
+/* Voice: dictation in the composer, the speech switch, talk mode. */
+
+.level-meter {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+}
+
+.level-bar {
+  width: 3px;
+  height: 40%;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.level-bar:nth-child(2),
+.level-bar:nth-child(4) {
+  height: 70%;
+}
+
+.level-bar:nth-child(3) {
+  height: 100%;
+}
+
+.level-bar.on {
+  background: var(--text);
+}
+
+.level-meter.large {
+  gap: 3px;
+  height: 18px;
+}
+
+.level-meter.large .level-bar {
+  width: 4px;
+}
+
+.composer.dictating .composer-model,
+.composer.dictating .composer-hint {
+  display: none;
+}
+
+.dictation {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.dictation-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.dictation-time {
+  flex: none;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.dictation-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dictation-text kbd {
+  height: 16px;
+  font-size: 10.5px;
+}
+
+#dictate.recording {
+  border-color: var(--red-border);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+#speak-toggle[aria-pressed="false"] {
+  color: var(--text-3);
+}
+
+.talk-panel {
+  position: fixed;
+  z-index: 60;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 32px));
+  max-height: min(520px, calc(100dvh - 96px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  outline: none;
+}
+
+.talk-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.talk-title {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.talk-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.talk-spacer {
+  flex: 1;
+}
+
+.talk-log {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+  padding: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.talk-log:focus-visible {
+  outline-offset: -2px;
+}
+
+.talk-empty {
+  color: var(--text-3);
+}
+
+.talk-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.talk-line .icon,
+.talk-line .pig {
+  flex: none;
+  align-self: center;
+}
+
+.talk-who {
+  flex: none;
+  width: 40px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.talk-line[data-kind="tool"],
+.talk-line[data-kind="note"] {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.talk-line[data-kind="error"] {
+  color: var(--red);
+  font-size: 12.5px;
+}
+
+.talk-foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.talk-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.talk-mute[aria-pressed="true"] {
+  border-color: var(--amber-border);
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+/* Toasts move up out of the talk panel's way. */
+.talking .toasts {
+  top: calc(var(--topbar) + 8px);
+  bottom: auto;
+}
+
+.voice-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 640px) {
+  .talk-panel {
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: auto;
+    max-height: min(70dvh, 560px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    border-width: 1px 0 0;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .talk-foot .button {
+    height: 44px;
+  }
+
+  .file-card {
+    flex-wrap: wrap;
+  }
+
+  .file-card-actions {
+    width: 100%;
+    padding-left: 26px;
+  }
+}
+
+@media (pointer: coarse) {
+  .composer-actions .icon-button,
+  #speak-toggle {
+    width: 44px;
+    height: 44px;
+  }
+
+  .file-card-actions .button {
+    height: 44px;
+  }
+}
+
 /* Responsive: the main area adapts to its own width (sidebar or not). */
 
 @container main (max-width: 960px) {
@@ -4764,8 +5345,11 @@ dl.kv.paths dt {
   }
 }
 
-.composer-bar > #stop:not([hidden]),
-.composer-bar > #stop[hidden] + #send {
+.composer-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
 }
 

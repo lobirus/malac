@@ -1,7 +1,7 @@
 // Workspaces and tabs: the workspace switcher, the tab bar, the folder
 // picker for new tabs and the file picker for prompt attachments.
 
-import { baseName, closePopover, confirmDialog, h, modal, plural, popover, promptDialog, relativeTime, setChildren, shortPath, toast } from "./dom.js";
+import { baseName, byteSize, closePopover, confirmDialog, h, modal, plural, popover, promptDialog, relativeTime, setChildren, shortPath, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import {
   api,
@@ -534,18 +534,6 @@ export function openFolderPicker({ start } = {}) {
  * for browsing, a file attaches. A typed path is read by the daemon when
  * the prompt is sent.
  */
-/** `512 B`, `2.1 KB`, `3.0 MB`, as the daemon writes sizes. */
-function byteSize(bytes) {
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
-}
-
 export function openAttachPicker(anchor, { cwd, onAdd }) {
   const input = h("input", { class: "input", type: "text", placeholder: "src/main.rs or a folder", "aria-label": "Path to attach", autocomplete: "off", spellcheck: "false" });
   const list = h("ul", { class: "fs-list compact", role: "listbox", "aria-label": "Files and folders" });

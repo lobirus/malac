@@ -82,6 +82,18 @@ export function plural(count, word, many = `${word}s`) {
   return `${count} ${count === 1 ? word : many}`;
 }
 
+/** `512 B`, `2.1 KB`, `3.0 MB`, as the daemon writes sizes. */
+export function byteSize(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
 // Numbers and time
 
 function trimZero(number) {

@@ -380,6 +380,10 @@ const KEYS: &[(&str, &str)] = &[
     ),
     ("Ctrl-V", "attach the image on the clipboard (macOS)"),
     (
+        "Ctrl-X",
+        "dictate: speak, then Ctrl-X or Enter types it in the prompt; Esc cancels",
+    ),
+    (
         "Backspace",
         "at the start of the prompt, drop the last attachment",
     ),
@@ -396,6 +400,11 @@ const KEYS: &[(&str, &str)] = &[
         "move to the transcript: ↑↓ select, Enter expand or open, y copy",
     ),
     ("[  ]", "in the transcript: previous or next answer"),
+    (
+        "o",
+        "in the transcript: open the selected entry's file or image in the viewer",
+    ),
+    ("Esc", "in talk mode (/talk): end it"),
     ("PgUp/PgDn", "scroll; Home/End on an empty prompt jump"),
     ("Ctrl-G", "toggle the sidebar"),
     (

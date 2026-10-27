@@ -33,6 +33,8 @@ export const state = {
   remote: null,
   awake: null,
   remoteChanges: 0,
+  // Dictation, speech and talk mode (VoiceStatus), from the snapshot.
+  voice: null,
   models: [],
   defaultModel: null,
   shutdown: null,
@@ -78,11 +80,15 @@ export function readToken() {
   return token;
 }
 
-/** Calls the API; a `{error}` body becomes the thrown message. */
+/**
+ * Calls the API; a `{error}` body becomes the thrown message. A Blob body
+ * (a recording, say) is sent as it is, with its own type.
+ */
 export async function api(path, { method = "GET", body } = {}) {
   const headers = { Authorization: `Bearer ${state.token}` };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const raw = body instanceof Blob;
+  if (body !== undefined) headers["Content-Type"] = raw ? body.type : "application/json";
+  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : raw ? body : JSON.stringify(body) });
   const text = await response.text();
   let data = null;
   try {
@@ -92,6 +98,22 @@ export async function api(path, { method = "GET", body } = {}) {
   }
   if (!response.ok) throw new HttpError(response.status, data?.error ?? (text || `${response.status} ${response.statusText}`));
   return data;
+}
+
+/** Fetches a file from the API (a shared file, speech audio) as a Blob. */
+export async function apiBlob(path) {
+  const response = await fetch(path, { headers: { Authorization: `Bearer ${state.token}` } });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    let message = text;
+    try {
+      message = JSON.parse(text).error ?? text;
+    } catch {
+      // A plain-text error.
+    }
+    throw new HttpError(response.status, message || `${response.status} ${response.statusText}`);
+  }
+  return response.blob();
 }
 
 // Rendering is batched per animation frame; regions register a renderer.
@@ -131,7 +153,7 @@ export function renderKeyed(slot, key, render) {
   render();
 }
 
-const ALL_REGIONS = ["sidebar", "tabs", "header", "permissions", "composer", "home", "agents", "jobs", "banners", "title", "update", "mode"];
+const ALL_REGIONS = ["sidebar", "tabs", "header", "permissions", "composer", "home", "agents", "jobs", "banners", "title", "update", "mode", "voice"];
 
 export function invalidateAll() {
   invalidate(...ALL_REGIONS);
@@ -309,6 +331,11 @@ function receive(message) {
     case "awake":
       state.awake = message.awake;
       return invalidate("settings", "header");
+    case "voice":
+      state.voice = message.voice;
+      return invalidate("voice", "settings");
+    case "say":
+      return onSay(message);
     case "notice":
       return toast(message.message, message.level === "error" ? "error" : message.level === "warning" ? "warning" : "info");
     case "reloaded":
@@ -332,6 +359,13 @@ export function setResyncHandler(fn) {
   onResync = fn;
 }
 
+let onSay = () => {};
+
+/** Called with every `say` broadcast; the page plays those for its own listener id. */
+export function setSayHandler(fn) {
+  onSay = fn;
+}
+
 function applySnapshot(snapshot) {
   state.daemon = snapshot.daemon;
   setUserHome(snapshot.daemon.user_home);
@@ -345,6 +379,7 @@ function applySnapshot(snapshot) {
   state.control = snapshot.control ?? null;
   state.remote = snapshot.remote ?? null;
   state.awake = snapshot.awake ?? null;
+  state.voice = snapshot.voice ?? null;
   state.models = snapshot.models ?? [];
   state.defaultModel = snapshot.default_model ?? null;
   state.shutdown = null;

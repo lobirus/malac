@@ -11,6 +11,7 @@ mod fs;
 mod remote;
 mod settings;
 mod usage;
+mod voice;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ const SETTINGS_JS: &str = include_str!("../../../../web/settings.js");
 const WORKSPACE_JS: &str = include_str!("../../../../web/workspace.js");
 const JOBS_JS: &str = include_str!("../../../../web/jobs.js");
 const REMOTE_JS: &str = include_str!("../../../../web/remote.js");
+const VOICE_JS: &str = include_str!("../../../../web/voice.js");
+const VIEWER_JS: &str = include_str!("../../../../web/viewer.js");
 const STYLE_CSS: &str = include_str!("../../../../web/style.css");
 const FAVICON_SVG: &str = include_str!("../../../../web/favicon.svg");
 const GEIST_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/Geist-Variable.woff2");
@@ -223,6 +226,7 @@ impl Server {
             .route("/api/usage", get(usage::summary))
             .merge(settings::routes())
             .merge(remote::routes())
+            .merge(voice::routes())
             .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
             .merge(remote::public_routes());
         let router = Router::new()
@@ -255,6 +259,11 @@ impl Server {
             .route(
                 "/remote.js",
                 get(|| async { script("remote.js", REMOTE_JS) }),
+            )
+            .route("/voice.js", get(|| async { script("voice.js", VOICE_JS) }))
+            .route(
+                "/viewer.js",
+                get(|| async { script("viewer.js", VIEWER_JS) }),
             )
             .route(
                 "/settings.js",
@@ -643,7 +652,7 @@ async fn api_ws(
 /// Browsers may open the socket from the page's own origin, as the daemon
 /// or a proxy in front of it sees it, and from VS Code webviews. Clients
 /// that are not browsers send no `Origin`.
-fn origin_allowed(origin: &str, headers: &HeaderMap) -> bool {
+pub(crate) fn origin_allowed(origin: &str, headers: &HeaderMap) -> bool {
     if origin.starts_with("vscode-webview://") || origin.starts_with("vscode-file://") {
         return true;
     }
@@ -675,6 +684,7 @@ async fn client_socket(
     let mut conn = Conn {
         workspace: None,
         version,
+        listener: None,
     };
     // Subscribed before the snapshot is taken, so no change falls between.
     let mut outbox = hub.subscribe();
@@ -756,6 +766,9 @@ async fn client_socket(
         if reply_tx.send(text).is_err() {
             break;
         }
+    }
+    if let Some(listener) = conn.listener {
+        hub.voice().unlisten(listener);
     }
     // Let queued replies go out before the socket closes.
     drop(reply_tx);

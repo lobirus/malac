@@ -60,6 +60,11 @@ pub async fn run(
         main: main.clone(),
         show_thinking,
         turn_done: done_tx,
+        shared_from: client
+            .file()
+            .connection
+            .as_ref()
+            .map(|_| client.file().url.clone()),
     }
     .spawn(bus.subscribe());
     let relay = relay(events, bus, client.clone(), tab.clone(), lock, main.clone());

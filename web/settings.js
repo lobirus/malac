@@ -8,10 +8,11 @@
 import { clone, confirmDialog, displayPath, formatDuration, fullTime, h, local, plural, relativeTime, setChildren, shortPath, toast } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { markdownNode } from "./markdown.js";
-import { api, checkControl, createTab, markAllStale, refresh, resource, state } from "./store.js";
+import { api, checkControl, createTab, invalidate, markAllStale, refresh, resource, state } from "./store.js";
 import { TAGLINE, controlSummary, updatePanel } from "./views.js";
 import { modelPicker, toggle } from "./widgets.js";
 import { remoteSection } from "./remote.js";
+import { setSpeakHere, speakHere } from "./voice.js";
 
 export const SECTIONS = [
   { id: "general", title: "General", icon: "settings", blurb: "Models, permission mode and limits for new sessions." },
@@ -25,6 +26,7 @@ export const SECTIONS = [
   { id: "context", title: "Project context", icon: "book", blurb: "What agents in the active tab read about its project." },
   { id: "profiles", title: "Profiles", icon: "layers", blurb: "Named overlays selected with malac --profile <name>." },
   { id: "interface", title: "Interface", icon: "eye", blurb: "Terminal and web interface options." },
+  { id: "voice", title: "Voice", icon: "mic", blurb: "Dictation, speech and talk mode, and the models they use." },
   { id: "remote", title: "Remote access", icon: "globe", blurb: "Other devices, pairing, tunnels and keeping the machine awake." },
   { id: "advanced", title: "Advanced", icon: "code", blurb: "Edit the configuration files as TOML." },
   { id: "about", title: "About", icon: "info", blurb: "Version, updates and where malac keeps its files." },
@@ -296,6 +298,8 @@ function textInput({ value, placeholder, onInput, id, focusKey, type = "text", i
   return input;
 }
 
+const DICTATE_HINT = `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘⇧Space" : "Ctrl+Shift+Space"} starts and stops it; Enter inserts the text, Esc cancels.`;
+
 // Settings page
 
 export class SettingsPage {
@@ -336,6 +340,10 @@ export class SettingsPage {
     if (!keepDraft || !this.isDirty()) {
       this.draft = clone(data.user ?? {});
       this.control = clone(data.control ?? {});
+    } else {
+      // The Voice section saves [voice] itself; a kept draft takes it over.
+      if (data.user?.voice) this.draft.voice = clone(data.user.voice);
+      else delete this.draft.voice;
     }
     this.validate();
     this.render();
@@ -885,6 +893,8 @@ export class SettingsPage {
         return this.profiles();
       case "interface":
         return this.interfaceSection();
+      case "voice":
+        return this.voiceSection();
       case "remote":
         return remoteSection(this);
       case "advanced":
@@ -2593,6 +2603,178 @@ export class SettingsPage {
           ".",
         ),
       ]),
+    ];
+  }
+
+  // Voice: saved to [voice] at once through /api/voice, which reports what
+  // each feature can use. "Speak on this device" is this browser's own.
+
+  async setVoice(changes) {
+    try {
+      state.voice = await api("/api/voice", { method: "PUT", body: changes });
+      invalidate("voice");
+    } catch (error) {
+      toast(`Not saved: ${error.message}`, "error");
+    }
+    if (this.section === "voice") this.render();
+  }
+
+  async checkVoice() {
+    this.voiceChecking = true;
+    this.render();
+    try {
+      state.voice = await api("/api/voice?refresh=true");
+      invalidate("voice");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    this.voiceChecking = false;
+    if (this.section === "voice") this.render();
+  }
+
+  voiceRow({ label, help, control, id }) {
+    control.querySelector?.("input, select")?.setAttribute("aria-describedby", `${id}-help`);
+    return h(
+      "div",
+      { class: "field" },
+      h("div", { class: "field-label" }, h("label", { class: "label", for: id }, label), help ? h("p", { class: "field-help", id: `${id}-help` }, help) : null),
+      h("div", { class: "field-control" }, control),
+    );
+  }
+
+  voiceSwitch(feature, key, label, help) {
+    const id = nextId();
+    const control = toggle({ id, checked: feature.enabled, onChange: (on) => this.setVoice({ [key]: on }) });
+    control.querySelector("input").dataset.focusKey = `voice:${key}`;
+    return this.voiceRow({ label, help, control, id });
+  }
+
+  voiceModel(feature, key, { label, help, missing }) {
+    const id = nextId();
+    const name = (spec) => (spec === "system" ? "This computer's voice" : spec);
+    const options = [{ value: "", label: feature.models.length ? `Automatic (${name(feature.models[0])})` : "Automatic" }];
+    for (const spec of feature.models) options.push({ value: spec, label: name(spec) });
+    if (feature.configured && !feature.models.includes(feature.configured)) options.push({ value: feature.configured, label: `${name(feature.configured)} (not available)` });
+    const control = selectControl({
+      id,
+      focusKey: `voice:${key}`,
+      value: feature.configured ?? "",
+      options,
+      disabled: !feature.models.length && !feature.configured,
+      onChange: (value) => this.setVoice({ [key]: value || null }),
+    });
+    return [
+      this.voiceRow({ label, help, control, id }),
+      feature.enabled && !feature.model ? h("p", { class: "field-note" }, icon("info", 14), missing) : null,
+    ];
+  }
+
+  voiceVoice(feature, key, voices) {
+    const id = nextId();
+    const control = selectControl({
+      id,
+      focusKey: `voice:${key}`,
+      value: feature.voice ?? "",
+      options: [...new Set([feature.voice, ...voices].filter(Boolean))].map((v) => ({ value: v, label: v.charAt(0).toUpperCase() + v.slice(1) })),
+      onChange: (value) => this.setVoice({ [key]: value || null }),
+    });
+    return this.voiceRow({ label: "Voice", help: "How the model sounds.", control, id });
+  }
+
+  speakHereRow() {
+    const id = nextId();
+    const control = toggle({ id, checked: speakHere(), onChange: (on) => (setSpeakHere(on), this.render()) });
+    control.querySelector("input").dataset.focusKey = "voice:here";
+    return this.voiceRow({
+      label: "Speak on this device",
+      help: "Speech plays on one device with this on: the one you used last. Remembered in this browser only.",
+      control,
+      id,
+    });
+  }
+
+  voiceSection() {
+    const voice = state.voice;
+    if (!voice) return h("p", { class: "empty-note" }, h("span", { class: "spinner small" }), "Waiting for the daemon");
+    const { dictation, speech, talk } = voice;
+    const languageId = nextId();
+    const language = textInput({ id: languageId, focusKey: "voice:language", value: voice.language ?? "", placeholder: "Detected from the speech", onInput: () => {} });
+    language.setAttribute("aria-describedby", `${languageId}-help`);
+    const saveLanguage = () => {
+      const value = language.value.trim();
+      if (value !== (voice.language ?? "")) this.setVoice({ language: value || null });
+    };
+    language.addEventListener("change", saveLanguage);
+    language.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        saveLanguage();
+      }
+    });
+    const secure = window.isSecureContext;
+    return [
+      h(
+        "div",
+        { class: "voice-status" },
+        h(
+          "p",
+          { class: "muted" },
+          voice.checked ? `The providers' model lists were read ${relativeTime(voice.checked)}.` : "The providers' model lists have not been read yet.",
+          " Saved to ",
+          h("span", { class: "path", title: this.data.paths.user }, shortPath(this.data.paths.user, 2)),
+          " at once.",
+        ),
+        h(
+          "button",
+          { class: "button small", type: "button", disabled: this.voiceChecking, onclick: () => this.checkVoice() },
+          this.voiceChecking ? h("span", { class: "spinner small" }) : icon("refresh", 14),
+          "Check providers again",
+        ),
+      ),
+      secure ? null : h("p", { class: "field-note" }, icon("info", 14), "This page is on plain http, so the browser keeps the microphone off: dictation and talk mode work on https (a tunnel) or on localhost."),
+      this.group(
+        "Dictation",
+        [
+          this.voiceSwitch(dictation, "dictation", "Dictation", "A microphone button in the message box: speak, and the text appears there for you to edit and send."),
+          this.voiceModel(dictation, "dictation_model", {
+            label: "Model",
+            help: "A transcription model, or a chat model that takes audio.",
+            missing: "No model can transcribe. Add an OpenAI-style provider with whisper-1, gpt-4o-mini-transcribe or gpt-4o-audio-preview, then check the providers again.",
+          }),
+          h(
+            "div",
+            { class: "field" },
+            h("div", { class: "field-label" }, h("label", { class: "label", for: languageId }, "Language"), h("p", { class: "field-help", id: `${languageId}-help` }, "A language code such as en or de helps short recordings. Saved when you leave the field.")),
+            h("div", { class: "field-control" }, language),
+          ),
+        ],
+        { description: `${DICTATE_HINT} Recordings go to the daemon and the model; nothing is kept.` },
+      ),
+      this.group(
+        "Speech",
+        [
+          this.voiceSwitch(speech, "speech", "Speech", "malac reads approvals, questions and notable results aloud, and agents get a say tool."),
+          this.speakHereRow(),
+          this.voiceModel(speech, "speech_model", {
+            label: "Model",
+            help: "A speech model, or this computer's own voice.",
+            missing: "Nothing can speak. Add an OpenAI-style provider with gpt-4o-mini-tts or tts-1, or install espeak-ng on Linux.",
+          }),
+          speech.model === "system" ? null : this.voiceVoice(speech, "speech_voice", voice.voices ?? []),
+        ],
+      ),
+      this.group(
+        "Talk mode",
+        [
+          this.voiceSwitch(talk, "talk", "Talk mode", "A headset button next to the message box starts a spoken conversation: a voice model passes what you ask to malac and tells you what it did."),
+          this.voiceModel(talk, "talk_model", {
+            label: "Model",
+            help: "A Realtime model.",
+            missing: "No Realtime model was found. Add an OpenAI-style provider with gpt-realtime.",
+          }),
+          this.voiceVoice(talk, "talk_voice", voice.voices ?? []),
+        ],
+      ),
     ];
   }
 

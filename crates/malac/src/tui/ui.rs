@@ -742,18 +742,35 @@ fn chip_rows(attachments: &[Attachment], width: u16) -> Vec<Vec<Chip>> {
 fn draw_input(frame: &mut Frame, app: &mut App, area: Rect, chips: &[Vec<Chip>]) {
     let t = theme();
     let focused = app.focus == Focus::Input && app.overlay.is_none() && !app.approval_visible();
-    let border = if focused { t.fg(t.accent) } else { t.faint() };
-    let hint = if app.busy() {
-        " enter queues · esc stops "
-    } else if !app.attachments.is_empty() {
-        " enter send · ⌫ at the start drops the last file "
-    } else {
-        " enter send · @ attach a file "
+    let mut border = if focused { t.fg(t.accent) } else { t.faint() };
+    let dictate = match crate::voice::ready(&app.voice.dictation) && app.talk.is_none() {
+        true => "· ^X dictate ",
+        false => "",
+    };
+    let hint = match app.dictation_hint() {
+        Some((recording, text)) => {
+            let mut spans = vec![Span::raw(" ")];
+            if recording {
+                border = t.fg(t.error);
+                spans.push(Span::styled("● ", t.fg(t.error)));
+            }
+            spans.push(Span::styled(format!("{text} "), t.dim()));
+            Line::from(spans)
+        }
+        None if app.busy() => Line::styled(" enter queues · esc stops ", t.faint()),
+        None if !app.attachments.is_empty() => Line::styled(
+            format!(" enter send · ⌫ at the start drops the last file {dictate}"),
+            t.faint(),
+        ),
+        None => Line::styled(
+            format!(" enter send · @ attach a file {dictate}"),
+            t.faint(),
+        ),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
-        .title_bottom(Line::styled(hint, t.faint()).right_aligned());
+        .title_bottom(hint.right_aligned());
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     for (y, row) in chips.iter().enumerate() {

@@ -29,8 +29,8 @@ use crate::provider::{Completion, Delta, ProviderError, Request, ToolSpec};
 use crate::runtime::{AgentSpec, Runtime};
 use crate::session::{self, Record, SessionLog, SessionMeta, Transcript};
 use crate::tools::{
-    AGENT_TOOLS, FileTracker, SessionEnv, Tool, ToolContext, ToolKind, ToolOutput, truncate_chars,
-    truncate_middle,
+    AGENT_TOOLS, FileTracker, RecentImages, SessionEnv, Tool, ToolContext, ToolKind, ToolOutput,
+    truncate_chars, truncate_middle,
 };
 
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
@@ -334,6 +334,7 @@ pub(crate) fn spawn(
         log,
         files: FileTracker::default(),
         env: SessionEnv::default(),
+        images: RecentImages::default(),
         last_context: 0,
         image_notes: HashMap::new(),
         recall_failed: false,
@@ -362,6 +363,9 @@ fn select_tools(
             if !runtime.memory.enabled() && name.starts_with("memory_") {
                 return false;
             }
+            if name == "say" && !runtime.config.voice.speech {
+                return false;
+            }
             if read_only && tool.kind() != ToolKind::Safe {
                 return false;
             }
@@ -388,6 +392,7 @@ struct Agent {
     specs: Vec<ToolSpec>,
     log: SessionLog,
     files: FileTracker,
+    images: RecentImages,
     /// Variables for its shell commands.
     env: SessionEnv,
     /// Context size reported for the latest request.
@@ -888,6 +893,7 @@ impl Agent {
             cancel: cancel.clone(),
             files: self.files.clone(),
             env: self.env.clone(),
+            images: self.images.clone(),
         };
         // Consecutive safe tools run together; anything else runs alone, in order.
         let mut rest = approved.as_slice();
@@ -1197,6 +1203,7 @@ async fn execute(ctx: &ToolContext, tool: &dyn Tool, call: &Call) -> ToolOutput 
         output = tool.run(call.input.clone(), ctx) => output,
         _ = ctx.cancel.cancelled() => ToolOutput::error("cancelled by the user"),
     };
+    ctx.images.push(&output);
     ctx.emit(Event::ToolFinished {
         call_id: call.id.clone(),
         tool: call.name.clone(),

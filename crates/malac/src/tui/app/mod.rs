@@ -41,12 +41,13 @@ use super::term;
 use super::text;
 use super::theme::theme;
 use super::transcript::{AgentView, Agents, Entry, SPINNER, duration};
+use super::voice::{Dictation, Local, Openable, TalkView};
 use crate::client::{Client, Events, Launched};
 use crate::connections::Endpoint;
 use crate::daemon::uploads::{MAX_PROMPT_UPLOAD_BYTES, MAX_UPLOAD_BYTES};
 use crate::protocol::{
     AwakeStatus, ControlStatus, DaemonStatus, JobView, RemoteStatus, ServerMessage, Snapshot,
-    TabId, TabView, WorkspaceSummary, WorkspaceView,
+    TabId, TabView, VoiceStatus, WorkspaceSummary, WorkspaceView,
 };
 use crate::render::tokens;
 use crate::repl::{COMMANDS, Slash};
@@ -55,6 +56,7 @@ mod actions;
 mod backend;
 mod input;
 mod mouse;
+mod voice;
 
 pub use actions::Action;
 pub use backend::{Backend, Connection, Reply, Rest};
@@ -67,6 +69,22 @@ pub const TUI_COMMANDS: &[(&str, &str, &str)] = &[
         "root",
         "",
         "open the repository this folder is part of, in a tab",
+    ),
+    (
+        "open",
+        "[n]",
+        "open the newest file or image malac sent (n: the nth newest)",
+    ),
+    ("talk", "", "talk mode: speak with malac (Esc ends)"),
+    (
+        "speak",
+        "[on|off]",
+        "whether this terminal speaks when malac does",
+    ),
+    (
+        "voice",
+        "[setting value]",
+        "dictation, speech and talk mode: status and settings",
     ),
 ];
 
@@ -292,6 +310,14 @@ pub enum Update {
     OtherWorkspaces(Endpoint, Result<Vec<WorkspaceSummary>, String>),
     /// Switching to another daemon failed.
     SwitchFailed(String),
+    /// What dictation heard.
+    Dictated(Result<String, String>),
+    /// What a talk session (this terminal's nth) reported.
+    Talk(u64, crate::voice::TalkEvent),
+    /// Something malac sent opened in the viewer: its name, or why not.
+    Opened(Result<String, String>),
+    /// Speech could not play, and why.
+    Speech(String),
 }
 
 /// Where things were drawn in the last frame, for keys that depend on layout.
@@ -420,6 +446,18 @@ pub struct App {
     pub control: ControlStatus,
     pub remote: RemoteStatus,
     pub awake: AwakeStatus,
+    /// What dictation, speech and talk mode offer.
+    pub voice: VoiceStatus,
+    /// "Speak on this terminal", remembered in `~/.malac/terminal.json`.
+    pub speak: bool,
+    /// This connection's listener id while it plays speech.
+    pub listener: Option<u64>,
+    /// `voice_listen` is on its way.
+    listen_asked: bool,
+    pub dictation: Option<Dictation>,
+    pub talk: Option<TalkView>,
+    /// Talk sessions started here so far.
+    talks: u64,
     /// Workspaces of the other daemons, as they answered.
     pub other_workspaces: Vec<(Endpoint, Result<Vec<WorkspaceSummary>, String>)>,
     pub hits: HitMap,
@@ -519,6 +557,13 @@ impl App {
             control: ControlStatus::default(),
             remote: RemoteStatus::default(),
             awake: AwakeStatus::default(),
+            voice: VoiceStatus::default(),
+            speak: Local::load().speak,
+            listener: None,
+            listen_asked: false,
+            dictation: None,
+            talk: None,
+            talks: 0,
             other_workspaces: Vec::new(),
             hits: HitMap::default(),
             geometry: Geometry::default(),
@@ -981,6 +1026,15 @@ impl App {
                 }
             }
             ServerMessage::Awake { awake } => self.awake = awake,
+            ServerMessage::Voice { voice } => self.voice_changed(voice),
+            ServerMessage::Say {
+                id,
+                text,
+                reason,
+                agent,
+                listener,
+                ..
+            } => self.on_say(&id, &text, &reason, agent.as_deref(), listener),
             ServerMessage::Reloaded => self.flash_ok("settings applied"),
             ServerMessage::Lagged { skipped } => {
                 self.flash(format!("missed {skipped} updates; catching up"));
@@ -1171,6 +1225,7 @@ impl App {
         self.control = snapshot.control;
         self.remote = snapshot.remote;
         self.awake = snapshot.awake;
+        self.voice_changed(snapshot.voice);
         self.models = snapshot.models;
         self.default_model = snapshot.default_model;
         self.jobs = snapshot.jobs;
@@ -1383,6 +1438,15 @@ impl App {
             Update::SwitchFailed(err) => {
                 self.flash(format!("cannot switch: {}", text::first_line(&err)));
             }
+            Update::Dictated(result) => self.dictated(result),
+            Update::Talk(session, event) => self.on_talk(session, event),
+            Update::Opened(Ok(name)) => self.flash_ok(format!("opened {name}")),
+            Update::Opened(Err(err)) => {
+                self.flash(format!("cannot open it: {}", text::first_line(&err)));
+            }
+            Update::Speech(err) => {
+                self.flash(format!("cannot speak: {}", text::first_line(&err)));
+            }
         }
     }
 
@@ -1417,6 +1481,7 @@ impl App {
             changed = true;
         }
         self.send_queued();
+        changed |= self.voice_tick();
         // Animate while anything works.
         changed || self.working()
     }
@@ -1490,6 +1555,9 @@ impl App {
                 Span::styled(why, t.fg(t.warning)),
                 Span::styled(next, t.dim()),
             ];
+        }
+        if let Some(talk) = &self.talk {
+            return self.talk_activity(talk);
         }
         let tab = self.tab();
         if self.busy() {

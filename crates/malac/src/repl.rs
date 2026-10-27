@@ -179,6 +179,7 @@ pub async fn run(args: RunArgs) -> Result<i32> {
             main: main.clone(),
             show_thinking,
             turn_done: done_tx,
+            shared_from: None,
         }
         .spawn(runtime.bus.subscribe());
     }

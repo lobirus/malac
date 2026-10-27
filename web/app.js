@@ -69,7 +69,9 @@ import {
   waitingAgents,
 } from "./store.js";
 import { TranscriptView, isPluginApproval, pluginApprovalDetails } from "./transcript.js";
+import { dataImage, thumbnail } from "./viewer.js";
 import { TAGLINE, agentsView, controlSummary, homeView, refreshUpdatePanels, updatePanel } from "./views.js";
+import { initVoice, renderVoiceControls } from "./voice.js";
 import { MODES, modeSwitch, modelPicker, statusDot, usageMeter } from "./widgets.js";
 import { openAttachPicker, openFolderPicker, openWorkspaceMenu, renderTabBar, workspaceButton } from "./workspace.js";
 
@@ -123,6 +125,10 @@ const els = {
   composerModel: $("composer-model"),
   stop: $("stop"),
   send: $("send"),
+  dictate: $("dictate"),
+  dictation: $("dictation"),
+  talk: $("talk"),
+  speak: $("speak-toggle"),
   jump: $("jump"),
 };
 
@@ -1014,6 +1020,7 @@ function renderComposer() {
   const running = agent?.live && agent.status === "running";
   els.stop.hidden = !running;
   els.attachPath.disabled = !tab;
+  renderVoiceControls();
   if (!agent) els.input.placeholder = tab ? `Describe a task for a new agent in ${tab.name}` : "Open a folder first";
   else if (agent.live && !agent.title && !agent.parent) els.input.placeholder = `Describe a task for this agent in ${tab?.name ?? "this tab"}`;
   else if (agent.live) els.input.placeholder = agent.parent ? `Message ${agent.label}` : "Send a follow-up";
@@ -1353,7 +1360,7 @@ function renderAttachments() {
       h(
         "div",
         { class: "attachment" },
-        h("img", { src: `data:${image.media_type};base64,${image.data}`, alt: image.name ?? "Attached image" }),
+        thumbnail(dataImage(image.media_type, image.data, image.name ?? "Attached image")),
         h(
           "button",
           {
@@ -1515,6 +1522,7 @@ const SHORTCUTS = [
   { keys: ["W"], label: "Switch workspace" },
   { keys: ["/"], label: "Focus the message box" },
   { keys: ["Esc"], label: "Leave the message box, or stop the running agent from an empty one" },
+  { keys: ["Ctrl", "Shift", "Space"], label: "Dictate into the message box; Enter inserts the text, Esc cancels (when dictation is set up)" },
   { keys: ["A"], label: "Agents" },
   { keys: ["J"], label: "Jobs" },
   { keys: [","], alt: ["Ctrl", ","], label: "Settings" },
@@ -1615,7 +1623,7 @@ function cycleMode() {
 function bindShortcuts() {
   document.addEventListener("keydown", (event) => {
     if (event.defaultPrevented || event.isComposing) return;
-    if (document.querySelector(".modal-backdrop")) return;
+    if (document.querySelector(".modal-backdrop, .viewer")) return;
     const mod = event.ctrlKey || event.metaKey;
     if (mod && event.shiftKey && event.key.toLowerCase() === "o") {
       event.preventDefault();
@@ -1768,6 +1776,7 @@ function init() {
   registerRenderers();
   bindChrome();
   bindComposer();
+  initVoice({ composer: els.composer, input: els.input, dictate: els.dictate, talk: els.talk, status: els.dictation, speak: els.speak });
   bindEditorBridge();
   bindShortcuts();
   els.app.classList.toggle("embed", embedded);

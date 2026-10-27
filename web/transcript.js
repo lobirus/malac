@@ -4,9 +4,9 @@
 import {
   addUsage,
   baseName,
+  byteSize,
   clockTime,
   copyButton,
-  dialog,
   emptyUsage,
   firstLine,
   formatCost,
@@ -16,6 +16,7 @@ import {
   h,
   plural,
   setChildren,
+  toast,
   truncate,
   usageParts,
 } from "./dom.js";
@@ -24,6 +25,7 @@ import { highlight, languageFor, markdownNode, updateMarkdown } from "./markdown
 import {
   STATUS_TEXT,
   api,
+  apiBlob,
   byCreated,
   childrenOf,
   decide,
@@ -34,6 +36,7 @@ import {
   todoProgress,
   viewAgent,
 } from "./store.js";
+import { blobImage, dataImage, openBlob, saveBlob, thumbnail } from "./viewer.js";
 import { statusDot } from "./widgets.js";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -47,23 +50,11 @@ const IMAGE_PLACEHOLDER = /\[image\/[\w.+-]+ image\]/;
 
 // Helpers
 
+/** A thumbnail of an image block that opens the full-screen viewer. */
 export function imageNode(block, alt = "Attached image") {
   if (!IMAGE_TYPES.has(block.media_type)) return null;
-  const src = `data:${block.media_type};base64,${block.data}`;
-  return h(
-    "button",
-    { class: "thumb", type: "button", "aria-label": `Open ${alt.toLowerCase()}`, onclick: () => openImage(src, alt) },
-    h("img", { src, alt, loading: "lazy" }),
-  );
-}
-
-function openImage(src, alt) {
-  dialog({
-    title: alt,
-    className: "lightbox",
-    body: h("img", { src, alt }),
-    buttons: [{ label: "Close", value: null }],
-  });
+  const name = block.name || alt;
+  return thumbnail(dataImage(block.media_type, block.data, name), { label: name });
 }
 
 function resultText(content) {
@@ -759,6 +750,7 @@ function recalledNode(text) {
 
 function createCard(use, view) {
   if (use.name === "agent_spawn") return new SpawnCard(use, view);
+  if (use.name === "send_to_user") return new ShareCard(use);
   if (use.name === "todo") return new TodoCard(use);
   return new ToolCard(use, view);
 }
@@ -1024,6 +1016,154 @@ class ToolCard {
     this.el.dataset.state = "skipped";
     this.approvalRow.hidden = true;
     this.paintBody();
+  }
+}
+
+// Files an agent sent with `send_to_user`. Its result names each file in a
+// `<shared id name type size/>` tag after an optional `<caption>`; the card
+// shows the files themselves: images inline, other files as a card that
+// opens or downloads them.
+
+const SHARED_TAG = /<shared\s([^>]*?)\/>/g;
+const SHARED_CAPTION = /<caption>([\s\S]*?)<\/caption>/;
+
+/** The caption and files of a `send_to_user` result. */
+export function parseShared(text) {
+  const value = String(text ?? "");
+  const files = [];
+  for (const match of value.matchAll(SHARED_TAG)) {
+    const attrs = Object.fromEntries([...match[1].matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+    if (!attrs.id || !attrs.name) continue;
+    files.push({ id: attrs.id, name: attrs.name, type: attrs.type || "application/octet-stream", size: Number(attrs.size) || 0 });
+  }
+  const rest = value.replace(SHARED_TAG, "").replace(SHARED_CAPTION, "").trim();
+  return { caption: SHARED_CAPTION.exec(value)?.[1].trim() ?? "", files, rest };
+}
+
+function sharedPath(id, download = false) {
+  return `/api/shared/${encodeURIComponent(id)}${download ? "?download=true" : ""}`;
+}
+
+// One fetch per shared image, however often the transcript is drawn.
+const sharedImages = new Map();
+
+function sharedImage(file) {
+  let image = sharedImages.get(file.id);
+  if (!image) {
+    // SVG comes back as text unless downloaded; as an <img> it runs nothing.
+    const download = file.type === "image/svg+xml";
+    image = blobImage({ name: file.name, type: file.type, load: () => apiBlob(sharedPath(file.id, download)) });
+    sharedImages.set(file.id, image);
+  }
+  return image;
+}
+
+/** What a `send_to_user` call sends, as its tool summary words it. */
+function shareSummary(input) {
+  const names = (Array.isArray(input.files) ? input.files : []).map((path) => baseName(String(path)));
+  const recent = Number(input.recent_images) || 0;
+  if (recent) names.push(recent === 1 ? "the last image" : `the last ${recent} images`);
+  return names.join(", ");
+}
+
+function fileType(file) {
+  const extension = /\.(\w{1,8})$/.exec(file.name)?.[1];
+  return extension ? extension.toUpperCase() : file.type;
+}
+
+function fileCard(file) {
+  const action = (button, run) =>
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await run();
+      } catch (error) {
+        toast(`${file.name} could not be loaded: ${error.message}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  const open = h("button", { class: "button small", type: "button", "aria-label": `Open ${file.name}` }, icon("external", 14), "Open");
+  const download = h("button", { class: "button small", type: "button", "aria-label": `Download ${file.name}` }, icon("download", 14), h("span", { class: "file-card-label" }, "Download"));
+  action(open, () => openBlob(apiBlob(sharedPath(file.id))));
+  action(download, async () => saveBlob(await apiBlob(sharedPath(file.id, true)), file.name));
+  return h(
+    "div",
+    { class: "file-card" },
+    h("span", { class: "file-card-icon" }, icon("file", 16)),
+    h(
+      "span",
+      { class: "file-card-text" },
+      h("span", { class: "file-card-name", title: file.name }, file.name),
+      h("span", { class: "file-card-meta tabular" }, [byteSize(file.size), fileType(file)].filter(Boolean).join(" · ")),
+    ),
+    h("span", { class: "file-card-actions" }, open, download),
+  );
+}
+
+class ShareCard {
+  constructor(use) {
+    this.input = use.input ?? {};
+    this.done = false;
+    this.head = h("div", { class: "share-head" });
+    this.body = h("div", { class: "share-body" });
+    this.errorLine = h("div", { class: "tool-error-line", hidden: true });
+    this.el = h("div", { class: "share-card", "data-state": "pending" }, this.head, this.body, this.errorLine);
+    this.paintHead();
+  }
+
+  paintHead(files = []) {
+    const state = this.el.dataset.state;
+    const images = files.filter((f) => f.type.startsWith("image/")).length;
+    let text;
+    if (state === "done" && images && images < files.length) text = `Sent you ${plural(images, "image")} and ${plural(files.length - images, "file")}`;
+    else if (state === "done") text = `Sent you ${images ? plural(images, "image") : plural(files.length, "file")}`;
+    else if (state === "error") text = "Could not send the files";
+    else if (state === "skipped") text = "Not sent";
+    else text = `Sending ${shareSummary(this.input) || "files"}`;
+    const working = state === "pending" || state === "running";
+    setChildren(
+      this.head,
+      working ? h("span", { class: "spinner small" }) : icon(state === "error" ? "alert" : "share", 14),
+      h("span", { class: "share-title" }, text),
+    );
+  }
+
+  start() {
+    if (this.el.dataset.state === "pending") this.el.dataset.state = "running";
+    this.paintHead();
+  }
+
+  finish(output, isError) {
+    this.done = true;
+    this.el.dataset.state = isError ? "error" : "done";
+    if (isError) {
+      this.errorLine.textContent = firstLine(output) || "Failed";
+      this.errorLine.hidden = false;
+      this.paintHead();
+      return;
+    }
+    const { caption, files, rest } = parseShared(output);
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    const others = files.filter((f) => !f.type.startsWith("image/"));
+    setChildren(
+      this.body,
+      caption ? h("p", { class: "share-caption" }, caption) : null,
+      images.length ? h("div", { class: "thumbs" }, images.map((file) => thumbnail(sharedImage(file), { label: file.name }))) : null,
+      others.length ? h("div", { class: "share-files" }, others.map(fileCard)) : null,
+      files.length ? null : h("p", { class: "muted small" }, rest),
+    );
+    this.paintHead(files);
+  }
+
+  result(block) {
+    this.finish(resultText(block.content), block.is_error);
+  }
+
+  abandon() {
+    if (this.done) return;
+    this.el.dataset.state = "skipped";
+    this.paintHead();
   }
 }
 

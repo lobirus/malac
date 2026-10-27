@@ -12,8 +12,14 @@ impl App {
         if self.overlay.is_some() {
             return self.overlay_key(key);
         }
+        if let Some(action) = self.dictation_key(key) {
+            return action;
+        }
         if key.code == KeyCode::Esc && self.clear_selections() {
             return None;
+        }
+        if key.code == KeyCode::Esc && self.talk.is_some() {
+            return Some(Action::Talk);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -39,6 +45,7 @@ impl App {
             KeyCode::Char('d') if ctrl && self.editor.is_empty() => return Some(Action::Quit),
             KeyCode::Char('n') if ctrl && self.editor.is_empty() => return Some(Action::NewAgent),
             KeyCode::Char('r') if ctrl => return Some(Action::Reconnect),
+            KeyCode::Char('x') if ctrl => return Some(Action::Dictate),
             KeyCode::Up if alt => return Some(Action::StepAgent(-1)),
             KeyCode::Down if alt => return Some(Action::StepAgent(1)),
             KeyCode::PageUp if ctrl && shift => return Some(Action::MoveTab(-1)),
@@ -431,7 +438,7 @@ impl App {
                     None
                 }
             },
-            _ => return None,
+            other => return self.voice_slash(other, arg),
         })
     }
 
@@ -610,7 +617,13 @@ impl App {
             Entry::Agent(card) => Some(card.id.clone()),
             _ => None,
         });
+        // A card of files opens them; other entries open their images with `o`.
+        let files = selected.filter(|&i| self.is_file_card(i));
         match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') if files.is_some() => {
+                return files.map(|i| Action::OpenEntry(i, 0));
+            }
+            KeyCode::Char('o') => return selected.map(|i| Action::OpenEntry(i, 0)),
             KeyCode::Up | KeyCode::Char('k') => self.select_step(-1),
             KeyCode::Down | KeyCode::Char('j') => self.select_step(1),
             KeyCode::Home | KeyCode::Char('g') => self.select_step(isize::MIN / 2),

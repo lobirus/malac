@@ -492,7 +492,7 @@ fn parse_key(key: &str) -> Result<Vec<String>> {
 }
 
 /// Sets (or with `None`, removes) a key, keeping the rest of the document intact.
-fn edit(text: &str, key: &[String], value: Option<Value>) -> Result<String> {
+pub fn edit(text: &str, key: &[String], value: Option<Value>) -> Result<String> {
     let mut doc: DocumentMut = text
         .parse()
         .context("the current config file is not valid TOML")?;

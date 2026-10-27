@@ -62,6 +62,15 @@ const PATHS = {
   book: "M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5zM4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5",
   history: "M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4.5H8M12 8v4l3 2",
   wait: "M7 3h10M7 21h10M8 3c0 4 8 5 8 9s-8 5-8 9M16 3c0 4-8 5-8 9",
+  mic: "M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M9 21h6",
+  micOff: "M15 9.5V6a3 3 0 0 0-5.6-1.5M9 9v3a3 3 0 0 0 4.6 2.5M5.5 11a6.5 6.5 0 0 0 10.8 4.9M18.5 11a6.5 6.5 0 0 1-.6 2.7M12 17.5V21M9 21h6M4 4l16 16",
+  headset: "M4 14v-2a8 8 0 0 1 16 0v2M4 14h2.5a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM20 14h-2.5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1H19a1 1 0 0 0 1-1z",
+  volume: "M4 9.5h3.5L12 5.5v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11",
+  volumeOff: "M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5",
+  download: "M12 4v11M7 10.5l5 5 5-5M5 20h14",
+  share: "M12 3.5v11M8 7.5l4-4 4 4M6 11H5a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7a1 1 0 0 0-1-1h-1",
+  zoomIn: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.5 15.5 20 20M8 10.5h5M10.5 8v5",
+  zoomOut: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.5 15.5 20 20M8 10.5h5",
 };
 
 const FILLED = new Set(["stop"]);
@@ -127,6 +136,8 @@ export function toolIcon(name) {
   if (name === "todo") return "todo";
   if (name === "agent_spawn") return "agents";
   if (name === "agent_wait") return "wait";
+  if (name === "send_to_user") return "share";
+  if (name === "say") return "volume";
   if (name.startsWith("memory_")) return "bookmark";
   if (name.startsWith("browser_")) return "browser";
   if (name.startsWith("computer_")) return "monitor";

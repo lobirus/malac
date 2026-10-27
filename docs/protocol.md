@@ -133,6 +133,7 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
 | `job_output` | `job`; `tail`? (lines, default 100, max 2000) | `job_output` |
 | `job_kill` | `job` | `ack`. SIGTERM to its process group, SIGKILL after 3 s; `job_finished` follows. |
 | `control_permissions` | `request`? | `control`; also broadcast. With `request`, macOS shows its Screen Recording and Accessibility prompts and System Settings opens at the missing ones. |
+| `voice_listen` | `on` | `voice_listening` with this connection's `listener` id (null after `on: false`). A connection that plays speech says so; see [voice](#voice-and-shared-files). |
 | `keep_awake` | `mode`: `busy`, `always` or `off` | `ack`; broadcasts `awake` when it changes. Lasts until the daemon restarts; `daemon.keep_awake` is the default. |
 | `ping` | | `pong` |
 
@@ -154,7 +155,8 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
   "models": ["lora/default", "lora/smart", "lora/fast"],
   "default_model": "lora/fast",
   "remote": RemoteStatus,
-  "awake": AwakeStatus
+  "awake": AwakeStatus,
+  "voice": VoiceStatus
 }
 ```
 
@@ -191,6 +193,8 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `remote` | `remote`: RemoteStatus | a tunnel started, stopped or got its address; a device paired or was revoked |
 | `awake` | `awake`: AwakeStatus | keep-awake took or released its assertion, or its mode or reason changed |
 | `notice` | `level` (`info`, `warning`, `error`), `message`, `tab`? | e.g. a configuration warning or an unavailable MCP server while a tab loads |
+| `voice` | `voice`: VoiceStatus | voice settings changed or the providers' model lists were read again |
+| `say` | `id`, `text`, `reason` (`approval`, `agent`, `finished`, `failed`), `tab`, `agent`, `listener` | a sentence to read aloud, for the connection whose listener id it names; see [voice](#voice-and-shared-files) |
 | `reloaded` | | settings were applied; idle tabs reload on next use |
 | `shutdown` | `reason` | the daemon is stopping (`signal`, `idle`, `stopped by a client`, …) |
 
@@ -209,6 +213,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 | `jobs` | `client_ref`, `jobs`: [JobView] |
 | `job_output` | `client_ref`, `output`: `{job: JobInfo, text, size, truncated}` |
 | `control` | `client_ref`, `control`: ControlStatus |
+| `voice_listening` | `client_ref`, `listener`: number or null |
 | `snapshot` | `client_ref` plus the snapshot fields |
 
 ### Types
@@ -267,6 +272,8 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 **TunnelStatus** `{provider, state, url, error, waiting, notes, started}`: `provider` is `cloudflare`, `ngrok`, `tailscale` or `tailscale-funnel`; `state` is `starting`, `running` (with `url`), `failed` (with `error`, the tool's last lines) or `stopped`; `waiting`, while starting, is what the tool printed so far, such as `tailscale serve` asking to turn on Serve for the tailnet at a link it then waits for; `notes` are what to know about that kind of tunnel.
 
 **AwakeStatus** `{mode, awake, reason, method, error, since}`: `mode` is `busy`, `always` or `off`; `awake` whether a power assertion is held; `reason` why, for people (`2 agents running`, `nothing is running`, `idle only: …`); `method` `caffeinate` or `systemd-inhibit` (null where neither exists); `error` why taking it failed; `since` when `awake` last changed.
+
+**VoiceStatus** `{dictation, speech, talk, language, voices, checked}`, each feature being `{enabled, model, configured, voice, models}`: `enabled` is the setting, `model` the model in use (`configured` when the settings name one, else the first of `models`; null when nothing can do it), `voice` the voice for speech and talk, `models` every `provider/model` that can do it. A feature is ready when `enabled` and `model` is set; a client shows its button only then. `voices` are the voices speech and talk models know; `checked` is when the providers' model lists were last read.
 
 **ControlStatus** `{enabled, connected, tools, error, permissions}`. `permissions` is the control service's report: `{platform, screen_recording, accessibility, app: {name, path}, requested, hint}`, where the two permissions are `true`, `false` or `null` (not needed on this platform) and `app` is the app macOS grants them to.
 
@@ -341,6 +348,52 @@ All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out;
 **DeviceView** `{id, name, kind, created, last_seen, address, current}`: `address` is where it last connected from (the client's address a proxy forwarded, for display); `current` marks the device making the request.
 
 A code is ten characters of Crockford base32, shown as `XXXXX-XXXXX`; case, dashes and spaces do not matter, and `O`, `I` and `L` read as `0`, `1`, `1`. Device tokens are stored as SHA-256 hashes in `~/.malac/devices.json`. [remote.md](remote.md#for-apps) walks through pairing from an app.
+
+### Voice and shared files
+
+| Endpoint | |
+|---|---|
+| `GET /api/voice?refresh=` | VoiceStatus. `refresh=true` reads the providers' model lists again first. |
+| `PUT /api/voice` | Changes `[voice]` settings in `~/.malac/config.toml`: any of `dictation`, `dictation_model`, `language`, `speech`, `speech_model`, `speech_voice`, `talk`, `talk_model`, `talk_voice`; `null` or `""` removes one. Returns VoiceStatus and broadcasts `voice`. |
+| `POST /api/voice/transcribe?language=` | Dictation. The body is the recording, its type in `Content-Type` (`audio/wav`, `audio/webm`, `audio/mp4`, `audio/ogg`, `audio/mpeg`; up to 25 MB). Send 16 kHz mono 16-bit WAV: every model takes it, chat models that listen take nothing else. `{text, model}`. |
+| `POST /api/voice/speak` `{text}` | The text read aloud with the speech model, as audio (`audio/mpeg` from a model, `audio/wav` from the system voice), for "read aloud" buttons. |
+| `GET /api/voice/say/{id}` | The audio of a `say` broadcast, made once and kept ten minutes. |
+| `GET /api/voice/talk?tab=&agent=` | Talk mode's WebSocket, below. |
+| `GET /api/shared/{id}?download=` | A file an agent sent with `send_to_user`, with its type (HTML and SVG come back as plain text unless `download=true`). `download=true` asks the browser to save it. |
+
+**Models.** Only OpenAI-style providers have audio APIs. Dictation uses a transcription model (`/audio/transcriptions`, like `whisper-1` or `gpt-4o-mini-transcribe`), else a chat model that takes audio (`input_audio`, like `gpt-4o-audio-preview`). Speech uses a speech model (`/audio/speech`, like `gpt-4o-mini-tts` or `tts-1`), else `system`: the machine's own voice (`say` on macOS, `espeak-ng` on Linux). Talk mode needs a Realtime model (`gpt-realtime`). Models are recognised by name; `[models."provider/model"] audio = "transcription" | "input" | "speech" | "realtime"` declares one whose name does not say.
+
+**Speech.** With `voice.speech` on, the daemon reads aloud what needs the user: every approval request ("malac needs your approval to run cargo publish."), what an agent says with its `say` tool, a failed turn, and the first sentence of a top-level agent's reply after a turn of 30 seconds or more in which it said nothing. Only connections that sent `voice_listen {on: true}` play speech, and each sentence goes to one of them: the one that sent a command most recently, which is where the user is. A `say` broadcast reaches every client; the one whose `listener` matches fetches `/api/voice/say/{id}` and plays it. Clients offer a "speak on this device" switch and send `voice_listen` again after reconnecting. While a talk mode session runs, its voice model speaks for malac and no `say` is sent.
+
+**Shared files.** `send_to_user` copies files (or the newest images the agent's tools returned, such as a screenshot) to `~/.malac/shared/<id>/` for 30 days. Its tool result names each one in a tag, after an optional `<caption>…</caption>` (captions never contain `<` or `>`, names never `<`, `>` or `"`):
+
+```
+Sent to the user: Screenshot 2026-10-27 14.02.11.jpg.
+<caption>The settings page after the fix</caption>
+<shared id="0193f0c2…" name="Screenshot 2026-10-27 14.02.11.jpg" type="image/jpeg" size="84211"/>
+```
+
+Clients find the tags in the `tool_finished` output (or the tool result in a transcript), show images inline from `/api/shared/{id}` with a full-screen viewer that zooms, and other files as a card that opens or downloads them.
+
+**Talk mode.** Open `/api/voice/talk` (token in the query for browsers) to talk through the tab's active agent (or `tab` and `agent`). Both directions carry audio as binary frames of 16-bit little-endian mono PCM at 24 kHz; send about 100 ms per frame. Text frames are JSON:
+
+| From the client | |
+|---|---|
+| `{"type": "text", "text"}` | Typed input, as if spoken |
+| `{"type": "interrupt"}` | Stop the current reply |
+| `{"type": "stop"}` | End talk mode |
+
+| From the daemon | |
+|---|---|
+| `{"type": "ready", "model", "voice"}` | Start streaming the microphone |
+| `{"type": "listening"}` | The user started speaking: stop playing at once |
+| `{"type": "thinking"}` | The user stopped speaking |
+| `{"type": "transcript", "role", "text", "final"}` | What the user (`final` only, when the provider transcribes) or the voice said; assistant deltas have `final: false` |
+| `{"type": "tool", "name", "summary"}` | The voice model asked malac something, checked on it, answered an approval or stopped it |
+| `{"type": "done"}` | A reply finished |
+| `{"type": "error", "message"}`, `{"type": "closed", "reason"}` | Something failed; the conversation ended |
+
+The voice model works through malac with four tools: `ask_malac` prompts the agent (the prompt shows in every client's transcript), `malac_status`, `answer_approval` and `stop_malac`. When the agent finishes a turn or asks for approval, the voice model is told and tells the user. Without echo cancellation (a terminal on speakers), pause the microphone while audio plays.
 
 ### Usage
 

@@ -92,7 +92,7 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 `malac` opens a full-screen terminal UI in the spirit of Midnight Commander and byobu. It works with the keyboard alone, and everything is also clickable.
 
 - **Header:** a menu bar (Session, Model, Mode, Agents, View, Connection, Help; F9 opens it), the workspace's tabs, one per project folder, and the workspace's name (with the daemon's, `server › work`, when it runs elsewhere).
-- **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, and subagents as live cards you can open. A tab with several agents shows a switcher above it; F3 shows every agent as a list or a map.
+- **Transcript:** streaming Markdown, tool calls as cards that expand on click or Enter, edits as diffs, subagents as live cards you can open, and files and screenshots malac sends as rows that open in the system viewer (`/open`). A tab with several agents shows a switcher above it; F3 shows every agent as a list or a map.
 - **Footer:** a status line (the daemon when it is another machine's, model, mode, context, tokens and cost, running agents, pending approvals, web UI, keep-awake, git branch, update, clock) above a function-key bar.
 - **Dialogs:** permission requests (Allow / Always / Deny), a model picker across all providers, sessions, and help.
 
@@ -107,6 +107,7 @@ If a prompt starts with a subcommand name, malac still treats it as a prompt whe
 | F10 | Quit (agents keep running) | Right-click | Context menu |
 | Alt-↑/↓, Ctrl-N | Switch agent / new agent in the tab | Drag, double-click | Select and copy text |
 | @, Ctrl-V | Attach a file / a clipboard image | Ctrl-R | Reconnect to the daemon |
+| Ctrl-X | Dictate into the prompt (when a model can) | `/talk`, `/voice`, `/open` | Talk mode, voice settings, open what malac sent |
 
 Both it and `--plain` (or `ui.tui = false`, a line-based interface) are clients of the daemon (see below). `-p`, `--json` and piped input always print plainly and run in-process. Inside tmux or byobu, clicks need `set -g mouse on`. On macOS, set the Option key to send Meta for the Alt shortcuts.
 
@@ -179,6 +180,7 @@ The daemon serves the web UI for every session, so no flag is needed for it: `ma
 | `malac context [--json]` | What a session here reads: instruction files, docs, index, skills, commands, plugins |
 | `malac remote [status\|pair\|devices\|revoke\|add\|list\|remove]` | Pair devices with this daemon and save connections to daemons elsewhere |
 | `malac tunnel [cloudflare\|ngrok\|tailscale\|tailscale-funnel\|status\|stop]` | Give the daemon a public address |
+| `malac voice [status\|set\|dictate\|say\|play\|talk]` | Dictation, speech and talk mode: what is available, settings, and using them from the terminal ([docs/voice.md](docs/voice.md)) |
 | `malac control ...` | Run `malac-control` |
 
 In a session: `/model`, `/mode`, `/agents`, `/compact`, `/clear`, `/resume`, `/cost`, `/mcp`, `/memory`, `/web`, `/context`, `/exit`, plus your commands, skills and plugin commands (`/ponytail-review`, `/release-tools:release-notes 2.0`). Ctrl-C interrupts the current turn and every subagent it started.

@@ -59,6 +59,8 @@ pub enum Reply {
     Control,
     /// An answer to an approval; another client may have answered first.
     Approve,
+    /// `voice_listen`: this connection's listener id.
+    Listen,
 }
 
 /// What a REST answer is for.
@@ -81,6 +83,12 @@ pub enum Rest {
     Devices,
     Pairing,
     Revoked,
+    /// What voice offers; `show` puts it in the transcript.
+    Voice {
+        show: bool,
+    },
+    /// A voice setting changed.
+    VoiceSet,
 }
 
 pub struct Backend {
@@ -94,6 +102,13 @@ pub struct Backend {
     pub sent: Arc<Mutex<Vec<Command>>>,
     #[cfg(test)]
     pub rests: Arc<Mutex<Vec<Rest>>>,
+    /// Speech, dictation and files to open, asked for without a daemon.
+    #[cfg(test)]
+    pub voice: Arc<Mutex<Vec<String>>>,
+    /// Speech plays one sentence after another, in a task of its own.
+    speech: std::sync::OnceLock<mpsc::UnboundedSender<(DaemonFile, String, u64)>>,
+    /// Sentences queued before this was raised are skipped.
+    speech_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Backend {
@@ -112,6 +127,10 @@ impl Backend {
             sent: Arc::default(),
             #[cfg(test)]
             rests: Arc::default(),
+            #[cfg(test)]
+            voice: Arc::default(),
+            speech: Default::default(),
+            speech_generation: Arc::default(),
         }
     }
 
@@ -127,6 +146,9 @@ impl Backend {
             connections,
             sent: Arc::default(),
             rests: Arc::default(),
+            voice: Arc::default(),
+            speech: Default::default(),
+            speech_generation: Arc::default(),
         };
         (backend, received)
     }
@@ -253,6 +275,165 @@ impl Backend {
 
     pub fn revoke(&self, id: &str) {
         self.delete(format!("/api/devices/{id}"), Rest::Revoked);
+    }
+
+    /// What voice offers; `refresh` reads the providers' model lists again.
+    pub fn voice_status(&self, refresh: bool, show: bool) {
+        let path = match refresh {
+            true => "/api/voice?refresh=true",
+            false => "/api/voice",
+        };
+        self.get(path.into(), Rest::Voice { show });
+    }
+
+    /// Changes voice settings (`PUT /api/voice`).
+    pub fn set_voice(&self, changes: serde_json::Map<String, Value>) {
+        let Some(file) = self.file().cloned() else {
+            #[cfg(test)]
+            self.voice
+                .lock()
+                .unwrap()
+                .push(format!("set {}", Value::Object(changes)));
+            #[cfg(test)]
+            self.rests.lock().unwrap().push(Rest::VoiceSet);
+            return;
+        };
+        let updates = self.updates.clone();
+        tokio::spawn(async move {
+            let result = client::put::<Value>(&file, "/api/voice", &changes)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            let _ = updates.send(Update::Rest(Rest::VoiceSet, result));
+        });
+    }
+
+    /// Plays a `say` broadcast's audio after the sentences before it.
+    pub fn say(&self, id: &str) {
+        let Some(file) = self.file().cloned() else {
+            #[cfg(test)]
+            self.voice.lock().unwrap().push(format!("say {id}"));
+            return;
+        };
+        let generation = self.speech_generation.clone();
+        let updates = self.updates.clone();
+        let queue = self.speech.get_or_init(|| {
+            let (tx, mut queue) = mpsc::unbounded_channel::<(DaemonFile, String, u64)>();
+            tokio::spawn(async move {
+                use std::sync::atomic::Ordering;
+                while let Some((file, id, asked)) = queue.recv().await {
+                    if generation.load(Ordering::Relaxed) != asked {
+                        continue;
+                    }
+                    let played = async {
+                        let (audio, media_type) =
+                            client::download(&file, &format!("/api/voice/say/{id}")).await?;
+                        crate::audio::play_bytes(&audio, &media_type).await
+                    }
+                    .await;
+                    if let Err(err) = played {
+                        let _ = updates.send(Update::Speech(format!("{err:#}")));
+                    }
+                }
+            });
+            tx
+        });
+        let current = self
+            .speech_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let _ = queue.send((file, id.to_owned(), current));
+    }
+
+    /// Skips the sentences waiting to be spoken.
+    pub fn hush(&self) {
+        self.speech_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Records from the microphone until `stop` says whether to
+    /// transcribe; the text comes back as [`Update::Dictated`].
+    pub fn dictate(&self, stop: tokio::sync::oneshot::Receiver<bool>) {
+        let Some(file) = self.file().cloned() else {
+            #[cfg(test)]
+            self.voice.lock().unwrap().push("dictate".into());
+            #[cfg(not(test))]
+            drop(stop);
+            return;
+        };
+        let updates = self.updates.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let mut capture = tokio::task::spawn_blocking(|| {
+                    crate::audio::Capture::start(crate::voice::DICTATION_RATE)
+                })
+                .await??;
+                let mut samples = Vec::new();
+                tokio::pin!(stop);
+                let transcribe = loop {
+                    tokio::select! {
+                        chunk = capture.next() => match chunk {
+                            Some(chunk) => samples.extend(chunk),
+                            None => break true,
+                        },
+                        decision = &mut stop => break decision.unwrap_or(false),
+                    }
+                };
+                drop(capture);
+                match transcribe {
+                    true => crate::voice::transcribe(&file, &samples).await.map(Some),
+                    false => Ok(None),
+                }
+            }
+            .await;
+            // A cancelled recording needs no answer.
+            let result = match result {
+                Ok(None) => return,
+                Ok(Some(text)) => Ok(text),
+                Err(err) => Err(format!("{err:#}")),
+            };
+            let _ = updates.send(Update::Dictated(result));
+        });
+    }
+
+    /// Starts talk mode through `agent` of `tab`; its events come back as
+    /// [`Update::Talk`].
+    pub fn talk(
+        &self,
+        session: u64,
+        tab: Option<TabId>,
+        agent: Option<AgentId>,
+    ) -> Option<crate::voice::Talk> {
+        let file = self.file()?.clone();
+        let updates = self.updates.clone();
+        let options = crate::voice::TalkOptions {
+            file,
+            tab,
+            agent,
+            duplex: false,
+        };
+        Some(crate::voice::Talk::start(options, move |event| {
+            let _ = updates.send(Update::Talk(session, event));
+        }))
+    }
+
+    /// Fetches what malac sent into a temporary folder and opens it in the
+    /// system viewer, so it works with a daemon elsewhere too.
+    pub fn open(&self, item: crate::tui::voice::Openable) {
+        let name = item.name();
+        let Some(file) = self.file().cloned() else {
+            #[cfg(test)]
+            self.voice.lock().unwrap().push(format!("open {name}"));
+            return;
+        };
+        let updates = self.updates.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let path = fetch(&file, &item).await?;
+                crate::tui::voice::open_in_viewer(&path).map_err(anyhow::Error::msg)?;
+                anyhow::Ok(name)
+            }
+            .await;
+            let _ = updates.send(Update::Opened(result.map_err(|e| format!("{e:#}"))));
+        });
     }
 
     /// Asks every other known daemon for its workspaces, for the switcher.
@@ -564,6 +745,9 @@ impl App {
                     view.log = Some((job, output.text));
                 }
             }
+            (Reply::Listen, ServerMessage::VoiceListening { listener, .. }) => {
+                self.listened(listener);
+            }
             (Reply::Control, ServerMessage::Control { control, .. }) => {
                 self.control = control;
                 match self.control_issue() {
@@ -590,6 +774,8 @@ impl App {
             }
             // Another client answered first; its answer stands.
             Reply::Approve => {}
+            // Speech stays off here; `/voice` says why when asked.
+            Reply::Listen => self.listened(None),
             Reply::JobOutput { .. } => {}
             Reply::TabCreated { placeholder: true } => {
                 for tab in &mut self.tabs {
@@ -751,6 +937,24 @@ impl App {
                 self.flash_ok(format!("revoked {name}"));
             }
             (Rest::Revoked, Err(err)) => self.flash(format!("cannot revoke: {err}")),
+            (Rest::Voice { show }, result) => {
+                match result.and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
+                    Ok(status) => self.voice_changed(status),
+                    Err(err) => {
+                        return self.flash(format!("cannot read the voice settings: {err}"));
+                    }
+                }
+                if show {
+                    self.show_voice();
+                }
+            }
+            (Rest::VoiceSet, Ok(value)) => {
+                if let Ok(status) = serde_json::from_value(value) {
+                    self.voice_changed(status);
+                }
+                self.flash_ok("voice settings saved");
+            }
+            (Rest::VoiceSet, Err(err)) => self.flash(format!("cannot change voice: {err}")),
         }
     }
 
@@ -786,6 +990,8 @@ impl App {
     pub fn disconnected(&mut self) {
         self.link.connected = false;
         self.backend.disconnect();
+        // A new connection listens again once it knows what voice offers.
+        self.listened(None);
         for tab in &mut self.tabs {
             tab.sending = false;
         }
@@ -939,6 +1145,67 @@ impl App {
         }
         nodes
     }
+}
+
+/// Downloads a shared file, or decodes a tool's image from the agent's
+/// saved conversation, into a temporary file.
+async fn fetch(file: &DaemonFile, item: &crate::tui::voice::Openable) -> anyhow::Result<PathBuf> {
+    use crate::tui::voice::{Openable, download_path};
+    use anyhow::Context;
+    let (path, bytes) = match item {
+        Openable::Shared(shared) => {
+            let (bytes, _) =
+                client::download(file, &format!("/api/shared/{}?download=true", shared.id)).await?;
+            (download_path(&shared.id, &shared.name), bytes)
+        }
+        Openable::Image {
+            agent, call, index, ..
+        } => {
+            let saved: Value = client::get(file, &format!("/api/sessions/{agent}")).await?;
+            let history: Vec<malac_core::Message> =
+                serde_json::from_value(saved["history"].clone()).unwrap_or_default();
+            let images: Vec<(String, String)> = history
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|block| match block {
+                    malac_core::Block::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if tool_use_id == call => Some(content),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|block| match block {
+                    malac_core::Block::Image { media_type, data } => {
+                        Some((media_type.clone(), data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let (media_type, data) = images
+                .get(*index)
+                .or(images.last())
+                .context("the image is not in the saved conversation yet; try again in a moment")?;
+            let bytes = BASE64.decode(data).context("the image does not decode")?;
+            let extension = malac_core::shared::image_extension(media_type);
+            let name = format!(
+                "{}-{}.{extension}",
+                item.name().replace(' ', "-"),
+                &call[..call.len().min(8)]
+            );
+            (download_path(agent, &name), bytes)
+        }
+    };
+    if let Some(folder) = path.parent() {
+        tokio::fs::create_dir_all(folder)
+            .await
+            .with_context(|| format!("cannot create {}", folder.display()))?;
+    }
+    tokio::fs::write(&path, bytes)
+        .await
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(path)
 }
 
 /// What a prompt says about an attachment. A daemon elsewhere cannot read
