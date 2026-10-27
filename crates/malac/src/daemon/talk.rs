@@ -38,7 +38,7 @@ const REPORT_CHARS: usize = 4000;
 pub async fn run(hub: Arc<Hub>, socket: WebSocket, tab: Option<String>, agent: Option<String>) {
     let (mut client_tx, mut client_rx) = socket.split();
     let reason = match session(&hub, &mut client_tx, &mut client_rx, tab, agent).await {
-        Ok(()) => "talk mode ended".to_owned(),
+        Ok(reason) => reason,
         Err(err) => {
             let message = json!({ "type": "error", "message": format!("{err:#}") }).to_string();
             let _ = client_tx.send(ClientMessage::Text(message.into())).await;
@@ -67,7 +67,7 @@ async fn session(
     client_rx: &mut ClientRx,
     tab: Option<String>,
     agent: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let status = hub.voice().status();
     if !status.talk.enabled {
         bail!("talk mode is off");
@@ -156,6 +156,10 @@ async fn session(
                 let text = match message.context("the voice model's connection failed")? {
                     UpstreamMessage::Text(text) => text,
                     UpstreamMessage::Close(frame) => {
+                        // A provider that reported an error and hung up has said why already.
+                        if let Some(error) = state.relayed.take() {
+                            return Ok(error);
+                        }
                         let reason = frame.map(|f| f.reason.to_string()).unwrap_or_default();
                         bail!("the voice model closed the conversation{}", if reason.is_empty() { String::new() } else { format!(": {reason}") });
                     }
@@ -176,7 +180,10 @@ async fn session(
                     "input_audio_buffer.speech_stopped" => {
                         to_client(client_tx, json!({ "type": "thinking" })).await?;
                     }
-                    "response.created" => state.responding = true,
+                    "response.created" => {
+                        state.responding = true;
+                        state.relayed = None;
+                    }
                     "response.output_audio.delta" | "response.audio.delta" => {
                         if let Ok(pcm) = BASE64.decode(event["delta"].as_str().unwrap_or_default()) {
                             client_tx.send(ClientMessage::Binary(pcm.into())).await?;
@@ -224,6 +231,7 @@ async fn session(
                         }
                         // A refused request leaves no reply under way; later notes must still go out.
                         state.responding = false;
+                        state.relayed = Some(message.to_owned());
                         to_client(client_tx, json!({ "type": "error", "message": message })).await?;
                     }
                     _ => {}
@@ -257,7 +265,7 @@ async fn session(
         }
     }
     let _ = up_tx.close().await;
-    Ok(())
+    Ok("talk mode ended".to_owned())
 }
 
 /// What the voice model still has to hear, held while it is answering.
@@ -265,6 +273,8 @@ async fn session(
 struct Conversation {
     ready: bool,
     beta: bool,
+    /// The provider's last error, as passed on to the client.
+    relayed: Option<String>,
     responding: bool,
     pending: VecDeque<Value>,
 }
