@@ -13,6 +13,7 @@ const CHOICES: { label: string; decision: "allow" | "allow_session" | "deny" }[]
   { label: "Deny", decision: "deny" },
 ];
 const DETAILS = "Show details";
+const OPEN = "Open";
 
 export class ApprovalNotifier {
   private shown = new Set<string>();
@@ -23,6 +24,8 @@ export class ApprovalNotifier {
     /** Whether the chat shows this request right now. */
     private readonly chatShows: (request: PendingApproval) => boolean,
     private readonly enabled: () => boolean,
+    /** Shows the request's agent in the chat. */
+    private readonly open: (request: PendingApproval) => Promise<void>,
   ) {}
 
   /** Called with requests that just arrived. */
@@ -44,10 +47,14 @@ export class ApprovalNotifier {
       ? `malac: ${request.agent_label}${where} asks to ${title.charAt(0).toLowerCase()}${title.slice(1)}. It runs code on the daemon's machine.`
       : `malac: ${request.agent_label}${where} wants to use ${truncate(request.summary ? `${request.tool}: ${request.summary}` : request.tool, 200)}`;
     const labels = CHOICES.map((c) => c.label);
-    let choice = await vscode.window.showWarningMessage(text, ...labels, ...(details ? [DETAILS] : []));
+    let choice = await vscode.window.showWarningMessage(text, ...labels, ...(details ? [DETAILS] : []), OPEN);
     if (choice === DETAILS && details) {
       // A modal dialog shows the whole content (a plugin's hooks, MCP servers and scripts).
       choice = await vscode.window.showWarningMessage(text, { modal: true, detail: details }, ...labels);
+    }
+    if (choice === OPEN) {
+      await this.open(request);
+      return;
     }
     const picked = CHOICES.find((c) => c.label === choice);
     if (!picked) return;

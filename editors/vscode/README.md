@@ -1,6 +1,13 @@
 # malac for VS Code
 
-Work with [malac](https://github.com/lobirus/malac) agents without leaving the editor. The extension adds a **malac** container (the pig) to the activity bar with a native chat, the daemon's workspaces, jobs and sessions, and a usage view. It looks like the rest of VS Code in light, dark and high-contrast themes.
+Work with [malac](https://github.com/lobirus/malac) agents without leaving the editor. malac sits where Claude Code and Copilot do:
+
+- **The right-hand panel.** The chat is a **malac** tab next to *Chat* in the secondary side bar. On VS Code before 1.106, which has no room there for extensions, it is the first view of malac's activity-bar container instead (never both).
+- **Editor tabs.** **malac: Open in New Tab** opens a chat in an editor tab. Each tab follows its own agent, is titled after it, and comes back after a reload.
+- **The editor title bar.** The pig button next to the editor tabs opens malac; Alt+click opens it in a new tab (`malac.editorTitleButton` hides it).
+- **The status bar**, on the right next to Claude Code's: the pig and "malac" when idle, the number of running agents and waiting approvals otherwise. Click it to open malac.
+
+The activity bar keeps malac's container (the pig) with the daemon's workspaces, jobs and sessions, and a usage view. Everything looks like the rest of VS Code in light, dark and high-contrast themes.
 
 ## Chat
 
@@ -19,15 +26,18 @@ Work with [malac](https://github.com/lobirus/malac) agents without leaving the e
 - **Sessions**: saved sessions by day, for this folder or all folders. Click to load one into a tab and continue it.
 - **Usage**: tokens and cost today, over the last seven days and per model, from the daemon's session transcripts (`GET /api/usage`).
 
-The status bar shows how many agents are running and approvals waiting, and warns when the daemon runs another malac version than the one installed. Click it to open the chat. When the chat is hidden (or shows another tab), approval requests also appear as notifications with Allow / Always / Deny.
+The status bar shows how many agents are running and approvals waiting, and warns when the daemon runs another malac version than the one installed. Click it to open malac. When no visible chat shows a request's tab, approval requests also appear as notifications with Allow / Always / Deny, and **Open**, which shows the agent in the chat.
 
 ## Commands
 
 | Command | |
 | --- | --- |
-| **malac: Focus Chat** (⌘⌥M / Ctrl+Alt+M) | Opens the chat and focuses the composer. |
-| **malac: Ask About Selection** | Opens the chat with the selection as context. Also in the editor context menu. |
-| **malac: Add File to Context** (⌘⌥K / Ctrl+Alt+K) | Attaches the active file, or the files selected in the Explorer. |
+| **malac: Open** | Brings back the chat used last: an editor tab while it is open, else the side-bar chat. The title-bar button and the status bar item run it. |
+| **malac: Open in Side Bar** | The chat in the right-hand panel (the activity bar before VS Code 1.106). |
+| **malac: Open in New Tab** (⌘⌥⇧M / Ctrl+Alt+Shift+M) | A new chat in an editor tab, with a new agent in the side chat's tab. Alt+click on the title-bar button does the same. |
+| **malac: Focus Chat** (⌘⌥M / Ctrl+Alt+M) | Opens the side-bar chat and focuses the composer. |
+| **malac: Ask About Selection** | Opens the side-bar chat with the selection as context. Also in the editor context menu. |
+| **malac: Add File to Context** (⌘⌥⇧K / Ctrl+Alt+Shift+K) | Attaches the active file, or the files selected in the Explorer, to the chat in use (an editor tab you are working in, else the side-bar chat). |
 | **malac: New Agent** | The next message starts a new agent in the chat's tab. |
 | **malac: New Tab for This Folder** | Opens a tab for the folder, the repository root, or another folder. |
 | **malac: Stop Agent** | Stops the chat's agent, or picks a running one. |
@@ -55,6 +65,7 @@ When the workspace folder has no tab, the chat offers to open one. If the folder
 | `malac.folderTab` | `ask` | `ask`, `folder`, `repositoryRoot` or `never`: what to do when the folder has no tab. |
 | `malac.approvalNotifications` | `true` | Approval notifications when the chat cannot show them. |
 | `malac.chat.includeCurrentFile` | `true` | Whether the current-file chip starts out on. |
+| `malac.editorTitleButton` | `true` | The malac button in the editor title bar. |
 
 ## How it works
 
@@ -65,11 +76,14 @@ src/
   extension.ts           activation, commands, wiring
   connection/            daemon.json discovery, malac web launcher, WebSocket client, reconnects
   model/                 state store, tree nodes, context chip, folder plan, usage, status (no vscode imports)
-  chat/                  chat controller (no vscode imports), webview page, message types, VS Code view
+  chat/                  chat controller (no vscode imports), webview page, message types; the side-bar view,
+                         editor tabs (panel.ts) and the surfaces that route commands to them
   ui/                    tree providers, usage view, status bar, notifications, job logs, full UI panel
   webview/*.mts          the chat page: transcript, composer, menus, markdown, drop and paste handling
 test/                    node --test unit tests
 harness/serve.ts         the chat page in a browser against a real daemon
+harness/activate.ts      activation smoke test with a stand-in vscode module (npm run smoke)
+scripts/pig-font.py      builds media/malac-icons.woff, the pig glyph for the status bar
 ```
 
 ## Development
@@ -91,3 +105,5 @@ MALAC_HOME=/tmp/malac-home MALAC_BIN=malac HARNESS_CWD=/path/to/project npm run 
 ```
 
 `HARNESS_FALLBACK_WS=1` uses the extension's built-in WebSocket client (what older VS Code versions get) instead of Node's.
+
+`npm run smoke` activates the compiled extension with a stand-in `vscode` module against the daemon in `MALAC_HOME` and checks that every command and view is registered, where the chat goes for `VSCODE_VERSION` (default 1.139.1; try 1.99.3 for the activity-bar fallback), the status bar, editor tabs and their restore. `SMOKE_PROMPT=1` adds one real prompt from an editor tab.

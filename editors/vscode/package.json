@@ -28,7 +28,8 @@
     "chat"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:malac.chatTab"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -45,6 +46,14 @@
           "title": "malac",
           "icon": "media/malac.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "malac-secondary",
+          "title": "malac",
+          "icon": "media/malac.svg",
+          "when": "!malac.noSecondarySidebar"
+        }
       ]
     },
     "views": {
@@ -54,7 +63,8 @@
           "id": "malac.chat",
           "name": "Chat",
           "icon": "media/malac.svg",
-          "contextualTitle": "malac"
+          "contextualTitle": "malac",
+          "when": "malac.noSecondarySidebar"
         },
         {
           "id": "malac.workspaces",
@@ -85,9 +95,43 @@
           "contextualTitle": "malac",
           "visibility": "collapsed"
         }
+      ],
+      "malac-secondary": [
+        {
+          "type": "webview",
+          "id": "malac.chatSecondary",
+          "name": "malac",
+          "icon": "media/malac.svg",
+          "contextualTitle": "malac",
+          "when": "!malac.noSecondarySidebar"
+        }
       ]
     },
     "commands": [
+      {
+        "command": "malac.open",
+        "title": "Open",
+        "category": "malac",
+        "icon": {
+          "light": "media/pig-light.svg",
+          "dark": "media/pig-dark.svg"
+        }
+      },
+      {
+        "command": "malac.openInSideBar",
+        "title": "Open in Side Bar",
+        "category": "malac",
+        "icon": {
+          "light": "media/pig-light.svg",
+          "dark": "media/pig-dark.svg"
+        }
+      },
+      {
+        "command": "malac.openInNewTab",
+        "title": "Open in New Tab",
+        "category": "malac",
+        "icon": "$(empty-window)"
+      },
       {
         "command": "malac.focusChat",
         "title": "Focus Chat",
@@ -153,11 +197,6 @@
         "title": "Show Log",
         "category": "malac",
         "icon": "$(output)"
-      },
-      {
-        "command": "malac.open",
-        "title": "Open (Full UI)",
-        "category": "malac"
       },
       {
         "command": "malac.agent.open",
@@ -269,10 +308,6 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "malac.open",
-          "when": "false"
-        },
-        {
           "command": "malac.agent.open",
           "when": "false"
         },
@@ -348,32 +383,37 @@
       "view/title": [
         {
           "command": "malac.newAgent",
-          "when": "view == malac.chat",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "navigation@1"
         },
         {
-          "command": "malac.openFullUi",
-          "when": "view == malac.chat",
+          "command": "malac.openInNewTab",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "navigation@2"
         },
         {
+          "command": "malac.openFullUi",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
+          "group": "navigation@3"
+        },
+        {
           "command": "malac.newTabForFolder",
-          "when": "view == malac.chat",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "1_tabs@1"
         },
         {
           "command": "malac.restartDaemon",
-          "when": "view == malac.chat",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "2_daemon@1"
         },
         {
           "command": "malac.reconnect",
-          "when": "view == malac.chat",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "2_daemon@2"
         },
         {
           "command": "malac.showLog",
-          "when": "view == malac.chat",
+          "when": "view =~ /^malac\\.chat(Secondary)?$/",
           "group": "2_daemon@3"
         },
         {
@@ -519,6 +559,14 @@
           "when": "resourceScheme == file || resourceScheme == vscode-remote",
           "group": "malac@1"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "malac.open",
+          "alt": "malac.openInNewTab",
+          "when": "config.malac.editorTitleButton",
+          "group": "navigation@100"
+        }
       ]
     },
     "keybindings": [
@@ -528,9 +576,14 @@
         "mac": "cmd+alt+m"
       },
       {
+        "command": "malac.openInNewTab",
+        "key": "ctrl+alt+shift+m",
+        "mac": "cmd+alt+shift+m"
+      },
+      {
         "command": "malac.addFileToContext",
-        "key": "ctrl+alt+k",
-        "mac": "cmd+alt+k",
+        "key": "ctrl+alt+shift+k",
+        "mac": "cmd+alt+shift+k",
         "when": "editorTextFocus"
       }
     ],
@@ -591,6 +644,20 @@
           "type": "boolean",
           "default": true,
           "description": "Start with the current-file chip turned on: the open file (or the selected lines) goes with each message."
+        },
+        "malac.editorTitleButton": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the malac button in the editor title bar. Click opens malac; Alt+click opens it in a new editor tab."
+        }
+      }
+    },
+    "icons": {
+      "malac-pig": {
+        "description": "The malac pig",
+        "default": {
+          "fontPath": "./media/malac-icons.woff",
+          "fontCharacter": "\\E000"
         }
       }
     }

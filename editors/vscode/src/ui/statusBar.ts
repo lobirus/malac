@@ -6,7 +6,8 @@ import { statusSummary } from "../model/status";
 import type { DaemonStore } from "../model/store";
 
 export class StatusBar implements vscode.Disposable {
-  private item = vscode.window.createStatusBarItem("malac.status", vscode.StatusBarAlignment.Left, 50);
+  // On the right, like Claude Code's "✻ Claude Code" and Copilot's items.
+  private item = vscode.window.createStatusBarItem("malac.status", vscode.StatusBarAlignment.Right, 100);
 
   constructor(
     private readonly store: DaemonStore,
@@ -14,7 +15,7 @@ export class StatusBar implements vscode.Disposable {
     private readonly version: () => string | undefined,
   ) {
     this.item.name = "malac";
-    this.item.command = "malac.focusChat";
+    this.item.command = "malac.open";
     this.update();
     this.item.show();
   }

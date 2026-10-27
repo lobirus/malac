@@ -6,7 +6,9 @@
 //   MALAC_HOME=/tmp/home HARNESS_CWD=/some/project MALAC_BIN=malac node out/harness/activate.js
 //
 // FOLDER_TAB sets malac.folderTab (default "folder"); EXPECT_TAB is the tab
-// directory the chat should end up in (default HARNESS_CWD).
+// directory the chat should end up in (default HARNESS_CWD); VSCODE_VERSION
+// is what `vscode.version` reports (default 1.139.1); SMOKE_PROMPT=1 sends
+// one real prompt from an editor tab.
 
 import * as fs from "node:fs";
 import Module from "node:module";
@@ -34,6 +36,10 @@ const commands = new Map<string, (...args: unknown[]) => unknown>();
 const treeViews = new Map<string, { provider: { getChildren(n?: unknown): unknown; getTreeItem(n: unknown): unknown }; view: Record<string, unknown> }>();
 const webviewProviders = new Map<string, { resolveWebviewView(view: unknown): void }>();
 const statusItems: Record<string, unknown>[] = [];
+const serializers = new Map<string, { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> }>();
+const panels: MockPanel[] = [];
+const VERSION = process.env.VSCODE_VERSION ?? "1.139.1";
+const executed: string[] = [];
 const messages: string[] = [];
 const contexts = new Map<string, unknown>();
 const settings: Record<string, unknown> = {
@@ -67,7 +73,72 @@ class Uri {
   }
 }
 
+interface MockWebview {
+  options: unknown;
+  html: string;
+  cspSource: string;
+  posted: { type: string; state?: Record<string, unknown> }[];
+  receive: (m: unknown) => void;
+  asWebviewUri(uri: Uri): Uri;
+  postMessage(m: never): Promise<void>;
+  onDidReceiveMessage(fn: (m: unknown) => void): { dispose(): void };
+}
+
+function mockWebview(): MockWebview {
+  const webview: MockWebview = {
+    options: {},
+    html: "",
+    cspSource: "vscode-webview://test",
+    posted: [],
+    receive: () => {},
+    asWebviewUri: (uri: Uri) => uri,
+    postMessage: async (m: never) => void webview.posted.push(m),
+    onDidReceiveMessage: (fn: (m: unknown) => void) => {
+      webview.receive = fn;
+      return { dispose() {} };
+    },
+  };
+  return webview;
+}
+
+interface MockPanel {
+  viewType: string;
+  webview: MockWebview;
+  title: string;
+  iconPath: unknown;
+  visible: boolean;
+  active: boolean;
+  revealed: number;
+  reveal(): void;
+  dispose(): void;
+  onDidChangeViewState: typeof noEvent;
+  onDidDispose: (fn: () => void) => { dispose(): void };
+}
+
+function mockPanel(viewType: string): MockPanel {
+  const closers: (() => void)[] = [];
+  const panel: MockPanel = {
+    viewType,
+    webview: mockWebview(),
+    title: "",
+    iconPath: undefined,
+    visible: true,
+    active: true,
+    revealed: 0,
+    reveal: () => void (panel.revealed += 1),
+    dispose: () => closers.splice(0).forEach((f) => f()),
+    onDidChangeViewState: noEvent,
+    onDidDispose: (fn) => {
+      closers.push(fn);
+      return { dispose() {} };
+    },
+  };
+  panels.push(panel);
+  return panel;
+}
+
 const vscode = {
+  version: VERSION,
   EventEmitter,
   Uri,
   ThemeIcon: class {
@@ -97,7 +168,7 @@ const vscode = {
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   ProgressLocation: { Notification: 15, Window: 10 },
-  ViewColumn: { Beside: -2 },
+  ViewColumn: { Beside: -2, Active: -1 },
   Range: class {},
   TabInputText: class {},
   window: {
@@ -110,11 +181,16 @@ const vscode = {
       treeViews.set(id, { provider: options.treeDataProvider, view });
       return view;
     },
-    createStatusBarItem: () => {
-      const item: Record<string, unknown> = { show() {}, dispose() {} };
+    createStatusBarItem: (id: string, alignment: number, priority: number) => {
+      const item: Record<string, unknown> = { id, alignment, priority, show() {}, dispose() {} };
       statusItems.push(item);
       return item;
     },
+    registerWebviewPanelSerializer: (type: string, serializer: never) => {
+      serializers.set(type, serializer);
+      return { dispose() {} };
+    },
+    createWebviewPanel: (type: string) => mockPanel(type),
     registerWebviewViewProvider: (id: string, provider: never) => {
       webviewProviders.set(id, provider);
       return { dispose() {} };
@@ -138,6 +214,7 @@ const vscode = {
     onDidChangeWorkspaceFolders: noEvent,
     onDidChangeTextDocument: noEvent,
     onDidSaveTextDocument: noEvent,
+    onDidCloseTextDocument: noEvent,
     onDidChangeConfiguration: noEvent,
     registerTextDocumentContentProvider: () => ({ dispose() {} }),
     asRelativePath: (uri: Uri) => path.relative(CWD, uri.fsPath),
@@ -149,6 +226,7 @@ const vscode = {
       return { dispose: () => commands.delete(id) };
     },
     executeCommand: async (id: string, ...args: unknown[]) => {
+      executed.push(id);
       if (id === "setContext") contexts.set(String(args[0]), args[1]);
       else if (commands.has(id)) return commands.get(id)!(...args);
       return undefined;
@@ -189,32 +267,28 @@ async function main(): Promise<void> {
   check("every declared command is registered", missing.length === 0, missing.join(", "));
   const extra = [...commands.keys()].filter((id) => !declared.includes(id));
   check("every registered command is declared", extra.length === 0, extra.join(", "));
-  const views: { id: string; type?: string }[] = pkg.contributes.views.malac;
-  for (const view of views) {
+  // The chat is in the right-hand panel from VS Code 1.106, else in the activity bar; never both.
+  const secondary = !/^1\.(\d|[1-9]\d|10[0-5])\./.test(VERSION);
+  const chatId = secondary ? "malac.chatSecondary" : "malac.chat";
+  const otherChat = secondary ? "malac.chat" : "malac.chatSecondary";
+  check(`VS Code ${VERSION}: the chat view is ${chatId}`, webviewProviders.has(chatId) && !webviewProviders.has(otherChat));
+  check("the secondary side bar context key is set", contexts.get("malac.noSecondarySidebar") === !secondary, String(contexts.get("malac.noSecondarySidebar")));
+  const views: { id: string; type?: string }[] = Object.values(pkg.contributes.views as Record<string, { id: string; type?: string }[]>).flat();
+  for (const view of views.filter((v) => v.id !== otherChat)) {
     const registered = view.type === "webview" ? webviewProviders.has(view.id) : treeViews.has(view.id);
     check(`view ${view.id} is registered`, registered);
   }
+  check("editor tabs come back after a reload", serializers.has("malac.chatTab"));
   for (const menu of pkg.contributes.menus["view/item/context"] as { command: string }[]) {
     if (!commands.has(menu.command)) check(`menu command ${menu.command}`, false);
   }
 
   // Resolve the chat view as VS Code would when it is shown.
-  const posted: { type: string; state?: Record<string, unknown> }[] = [];
-  let receive: (m: unknown) => void = () => {};
-  const webview = {
-    options: {},
-    html: "",
-    cspSource: "vscode-webview://test",
-    asWebviewUri: (uri: Uri) => uri,
-    postMessage: async (m: never) => void posted.push(m),
-    onDidReceiveMessage: (fn: (m: unknown) => void) => {
-      receive = fn;
-      return { dispose() {} };
-    },
-  };
-  webviewProviders.get("malac.chat")!.resolveWebviewView({ webview, visible: true, onDidChangeVisibility: noEvent, onDidDispose: noEvent });
+  const webview = mockWebview();
+  const posted = webview.posted;
+  webviewProviders.get(chatId)!.resolveWebviewView({ webview, visible: true, onDidChangeVisibility: noEvent, onDidDispose: noEvent });
   check("the chat page has a strict CSP", /default-src 'none'/.test(webview.html) && /script-src 'nonce-/.test(webview.html));
-  receive({ type: "ready" });
+  webview.receive({ type: "ready" });
 
   const deadline = Date.now() + 30_000;
   const chatState = () => [...posted].reverse().find((m) => m.type === "state")?.state as { tab: { cwd: string } | null; connection: { state: string } } | undefined;
@@ -239,7 +313,42 @@ async function main(): Promise<void> {
   check("the Sessions tree loads", groups.length > 0);
   check("the sessions scope context key is set", contexts.get("malac.sessionsScope") === "folder");
   const status = statusItems[0];
-  check("the status bar shows malac", String(status?.text).includes("malac"), String(status?.text));
+  check("the status bar shows the pig and malac", String(status?.text).startsWith("$(malac-pig)") && String(status?.text).includes("malac"), String(status?.text));
+  check("the status bar item is on the right and opens malac", status?.alignment === 2 && status?.command === "malac.open");
+
+  // Editor tabs: each has its own chat, titled after its agent.
+  await commands.get("malac.openInNewTab")!();
+  const tab = panels.at(-1)!;
+  check("Open in New Tab makes a chat panel", tab?.viewType === "malac.chatTab" && /script-src 'nonce-/.test(tab.webview.html));
+  tab.webview.receive({ type: "ready" });
+  await new Promise((r) => setTimeout(r, 300));
+  const tabState = [...tab.webview.posted].reverse().find((m) => m.type === "state")?.state as { tab: { cwd: string } | null; agent: unknown } | undefined;
+  check("the new tab starts a new agent in the side chat's tab", tabState?.tab?.cwd === s?.tab?.cwd && tabState?.agent === null, `${tabState?.tab?.cwd} agent=${JSON.stringify(tabState?.agent)}`);
+  check("the new tab is titled malac until its agent exists", tab.title === "malac", tab.title);
+  if (process.env.SMOKE_PROMPT) {
+    // One real turn: the tab is then titled after its new agent.
+    tab.webview.receive({ type: "submit", text: "Reply with just the word ok.", attachments: [], images: [] });
+    const until = Date.now() + 60_000;
+    while (Date.now() < until && tab.title === "malac") await new Promise((r) => setTimeout(r, 250));
+    check("the tab is titled after its agent", tab.title.startsWith("Reply with just"), tab.title);
+  }
+  tab.webview.receive({ type: "toggleContext", enabled: true });
+  await commands.get("malac.open")!();
+  check("Open brings back the tab used last", tab.revealed >= 2, String(tab.revealed));
+  const restored = mockPanel("malac.chatTab");
+  const sideTab = (s as unknown as { tab: { id: string } }).tab.id;
+  await serializers.get("malac.chatTab")!.deserializeWebviewPanel(restored, { chat: { tab: sideTab, agent: null } });
+  restored.webview.receive({ type: "ready" });
+  await new Promise((r) => setTimeout(r, 300));
+  const back = [...restored.webview.posted].reverse().find((m) => m.type === "state")?.state as { tab: { id: string } | null } | undefined;
+  check("a restored tab comes back to its tab", back?.tab?.id === sideTab, back?.tab?.id);
+  tab.dispose();
+  executed.length = 0;
+  await commands.get("malac.open")!();
+  check("with the tab closed, Open goes to the side chat", executed.includes(`${chatId}.focus`), executed.join(", "));
+  executed.length = 0;
+  await commands.get("malac.focusChat")!();
+  check("Focus Chat goes to the side chat", executed.includes(`${chatId}.focus`), executed.join(", "));
   check("no error notifications", !messages.some((m) => m.startsWith("[error]")), messages.filter((m) => m.startsWith("[error]")).join(" | "));
   for (const m of messages.filter((m) => !m.startsWith("[log]"))) console.log(`     ${m}`);
 

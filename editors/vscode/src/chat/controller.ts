@@ -67,14 +67,17 @@ export class ChatController implements Disposable {
   readonly onSelection = new Emitter<{ tab: string | null; agent: string | null }>();
 
   private readonly files: FileAccess | undefined;
+  /** Whether this chat fills in session titles after a snapshot (one chat per window does). */
+  private readonly titles: boolean;
 
   constructor(
     private readonly store: DaemonStore,
     private readonly client: DaemonClient,
     private readonly host: ChatHost,
-    { includeCurrentFile = true, files }: { includeCurrentFile?: boolean; files?: FileAccess } = {},
+    { includeCurrentFile = true, files, titles = true }: { includeCurrentFile?: boolean; files?: FileAccess; titles?: boolean } = {},
   ) {
     this.files = files;
+    this.titles = titles;
     this.contextEnabled = host.recall<boolean>("chat.context") ?? includeCurrentFile;
     this.tabId = host.recall<string>("chat.tab") ?? null;
     this.disposables.push(
@@ -382,10 +385,14 @@ export class ChatController implements Disposable {
     if (change.snapshot) {
       this.shown = undefined;
       this.outbox = [];
-      void this.client
-        .get<{ sessions: { id: string; title: string }[] }>("/api/sessions?limit=200&subagents=true")
-        .then((data) => this.store.applyTitles(data.sessions ?? []))
-        .catch(() => undefined);
+      if (this.titles) {
+        void this.client
+          .get<{ sessions: { id: string; title: string }[] }>("/api/sessions?limit=200&subagents=true")
+          .then((data) => this.store.applyTitles(data.sessions ?? []))
+          .catch(() => undefined);
+      }
+      // A tab remembered from before (a restored editor tab, say) may be gone.
+      if (this.tabId && this.store.loaded && !this.store.tab(this.tabId)) this.tabId = null;
     }
     if (change.closedTab && change.closedTab === this.tabId) {
       const next = this.store.allTabs()[0]?.tab.id ?? null;

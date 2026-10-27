@@ -1,18 +1,22 @@
-// The malac extension: one daemon connection per window, shared by the chat
-// view, the Workspaces/Jobs/Sessions trees, the Usage view, the status bar
-// and approval notifications. "Open full UI" still frames the web UI.
+// The malac extension: one daemon connection per window, shared by the chats
+// (a view in the right-hand panel, or in the activity bar on VS Code before
+// 1.106, plus editor tabs), the Workspaces/Jobs/Sessions trees, the Usage
+// view, the status bar and approval notifications. "Open full UI" still
+// frames the web UI.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { ChatController } from "./chat/controller";
-import { ChatView } from "./chat/view";
+import { ChatEnvironment } from "./chat/environment";
+import { CHAT_PANEL_TYPE } from "./chat/panel";
+import { ChatSurfaces } from "./chat/surfaces";
 import { DaemonClient } from "./connection/client";
 import { EndpointProvider, LocalEndpoints, malacHome, parseConnectionSetting, SavedEndpoints } from "./connection/endpoint";
 import { Launcher, MissingBinaryError, parseVersion, runMalac } from "./connection/launcher";
 import { isRemoteEndpoint } from "./model/attachments";
 import { Change, DaemonStore } from "./model/store";
+import { chatViewId, supportsSecondarySidebar } from "./model/surfaces";
 import type { NodeRef } from "./model/tree";
 import type { WorkspaceView } from "./protocol";
 import { ApprovalNotifier } from "./ui/approvals";
@@ -51,9 +55,17 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const client = new DaemonClient({ provider, version, log });
 
-  const chatView = new ChatView(context, output, version);
-  const chat = new ChatController(store, client, chatView, { includeCurrentFile: config().get<boolean>("chat.includeCurrentFile", true) });
-  chatView.controller = chat;
+  // The chat goes in the right-hand panel where VS Code has one for
+  // extensions (1.106+, and Cursor on a recent base); the activity-bar Chat
+  // view is only shown on older versions, so there is never a second chat.
+  const secondary = supportsSecondarySidebar(vscode.version);
+  void vscode.commands.executeCommand("setContext", "malac.noSecondarySidebar", !secondary);
+  const env = new ChatEnvironment(context, output, version);
+  const surfaces = new ChatSurfaces(env, store, client, chatViewId(vscode.version), () => ({
+    includeCurrentFile: config().get<boolean>("chat.includeCurrentFile", true),
+  }));
+  const chat = surfaces.chat;
+  const chatView = surfaces.side;
   folders = new FolderTabs(context, store, client, chat);
 
   const workspacesTree = new WorkspacesTree(store, client);
@@ -67,15 +79,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const jobLogs = new JobLogProvider(client, store);
   let panel: MalacPanel | undefined;
 
-  const chatShows = (request: { tab: string | null; agent: string }) => {
-    if (!chatView.visible) return false;
-    const tab = chat.currentTab;
-    if (!tab) return false;
-    if (request.tab === tab) return true;
-    const view = store.tab(tab)?.tab;
-    return Boolean(view && store.agentsOfTab(view).some((a) => a.id === request.agent));
-  };
-  const notifier = new ApprovalNotifier(store, client, chatShows, () => config().get<boolean>("approvalNotifications", true));
+  const notifier = new ApprovalNotifier(
+    store,
+    client,
+    (request) => surfaces.shows(request),
+    () => config().get<boolean>("approvalNotifications", true),
+    async (request) => {
+      chat.selectAgent(request.agent);
+      await surfaces.revealSide();
+    },
+  );
 
   // Store → views
 
@@ -116,8 +129,8 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => client.dispose() },
     { dispose: () => launcher.dispose() },
     { dispose: () => panel?.dispose() },
-    chatView,
-    chat,
+    env,
+    surfaces,
     workspacesTree,
     jobsTree,
     sessionsTree,
@@ -127,7 +140,8 @@ export function activate(context: vscode.ExtensionContext): void {
     usageView,
     statusBar,
     jobLogs,
-    vscode.window.registerWebviewViewProvider(ChatView.id, chatView, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.window.registerWebviewViewProvider(chatView.id, chatView, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.window.registerWebviewPanelSerializer(CHAT_PANEL_TYPE, surfaces),
     vscode.window.registerWebviewViewProvider(UsageView.id, usageView),
     vscode.workspace.registerTextDocumentContentProvider(JOB_SCHEME, jobLogs),
     store.onChange.event(onChange),
@@ -164,10 +178,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Commands
 
-  const reveal = async (text?: string) => {
-    client.ensureStarted();
-    await chatView.reveal(text);
-  };
+  /** The side-bar chat: the right-hand panel where it exists. */
+  const reveal = (text?: string) => surfaces.revealSide(text);
 
   const whenOnline = (timeoutMs = 30_000) =>
     new Promise<void>((resolve, reject) => {
@@ -214,6 +226,9 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
   register("malac.focusChat", () => reveal());
+  register("malac.open", () => surfaces.openLast());
+  register("malac.openInSideBar", () => reveal());
+  register("malac.openInNewTab", () => surfaces.openInNewTab());
 
   register("malac.askAboutSelection", async () => {
     chat.setContextEnabled(true);
@@ -228,13 +243,15 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage("malac: pick a file in the Explorer or open one in an editor first.");
       return;
     }
-    await reveal();
-    chat.addAttachments(files.map((u) => ({ path: u.fsPath, label: vscode.workspace.asRelativePath(u, false) })));
+    const target = surfaces.target();
+    await target.reveal();
+    target.controller.addAttachments(files.map((u) => ({ path: u.fsPath, label: vscode.workspace.asRelativePath(u, false) })));
   });
 
   register("malac.newAgent", async () => {
-    await reveal();
-    chat.newAgent();
+    const target = surfaces.target();
+    await target.reveal();
+    target.controller.newAgent();
   });
 
   register("malac.newTabForFolder", async () => {
@@ -252,7 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
   register("malac.folderTab.dismiss", () => folders!.dismiss());
 
   register("malac.stop", async () => {
-    if (chat.stop()) return;
+    if (surfaces.target().controller.stop()) return;
     const running = store.runningAgents();
     if (!running.length) {
       void vscode.window.showInformationMessage("malac: no agent is running.");
@@ -279,7 +296,6 @@ export function activate(context: vscode.ExtensionContext): void {
     await panel.show({ url: endpoint.url, token: endpoint.source === "remote" ? "" : endpoint.token });
   };
   register("malac.openFullUi", openFullUi);
-  register("malac.open", openFullUi);
 
   register("malac.restartDaemon", async () => {
     if (isRemoteEndpoint(client.address)) {

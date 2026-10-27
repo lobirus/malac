@@ -38,6 +38,13 @@ const approvals = $("approvals");
 const jump = $<HTMLButtonElement>("jump");
 const toasts = $("toasts");
 
+/** Keeps the shown tab and agent in the webview state, so an editor tab comes back to them after a reload. */
+function remember(current: ChatState): void {
+  const saved = (vscode.getState() as { chat?: { tab?: string | null; agent?: string | null } } | null) ?? {};
+  const chat = { tab: current.tab?.id ?? null, agent: current.agent?.id ?? null };
+  if (saved.chat?.tab !== chat.tab || saved.chat?.agent !== chat.agent) vscode.setState({ ...saved, chat });
+}
+
 function post(message: FromWebview): void {
   vscode.postMessage(message);
 }
@@ -248,6 +255,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   switch (message?.type) {
     case "state":
       state = message.state;
+      remember(state);
       render();
       break;
     case "transcript":

@@ -7,3 +7,4 @@ out/test/**
 out/harness/**
 out/**/*.map
 tsconfig.json
+scripts/**

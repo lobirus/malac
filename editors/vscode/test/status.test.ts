@@ -27,9 +27,18 @@ test("the status bar counts running agents and waiting approvals", () => {
   const s = store();
   s.apply({ type: "event", tab: "t1", envelope: { agent: "a2", seq: 1, at: "", type: "user_message", text: "go" } });
   const summary = statusSummary(s, online, "1.0.0");
-  assert.equal(summary.text, "malac $(sync~spin) 1 $(bell-dot) 1");
+  assert.equal(summary.text, "$(malac-pig) $(sync~spin) 1 $(bell-dot) 1", "busy: the pig and the counts");
   assert.equal(summary.severity, "warning");
   assert.match(summary.tooltip.join("\n"), /1 agent running\n1 approval waiting/);
+});
+
+test("idle, the status bar reads like Claude Code's: the pig and the name", () => {
+  const s = new DaemonStore();
+  s.apply({ type: "snapshot", daemon: { version: "1.1.1", pid: 1, started: "", version_mismatch: false, clients: 1, attached: false, remote: false }, workspaces: [], workspace: null, pending: [], jobs: [], models: [], default_model: null } as ServerMessage);
+  const summary = statusSummary(s, online, "1.1.1");
+  assert.equal(summary.text, "$(malac-pig) malac");
+  assert.equal(summary.severity, "normal");
+  assert.match(summary.tooltip.at(-1)!, /Click to open malac/);
 });
 
 test("the status bar flags a daemon from another version", () => {
@@ -40,7 +49,8 @@ test("the status bar flags a daemon from another version", () => {
 
 test("the status bar shows the connection when offline", () => {
   const s = new DaemonStore();
-  assert.equal(statusSummary(s, { state: "offline", detail: "connection lost", endpoint: null }, undefined).text, "$(debug-disconnect) malac");
+  assert.equal(statusSummary(s, { state: "offline", detail: "connection lost", endpoint: null }, undefined).text, "$(malac-pig) malac $(debug-disconnect)");
+  assert.equal(statusSummary(s, { state: "stopped", detail: "not running", endpoint: null }, undefined).text, "$(malac-pig) malac $(debug-disconnect)");
   assert.equal(statusSummary(s, { state: "failed", detail: "no binary", endpoint: null }, undefined).severity, "error");
 });
 
