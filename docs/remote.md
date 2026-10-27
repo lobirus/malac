@@ -118,7 +118,7 @@ Limits: closing a MacBook's lid still puts it to sleep, unless it is in clamshel
 Mobile apps pair the same way the CLI does:
 
 1. Scan the QR code. It is a URL: `<daemon address>/#pair=<code>`. Take the base address and the code from it, or let the user type both.
-2. `GET <base>/api/hello` checks that it is a malac daemon: `{"app": "malac", "version": "1.1.1", "remote": true, "pairing": true}`.
+2. `GET <base>/api/hello` checks that it is a malac daemon: `{"app": "malac", "version": "1.2.0", "remote": true, "pairing": true}`.
 3. `POST <base>/api/pair` with `{"code": "ABCDE-FGHJK", "name": "Balint's iPhone", "kind": "app"}` returns `{"token", "device": {id, name, kind, created, …}, "version"}`. A wrong, used or expired code is `403`; too many wrong codes are `429`.
 4. Keep the token in the platform's keychain and send it as `Authorization: Bearer <token>` on REST calls and on the WebSocket upgrade (`<base>/api/ws`, `wss://` for `https://`), without an `Origin` header.
 5. A `401` means the device was revoked: pair again. `GET /api/devices` marks the app's own device with `current: true`; deleting it unpairs.
