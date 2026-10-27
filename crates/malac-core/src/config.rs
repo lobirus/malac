@@ -444,7 +444,7 @@ impl Default for ContextConfig {
 pub struct PluginsConfig {
     /// Load installed and enabled plugins.
     pub enabled: bool,
-    /// Enable the plugins that ship with malac (ponytail).
+    /// Enable the plugins that ship with malac (ponytail and design).
     pub defaults: bool,
 }
 

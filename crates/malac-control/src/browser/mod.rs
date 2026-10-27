@@ -26,8 +26,8 @@ use crate::tool::{parse, truncate};
 use instance::{Instance, short_id};
 use page::{Button, Locator, Page};
 use tools::{
-    Aim, ClickArgs, EvalArgs, NavigateArgs, NewTabArgs, OpenArgs, PressArgs, ProfileArgs,
-    ScreenshotArgs, ScrollArgs, TabArgs, TypeArgs, WaitArgs,
+    Aim, ClickArgs, EmulateArgs, EvalArgs, NavigateArgs, NewTabArgs, OpenArgs, PressArgs,
+    ProfileArgs, ScreenshotArgs, ScrollArgs, TabArgs, TypeArgs, WaitArgs,
 };
 
 const SNAPSHOT_LIMIT: usize = 20_000;
@@ -36,6 +36,8 @@ const DEFAULT_WAIT_SECS: f64 = 10.0;
 const MAX_WAIT_SECS: f64 = 60.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLL_SETTLE: Duration = Duration::from_millis(300);
+/// Time for layout and media-query listeners to catch up with an emulation.
+const EMULATE_SETTLE: Duration = Duration::from_millis(200);
 
 /// Lists the profiles in `config` and the system profiles they can clone.
 pub fn list_profiles(config: &BrowserConfig) -> String {
@@ -73,6 +75,7 @@ impl Browser {
             "browser_press" => self.press(parse(name, args)?).await,
             "browser_scroll" => self.scroll(parse(name, args)?).await,
             "browser_screenshot" => self.screenshot(parse(name, args)?).await,
+            "browser_emulate" => self.emulate(parse(name, args)?).await,
             "browser_eval" => self.eval(parse(name, args)?).await,
             "browser_wait" => self.wait(parse(name, args)?).await,
             "browser_close_tab" => self.close_tab(parse(name, args)?).await,
@@ -328,6 +331,52 @@ impl Browser {
         }
         text.push_str(&format!("\nPage: {}", page_summary(&page).await?));
         Ok(reply(&instance, text).with_image(BASE64.encode(&shot.image.data), "image/jpeg"))
+    }
+
+    async fn emulate(&self, args: EmulateArgs) -> Result<CallToolResult> {
+        let screen = args.screen()?;
+        if args.reset && (screen.is_some() || args.media()) {
+            bail!("`reset` takes no other settings");
+        }
+        if !args.reset && screen.is_none() && !args.media() {
+            bail!("pass `width` and `height`, `color_scheme`, `reduced_motion`, or `reset`");
+        }
+        let (instance, page) = self.page(&args.at, false).await?;
+        if args.reset || screen.is_some() {
+            page.emulate_screen(screen.as_ref()).await?;
+        }
+        if args.reset || args.media() {
+            page.emulate_media(args.color_scheme, args.reduced_motion)
+                .await?;
+        }
+        tokio::time::sleep(EMULATE_SETTLE).await;
+
+        let (width, height) = page.viewport().await?;
+        let media = page
+            .evaluate(
+                "['(prefers-color-scheme: dark)', '(prefers-reduced-motion: reduce)', '(pointer: coarse)'].map(q => matchMedia(q).matches)",
+            )
+            .await?;
+        let on = |i: usize| media[i].as_bool().unwrap_or(false);
+        let mut text = format!(
+            "Viewport {width}x{height}{}, prefers-color-scheme: {}, prefers-reduced-motion: {}.",
+            if on(2) { " (touch)" } else { "" },
+            if on(0) { "dark" } else { "light" },
+            if on(1) { "reduce" } else { "no-preference" },
+        );
+        if let Some(screen) = screen.as_ref().filter(|s| s.mobile) {
+            if width > f64::from(screen.width) + 1.0 {
+                text.push_str(&format!(
+                    " The page lays out {width} px wide on a {} px screen, so something overflows and a phone zooms out to fit it.",
+                    screen.width
+                ));
+            }
+        }
+        if !args.reset {
+            text.push_str(" It stays for this tab until `reset: true`.");
+        }
+        text.push_str(&format!("\nPage: {}", page_summary(&page).await?));
+        Ok(reply(&instance, text))
     }
 
     async fn eval(&self, args: EvalArgs) -> Result<CallToolResult> {

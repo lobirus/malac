@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 
 use super::cdp::{Cdp, Event, wait_for};
 use super::keyboard;
+use super::tools::{ColorScheme, Screen};
 use crate::imaging::{self, Encoded};
 use crate::keys::KeyCombo;
 
@@ -190,6 +191,63 @@ impl Page {
             .call("Runtime.releaseObject", json!({ "objectId": id }))
             .await;
         Ok(serialized.unwrap_or(description))
+    }
+
+    /// Emulates a viewport, with touch input for a phone, or goes back to
+    /// the window's own size with `None`.
+    pub async fn emulate_screen(&self, screen: Option<&Screen>) -> Result<()> {
+        match screen {
+            Some(screen) => {
+                self.call(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": screen.width,
+                        "height": screen.height,
+                        "deviceScaleFactor": 0,
+                        "mobile": screen.mobile,
+                    }),
+                )
+                .await?;
+                self.call(
+                    "Emulation.setTouchEmulationEnabled",
+                    json!({ "enabled": screen.mobile, "maxTouchPoints": 5 }),
+                )
+                .await?;
+            }
+            None => {
+                self.call("Emulation.clearDeviceMetricsOverride", json!({}))
+                    .await?;
+                self.call(
+                    "Emulation.setTouchEmulationEnabled",
+                    json!({ "enabled": false }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emulates `prefers-color-scheme` and `prefers-reduced-motion`; `None`
+    /// leaves that preference to the browser.
+    pub async fn emulate_media(
+        &self,
+        color_scheme: Option<ColorScheme>,
+        reduced_motion: Option<bool>,
+    ) -> Result<()> {
+        let mut features = Vec::new();
+        if let Some(scheme) = color_scheme {
+            features.push(json!({ "name": "prefers-color-scheme", "value": scheme.as_str() }));
+        }
+        if let Some(reduce) = reduced_motion {
+            let value = if reduce { "reduce" } else { "no-preference" };
+            features.push(json!({ "name": "prefers-reduced-motion", "value": value }));
+        }
+        self.call(
+            "Emulation.setEmulatedMedia",
+            json!({ "features": features }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// The viewport size in CSS pixels.

@@ -128,6 +128,19 @@ It is vendored rather than installed from GitHub on first run: a default plugin 
 
 Turn it off with `malac plugin disable ponytail@malac` (or `--project` for one repository) or `[plugins] defaults = false`. To follow upstream instead, `malac plugin marketplace add DietrichGebert/ponytail` and `malac plugin install ponytail@ponytail`; an enabled plugin named `ponytail` replaces the built-in copy.
 
+## Built-in: design
+
+`design@malac` is malac's own design guidance, enabled by default, in `crates/malac-core/plugins/design/` (MIT, part of malac). It has two skills:
+
+- **`design`** loads before any UI work: pages, app screens, components, styles, charts, emails, terminal UIs. It decides which style applies: what the user's or project's instructions name, then the product's own design language (its tokens, components and screens), then brand assets, and only then the house style. A new product gets a short brief (who, the job, the primary object, tone, a signature idea) and an identity built from it rather than a template. It also covers the content rules (no filler, invented data or controls that do nothing) and how to verify the result.
+- **`design-review`** (`/design-review`) audits a UI against its own design language and the polish checklist, reports findings with `path:line`, and fixes them when asked.
+
+Its references are the house style (`house-style.md`), ready tokens and base controls for both themes (`tokens.css`), where each stack keeps its design language (`existing-product.md`), the polish and keyboard checklist (`polish.md`), how to check a UI on the web, Android, iOS and in a terminal (`verify.md`), and an audit script for `browser_eval` (`audit.js`) that reports overflow, unnamed controls, positive tabindex, missing alt text, low contrast and the fonts in use. It ships no scripts, hooks or servers, so it needs no approval.
+
+The house style is neutral and monochrome: ink primary buttons, one green accent for links, focus and chart highlights, Geist (or Inter Tight) with tabular numbers, hairline borders, 4–6 px radii, light and dark themes, and none of the usual AI tells (gradients, shadows, blur, emoji, sparkles, coloured icon tiles, blue or violet primaries). The base system prompt says the same in brief, so the rules hold even with the plugin off. To use a different style, describe it in your `~/.malac/AGENTS.md` or the project's AGENTS.md; instructions win over the house style.
+
+Turn it off with `malac plugin disable design@malac`; an enabled plugin named `design` replaces it.
+
 ## Files
 
 ```text

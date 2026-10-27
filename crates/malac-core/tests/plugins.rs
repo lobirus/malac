@@ -339,7 +339,22 @@ async fn a_session_uses_plugin_commands_skills_scripts_and_hooks() {
     );
     assert!(
         runtime.skills.iter().any(|s| s.name == "ponytail:ponytail"),
-        "the default plugin"
+        "the default plugins"
+    );
+    assert!(
+        runtime.skills.iter().any(|s| s.name == "design:design"),
+        "the default plugins"
+    );
+    let system = malac_core::prompt::build(&malac_core::prompt::PromptInputs {
+        runtime: &runtime,
+        cwd: &project,
+        model: "mock/test",
+        depth: 0,
+        agent_type: None,
+    });
+    assert!(
+        system.contains("# Design") && system.contains("\n- design:design: "),
+        "the prompt points UI work at the listed design skill"
     );
 
     let script = Arc::new(Scripted {

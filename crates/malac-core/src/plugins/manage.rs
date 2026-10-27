@@ -913,7 +913,12 @@ mod tests {
         let ids: Vec<&str> = loaded.plugins.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["guard@fixtures", "notes@fixtures", "ponytail@malac"]
+            vec![
+                "design@malac",
+                "guard@fixtures",
+                "notes@fixtures",
+                "ponytail@malac"
+            ]
         );
         assert!(loaded.hooks.has("PreToolUse"));
 

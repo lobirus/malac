@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "design",
+  "version": "1.0.0",
+  "description": "Design guidance for every UI malac builds: follow the product's own design language, or give a new product malac's house style and an identity of its own, then check it in both themes and three widths.",
+  "author": {
+    "name": "The malac authors",
+    "url": "https://malac.io"
+  },
+  "homepage": "https://malac.io",
+  "repository": "https://github.com/lobirus/malac",
+  "license": "MIT",
+  "keywords": ["design", "ui", "ux", "accessibility", "design-system"]
+}

@@ -43,8 +43,25 @@ const PONYTAIL: Builtin = Builtin {
     ),
 };
 
+/// malac's own design guidance: the house style, how to follow an existing
+/// product's design language, and how to check a UI.
+const DESIGN: Builtin = Builtin {
+    name: "design",
+    files: vendored!("design":
+        "plugin.json",
+        "skills/design/SKILL.md",
+        "skills/design/references/house-style.md",
+        "skills/design/references/tokens.css",
+        "skills/design/references/existing-product.md",
+        "skills/design/references/polish.md",
+        "skills/design/references/verify.md",
+        "skills/design/references/audit.js",
+        "skills/design-review/SKILL.md",
+    ),
+};
+
 pub fn all() -> &'static [Builtin] {
-    &[PONYTAIL]
+    &[PONYTAIL, DESIGN]
 }
 
 pub fn get(name: &str) -> Option<&'static Builtin> {
@@ -89,5 +106,29 @@ mod tests {
         std::fs::write(root.join("extra.txt"), "x").unwrap();
         materialize(&PONYTAIL, dir.path()).unwrap();
         assert!(root.join("extra.txt").exists());
+    }
+
+    #[test]
+    fn design_is_a_valid_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = materialize(&DESIGN, dir.path()).unwrap();
+        let parsed = super::super::manifest::parse(&root, &root, None).unwrap();
+        assert_eq!(parsed.meta.name, "design");
+        assert_eq!(parsed.components.skills.len(), 2);
+        // References only: nothing to run, so nothing needs approving.
+        assert!(parsed.components.scripts.is_empty());
+        assert!(parsed.components.hooks.is_empty() && parsed.components.mcp.is_empty());
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        for reference in [
+            "house-style.md",
+            "tokens.css",
+            "existing-product.md",
+            "polish.md",
+            "verify.md",
+            "audit.js",
+        ] {
+            let path = root.join("skills/design/references").join(reference);
+            assert!(path.is_file(), "{reference} is missing");
+        }
     }
 }

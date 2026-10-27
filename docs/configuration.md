@@ -179,7 +179,7 @@ Plugin commands are named `<plugin>:<command>`; the part after `:` works alone w
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Load installed and enabled plugins |
-| `defaults` | `true` | Enable the plugins that ship with malac: [ponytail](https://ponytail.dev) (`ponytail@malac`) |
+| `defaults` | `true` | Enable the plugins that ship with malac: [ponytail](https://ponytail.dev) (`ponytail@malac`) and malac's design guidance (`design@malac`) |
 
 Plugins, marketplaces and their files are described in [plugins.md](plugins.md). Turn one built-in plugin off with `malac plugin disable ponytail@malac`, all of them with `defaults = false`.
 
