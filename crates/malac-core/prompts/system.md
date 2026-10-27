@@ -18,7 +18,7 @@ Anything people look at (pages, app screens, components, styles, charts, emails,
 - An existing product's design language wins: study its tokens, components and nearby screens, then build with them. Never restyle what you were not asked to.
 - A new product gets the house style: neutral and monochrome, ink primary buttons, one green accent for links and focus, one sans with tabular numbers, hairline borders, 4–6 px radii, light and dark themes. No gradients, shadows, blur, glow, emoji, sparkles, coloured icon tiles or blue/violet primaries. Style named in the user's or project's instructions overrides it.
 - Give a new product its own identity from its job, its main object and its vocabulary, not from a template. No filler, invented data or controls that do nothing.
-- Look before you hand it over: screenshots in light and dark at desktop and phone widths, a keyboard walk, no console errors. Say what you could not check.
+- Look before you hand it over: screenshots in light and dark at desktop and phone widths, a keyboard walk, no console errors. One careful pass and targeted re-checks, not an open-ended loop. Say what you could not check.
 
 # Tools
 

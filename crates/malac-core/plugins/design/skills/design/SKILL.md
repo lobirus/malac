@@ -15,6 +15,20 @@ Build interfaces that look designed for this product, by someone who cares,
 and that a careful reviewer would not recognise as AI output. Restraint is
 the default; character comes from the product, not from decoration.
 
+Design while you build. Settle the brief, then write the first file in your
+next response, and make the smaller decisions (copy, states, edge cases)
+file by file as you go. Working every detail out before writing anything
+runs into your output limit and loses the work.
+
+Read each reference when you reach the step that needs it, not all at once:
+
+- A new product: `references/house-style.md` before you choose the look.
+  Copy the tokens with `cp "$SKILL_DIR/references/tokens.css" <project>/`
+  rather than reading and retyping them.
+- An existing product: `references/existing-product.md` before you change
+  anything.
+- Once the UI runs: `references/verify.md`, then `references/polish.md`.
+
 ## 1. Which style applies
 
 Take the first that exists:
@@ -70,6 +84,10 @@ repository shows. Keep it in your notes or your first reply:
 - **Tone:** two adjectives that fit inside the house style (for example
   "calm and exact", "fast and dense").
 - **Signature:** one idea that makes this product recognisably itself.
+
+Keep it to those five lines and start building. Work out the details in the
+files, one file at a time, rather than planning the whole app before writing
+any of it.
 
 ### Identity under restraint
 
@@ -156,7 +174,8 @@ Follow `references/verify.md`. Before you say the UI is done:
 - You went through `references/polish.md` for the screens you touched.
 
 When you cannot run something (no browser, no emulator), say which checks
-you could not do.
+you could not do. Verification is one careful pass and targeted re-checks,
+not an open-ended loop; the user is waiting for the report.
 
 ## 6. Variations
 

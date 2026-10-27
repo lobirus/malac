@@ -45,7 +45,16 @@ the code runs; only screenshots say it looks right.
    empty list, a long name, a slow load. Screenshot the ones you changed.
 7. `browser_emulate` with `reset: true` when you are done.
 
-Fix, then look again. Repeat until the screenshots show nothing to fix.
+Fix, then look again at what the fix touched. Repeat until the screenshots
+show nothing to fix.
+
+Keep it proportionate. One pass through the table, the audit, one keyboard
+walk and the states you built is enough; after a fix, re-check only the
+screens and states it changed. Combine steps: one `browser_eval` can set up
+a state (seed `localStorage`, open a dialog, submit a form) and return
+everything you want to know about it, and one screenshot then shows it. A
+small app needs a few dozen browser calls, not a hundred. Stop while you
+still have room to write the report.
 
 ## Web, without the browser tools
 
