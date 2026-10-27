@@ -23,8 +23,6 @@ malac finds these models in your providers' model lists. Only OpenAI-style provi
 audio = "transcription"   # or "input", "speech", "realtime"
 ```
 
-In the web UI, Ctrl+Shift+Space (⌘⇧Space on a Mac) starts and stops dictation too; Enter puts the text in the message box and Esc throws the recording away. A speaker button in the header switches "Speak on this device".
-
 ## Settings
 
 Every app has a Voice section in its settings: a switch per feature, which model it uses, the voice, and the dictation language. They all write the same `[voice]` table in `~/.malac/config.toml`:
@@ -50,9 +48,15 @@ Speech plays on one device: of those with "Speak on this device" on, the one you
 
 ## Talk mode
 
-Start talk mode with the headset button (or `/talk` in the terminal) and speak. The voice model knows the project you are in, passes what you ask to malac, says what it asked, and when malac finishes tells you the outcome in a sentence or two. Ask how it is going, and answer approvals out loud ("yes, run it"). Your requests show in the conversation like typed ones, so you can read the details later. Talking over the voice stops it.
+Start talk mode with the headset button (or `/talk` in the terminal) and speak. The voice model knows the project you are in, passes what you ask to malac, says what it asked, and when malac finishes tells you the outcome in a sentence or two. Ask how it is going, and answer approvals out loud ("yes, run it"). Your requests show in the conversation like typed ones, so you can read the details later. Talking over the voice stops it. While talk mode runs, the voice model speaks for malac, so the separate speech above pauses. An approval you answer out loud is passed on by the voice model, so say no when in doubt and check the request on screen.
 
 The phone apps and browsers cancel the speaker's echo. In the terminal, use headphones, or malac pauses the microphone while it speaks.
+
+## In the apps
+
+- **Web UI:** the microphone and headset buttons sit in the composer. Ctrl+Shift+Space (⌘⇧Space on a Mac) starts and stops dictation; Enter puts the text in the message box and Esc throws the recording away. A speaker button in the header switches "Speak on this device"; Settings has the Voice section.
+- **VS Code and Cursor:** editors keep the microphone from their webviews, so the extension runs the malac CLI below for the microphone and speaker. The composer's microphone button or **malac: Dictate** (⌥⇧⌘D, Ctrl+Alt+Shift+D elsewhere) records; **malac: Talk** and the headphones button open talk mode in a terminal; **malac: Voice Settings** has the switches, models and voices; `malac.speakOnThisDevice` decides whether the editor speaks. Voice needs malac on the same machine as the editor.
+- **Android and iOS:** the microphone in the composer dictates, the headset button opens talk mode, and the Voice section under Daemons has the settings and "Speak on this device". The apps ask for the microphone the first time you use it.
 
 ## In the terminal
 

@@ -17,6 +17,7 @@
 - **Memory.** Markdown memory files, optionally indexed in Milvus (self-hosted or remote) for semantic recall.
 - **Computer and browser control.** `malac-control` is a separate MCP service for screenshots, mouse and keyboard, and Chrome automation with isolated profiles. malac starts it automatically.
 - **MCP.** Connect any MCP server over stdio, streamable HTTP or WebSocket.
+- **Voice and files.** Dictate instead of typing, hear malac ask for approval or say a long task is done, or talk the work through in talk mode, in every app, with the speech models your providers have. Ask for a screenshot or a file and it arrives in the app you are using, where images open full screen and zoom. See [docs/voice.md](docs/voice.md).
 
 ## Why malac
 
