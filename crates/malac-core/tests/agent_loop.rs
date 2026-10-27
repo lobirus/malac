@@ -15,12 +15,17 @@ use serde_json::{Value, json};
 /// Replies with queued messages and records every request it receives.
 #[derive(Default)]
 struct Scripted {
-    replies: Mutex<VecDeque<Message>>,
+    /// Each reply, with the stop reason to report when it is not the usual one.
+    replies: Mutex<VecDeque<(Message, Option<StopReason>)>>,
     requests: Mutex<Vec<Vec<Message>>>,
 }
 
 impl Scripted {
     fn new(replies: Vec<Message>) -> Arc<Self> {
+        Self::with_stops(replies.into_iter().map(|m| (m, None)).collect())
+    }
+
+    fn with_stops(replies: Vec<(Message, Option<StopReason>)>) -> Arc<Self> {
         Arc::new(Self {
             replies: Mutex::new(replies.into()),
             requests: Mutex::default(),
@@ -41,21 +46,21 @@ impl Scripted {
 impl Provider for Scripted {
     async fn complete(&self, req: &Request<'_>, on_delta: DeltaSink<'_>) -> Result<Completion> {
         self.requests.lock().unwrap().push(req.messages.to_vec());
-        let message = self
-            .replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| Message::assistant(vec![Block::text("(script exhausted)")]));
+        let (message, stop) = self.replies.lock().unwrap().pop_front().unwrap_or_else(|| {
+            (
+                Message::assistant(vec![Block::text("(script exhausted)")]),
+                None,
+            )
+        });
         let text = message.text();
         if !text.is_empty() {
             on_delta(Delta::Text(&text));
         }
-        let stop = if message.tool_uses().next().is_some() {
+        let stop = stop.unwrap_or(if message.tool_uses().next().is_some() {
             StopReason::ToolUse
         } else {
             StopReason::EndTurn
-        };
+        });
         Ok(Completion {
             message,
             usage: Usage::default(),
@@ -74,6 +79,13 @@ fn tool_call(id: &str, name: &str, input: Value) -> Message {
 
 fn answer(text: &str) -> Message {
     Message::assistant(vec![Block::text(text)])
+}
+
+fn thinking(text: &str) -> Message {
+    Message::assistant(vec![Block::Thinking {
+        text: text.into(),
+        signature: None,
+    }])
 }
 
 fn tool_result_text(messages: &[Message], id: &str) -> Option<(String, bool)> {
@@ -110,12 +122,22 @@ fn isolated_home() {
 }
 
 fn runtime(mode: Mode, script: Arc<Scripted>, cwd: &std::path::Path) -> Arc<Runtime> {
+    runtime_with(mode, script, cwd, |_| {})
+}
+
+fn runtime_with(
+    mode: Mode,
+    script: Arc<Scripted>,
+    cwd: &std::path::Path,
+    configure: impl FnOnce(&mut Config),
+) -> Arc<Runtime> {
     isolated_home();
     let mut config = Config {
         model: Some("mock/test".into()),
         mode,
         ..Default::default()
     };
+    configure(&mut config);
     config
         .providers
         .insert("mock".into(), ProviderConfig::default());
@@ -298,4 +320,146 @@ async fn read_only_agents_spawn_only_read_only_subagents() {
     let (result, is_error) = tool_result_text(helper_turn, "c3").unwrap();
     assert!(is_error);
     assert!(result.contains("unknown tool"));
+}
+
+#[tokio::test]
+async fn continues_responses_cut_off_at_the_output_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Scripted::with_stops(vec![
+        (
+            thinking("plan: write index.html first"),
+            Some(StopReason::MaxTokens),
+        ),
+        (
+            tool_call(
+                "c1",
+                "write",
+                json!({ "path": "index.html", "content": "<h1>Plants</h1>\n" }),
+            ),
+            None,
+        ),
+        (
+            answer("Wrote index.html. The first half"),
+            Some(StopReason::MaxTokens),
+        ),
+        (answer(" and the second half."), None),
+    ]);
+    let runtime = runtime(Mode::Autopilot, script.clone(), dir.path());
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    let reply = agent
+        .prompt(vec![Block::text("make a page")])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reply,
+        "Wrote index.html. The first half and the second half."
+    );
+    assert!(dir.path().join("index.html").exists());
+    let requests = script.requests.lock().unwrap();
+    // Unfinished thinking cannot be replayed, so it comes back as notes,
+    // followed by a plain request to act.
+    let after_thinking = &requests[1];
+    let notes = &after_thinking[after_thinking.len() - 2];
+    assert_eq!(notes.role, Role::Assistant);
+    assert!(notes.text().contains("plan: write index.html first"));
+    assert!(
+        after_thinking
+            .last()
+            .unwrap()
+            .text()
+            .contains("Stop deliberating")
+    );
+    assert!(
+        requests[3]
+            .last()
+            .unwrap()
+            .text()
+            .contains("Continue exactly where it stopped")
+    );
+}
+
+#[tokio::test]
+async fn gives_up_after_a_few_cut_offs_in_a_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let cut = |text: &str| (thinking(text), Some(StopReason::MaxTokens));
+    let script = Scripted::with_stops(vec![
+        cut("one"),
+        cut("two"),
+        cut("three"),
+        cut("four"),
+        (answer("never asked for"), None),
+    ]);
+    let runtime = runtime(Mode::Autopilot, script.clone(), dir.path());
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    let reply = agent.prompt(vec![Block::text("think")]).await.unwrap();
+
+    assert_eq!(reply, "");
+    assert_eq!(script.requests.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn reports_after_the_step_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "the answer is 42\n").unwrap();
+    let read = |id: &str| tool_call(id, "read", json!({ "path": "notes.txt" }));
+    let script = Scripted::new(vec![
+        read("c1"),
+        read("c2"),
+        answer("Report: I read notes.txt once; the second read was cut."),
+    ]);
+    let runtime = runtime_with(Mode::Autopilot, script.clone(), dir.path(), |config| {
+        config.max_steps = Some(1)
+    });
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    let reply = agent
+        .prompt(vec![Block::text("read it twice")])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reply,
+        "Report: I read notes.txt once; the second read was cut."
+    );
+    let last = script.last_request();
+    let (text, is_error) = tool_result_text(&last, "c2").unwrap();
+    assert!(is_error && text.contains("step limit"));
+    assert!(
+        last.last()
+            .unwrap()
+            .text()
+            .contains("Write your final report")
+    );
+}
+
+#[tokio::test]
+async fn tool_calls_in_the_report_turn_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "the answer is 42\n").unwrap();
+    let read = |id: &str| tool_call(id, "read", json!({ "path": "notes.txt" }));
+    let script = Scripted::new(vec![
+        read("c1"),
+        read("c2"),
+        read("c3"),
+        answer("Still here."),
+    ]);
+    let runtime = runtime_with(Mode::Autopilot, script.clone(), dir.path(), |config| {
+        config.max_steps = Some(1)
+    });
+    let agent = runtime.spawn_agent(AgentSpec::default()).unwrap();
+
+    let reply = agent.prompt(vec![Block::text("read it")]).await.unwrap();
+    assert_eq!(reply, "");
+
+    // The refused call has its result, so the next request is valid.
+    let next = agent
+        .prompt(vec![Block::text("anything else?")])
+        .await
+        .unwrap();
+    assert_eq!(next, "Still here.");
+    let (text, is_error) = tool_result_text(&script.last_request(), "c3").unwrap();
+    assert!(is_error && text.contains("tools are off"));
 }

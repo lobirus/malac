@@ -36,6 +36,8 @@ use crate::tools::{
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 const DEFAULT_MAX_STEPS: u32 = 200;
+/// Responses in a row cut off at the output limit that the model may continue.
+const MAX_CONTINUATIONS: u32 = 3;
 const MAX_ATTEMPTS: u32 = 4;
 const PREVIEW_CHARS: usize = 4000;
 /// Images kept in the request; older screenshots are replaced by a placeholder.
@@ -568,6 +570,9 @@ impl Agent {
 
         let max_steps = self.runtime.config.max_steps.unwrap_or(DEFAULT_MAX_STEPS);
         let mut steps = 0;
+        let mut cut_offs = 0;
+        // Text of responses cut off at the output limit, which the next one continues.
+        let mut partial = String::new();
         loop {
             if cancel.is_cancelled() {
                 return Err(Cancelled.into());
@@ -578,43 +583,69 @@ impl Agent {
             self.record_usage(&completion);
 
             let message = completion.message;
-            self.push(message.clone());
+            let calls = calls_in(&message);
+            let cut_off = completion.stop == StopReason::MaxTokens && calls.is_empty();
+            self.push(if cut_off {
+                replayable(&message)
+            } else {
+                message.clone()
+            });
             self.emit(Event::AssistantMessage {
                 message: message.clone(),
             });
 
-            let calls: Vec<Call> = message
-                .tool_uses()
-                .map(|(id, name, input)| Call {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
-                    input: input.clone(),
-                })
-                .collect();
             if calls.is_empty() {
-                if completion.stop == StopReason::MaxTokens {
-                    self.notice(Level::Warning, "the response hit the output token limit");
+                partial.push_str(&message.text());
+                if !cut_off {
+                    return Ok(partial);
                 }
-                return Ok(message.text());
+                if cut_offs == MAX_CONTINUATIONS {
+                    self.notice(Level::Warning, "the response hit the output token limit");
+                    return Ok(partial);
+                }
+                cut_offs += 1;
+                self.notice(
+                    Level::Warning,
+                    "the response hit the output token limit; asking the model to continue",
+                );
+                self.push_user(vec![Block::text(continue_prompt(&message))]);
+                continue;
             }
+            cut_offs = 0;
+            partial.clear();
 
             steps += 1;
-            let results = if steps > max_steps {
-                self.notice(Level::Warning, format!("stopped after {max_steps} steps"));
-                calls
-                    .iter()
-                    .map(|c| {
-                        result_block(c, ToolOutput::error("step limit reached; stop and report"))
-                    })
-                    .collect()
-            } else {
-                self.run_tools(&calls, cancel).await
-            };
-            self.push_user(results);
             if steps > max_steps {
-                return Ok(message.text());
+                self.notice(Level::Warning, format!("stopped after {max_steps} steps"));
+                let mut refused = refuse(&calls, "step limit reached; stop and report");
+                refused.push(Block::text(format!(
+                    "You have used all {max_steps} steps for this request, so tools are off now. \
+                     Write your final report: what you did, what works, what is left or unverified."
+                )));
+                self.push_user(refused);
+                return self.final_report(cancel).await;
             }
+            let results = self.run_tools(&calls, cancel).await;
+            self.push_user(results);
         }
+    }
+
+    /// One more turn after the step limit, for the report. Tool calls are
+    /// refused, so the history stays complete for the next request.
+    async fn final_report(&mut self, cancel: &CancellationToken) -> Result<String> {
+        self.set_activity("thinking");
+        let completion = self.call_model(cancel).await?;
+        self.record_usage(&completion);
+        let message = completion.message;
+        let calls = calls_in(&message);
+        self.push(message.clone());
+        self.emit(Event::AssistantMessage {
+            message: message.clone(),
+        });
+        if !calls.is_empty() {
+            self.push_user(refuse(&calls, "step limit reached; tools are off"));
+        }
+        Ok(message.text())
     }
 
     /// `/context`: answered here, without the model, and kept out of the history.
@@ -1090,6 +1121,60 @@ struct Call {
     id: String,
     name: String,
     input: Value,
+}
+
+fn calls_in(message: &Message) -> Vec<Call> {
+    message
+        .tool_uses()
+        .map(|(id, name, input)| Call {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input: input.clone(),
+        })
+        .collect()
+}
+
+/// Error results for calls that will not run.
+fn refuse(calls: &[Call], reason: &str) -> Vec<Block> {
+    calls
+        .iter()
+        .map(|c| result_block(c, ToolOutput::error(reason)))
+        .collect()
+}
+
+/// A response cut off at the output limit, in a form every provider can
+/// replay: unfinished thinking has no signature and is not sent back, so it
+/// becomes visible notes the next response can build on.
+fn replayable(message: &Message) -> Message {
+    let mut content: Vec<Block> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            Block::Thinking { text, .. } if text.trim().is_empty() => None,
+            Block::Thinking { text, .. } => Some(Block::text(format!(
+                "(My notes before the cut-off)\n{text}"
+            ))),
+            other => Some(other.clone()),
+        })
+        .collect();
+    if content.is_empty() {
+        content.push(Block::text("(cut off before any output)"));
+    }
+    Message::assistant(content)
+}
+
+/// What to ask after a response was cut off at the output limit.
+fn continue_prompt(message: &Message) -> String {
+    if message.text().trim().is_empty() {
+        "Your last response hit the output limit while you were still thinking, before you did \
+         anything; your notes so far are above. Stop deliberating and act now: make the next tool \
+         call (for example, write the first file) and settle the remaining details as you go."
+            .to_owned()
+    } else {
+        "Your last response hit the output limit. Continue exactly where it stopped, without \
+         repeating what you already wrote."
+            .to_owned()
+    }
 }
 
 fn result_block(call: &Call, output: ToolOutput) -> Block {
