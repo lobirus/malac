@@ -384,6 +384,25 @@ async fn terminate(child: &mut tokio::process::Child) {
 mod tests {
     use super::*;
 
+    /// Starts a fake tool written just now. On Linux, another test thread
+    /// that forks while the script is still open makes running it fail with
+    /// "Text file busy" for a moment, so this tries again.
+    #[cfg(unix)]
+    fn start_fake(spec: Spec, tx: &mpsc::UnboundedSender<TunnelStatus>) -> Running {
+        for _ in 0..50 {
+            let tx = tx.clone();
+            match Running::start(spec.clone(), move |s| {
+                let _ = tx.send(s);
+            }) {
+                Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                started => return started.unwrap(),
+            }
+        }
+        panic!("the fake tool stayed busy");
+    }
+
     #[test]
     fn finds_addresses_in_tool_output() {
         let cloudflare = [
@@ -464,10 +483,7 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let spec = Spec::with_program(Tunnel::Cloudflare, fake.clone(), 7790);
-        let running = Running::start(spec, move |s| {
-            let _ = tx.send(s);
-        })
-        .unwrap();
+        let running = start_fake(spec, &tx);
         let up = rx.recv().await.unwrap();
         assert_eq!(up.state, TunnelState::Running);
         assert_eq!(
@@ -485,10 +501,7 @@ mod tests {
         .unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let spec = Spec::with_program(Tunnel::Cloudflare, fake, 7790);
-        let _running = Running::start(spec, move |s| {
-            let _ = tx.send(s);
-        })
-        .unwrap();
+        let _running = start_fake(spec, &tx);
         // What it printed shows as `waiting` first, then as the error.
         let failed = loop {
             let status = rx.recv().await.unwrap();
@@ -524,10 +537,7 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let spec = Spec::with_program(Tunnel::Tailscale, fake, 7790);
-        let running = Running::start(spec, move |s| {
-            let _ = tx.send(s);
-        })
-        .unwrap();
+        let running = start_fake(spec, &tx);
         let mut waiting = None;
         let up = loop {
             let status = rx.recv().await.unwrap();
