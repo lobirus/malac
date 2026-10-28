@@ -200,6 +200,17 @@ Dictation, speech and talk mode, described in [voice.md](voice.md). Each feature
 | `talk_model` | first found | A Realtime model, like `openai/gpt-realtime` |
 | `talk_voice` | `alloy` | The voice it speaks with |
 
+## `[attribution]`
+
+How the commits and pull requests malac makes credit it, the way other coding agents do. GitHub shows the trailer's address as a co-author, with an avatar, once a GitHub account has that address verified.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `commit` | `"Co-Authored-By: malac <noreply@malac.io>"` | Trailer lines that end the message of every commit malac makes; `""` for none |
+| `pr` | `"Generated with [malac](https://malac.io)"` | What ends the description of every pull request malac opens; `""` for nothing |
+
+Instructions in `AGENTS.md` and the like win: a project that asks for no attribution, or for its own trailers, gets that.
+
 ## `[update]`
 
 | Key | Default | Meaning |

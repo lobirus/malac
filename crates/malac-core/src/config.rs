@@ -55,6 +55,7 @@ pub struct Config {
     pub context: ContextConfig,
     pub plugins: PluginsConfig,
     pub voice: VoiceConfig,
+    pub attribution: AttributionConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,6 +471,28 @@ impl Default for PluginsConfig {
         Self {
             enabled: true,
             defaults: true,
+        }
+    }
+}
+
+/// How commits and pull requests malac makes credit it. GitHub shows the
+/// commit trailer's address as a co-author when an account has it verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttributionConfig {
+    /// Trailer lines ending the message of every commit malac makes; empty
+    /// for none.
+    pub commit: String,
+    /// What ends the description of every pull request malac opens; empty
+    /// for nothing.
+    pub pr: String,
+}
+
+impl Default for AttributionConfig {
+    fn default() -> Self {
+        Self {
+            commit: "Co-Authored-By: malac <noreply@malac.io>".into(),
+            pr: "Generated with [malac](https://malac.io)".into(),
         }
     }
 }

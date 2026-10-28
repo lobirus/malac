@@ -31,6 +31,9 @@ pub fn build(inputs: &PromptInputs<'_>) -> String {
     if let Some(agent) = inputs.agent_type {
         sections.push(format!("# Role: {}\n\n{}", agent.name, agent.instructions));
     }
+    if let Some(credit) = attribution(&runtime.config.attribution) {
+        sections.push(credit);
+    }
     sections.push(environment(inputs.cwd, runtime, inputs.model));
 
     for file in &runtime.instructions {
@@ -149,6 +152,31 @@ pub fn build(inputs: &PromptInputs<'_>) -> String {
         ));
     }
     sections.join("\n\n")
+}
+
+/// How the commits and pull requests the agent makes credit malac, or
+/// `None` when the user turned both off.
+fn attribution(config: &config::AttributionConfig) -> Option<String> {
+    let commit = config.commit.trim();
+    let pr = config.pr.trim();
+    let mut parts = Vec::new();
+    if !commit.is_empty() {
+        parts.push(format!(
+            "When you make a commit, end its message with a blank line and:\n\n{commit}"
+        ));
+    }
+    if !pr.is_empty() {
+        parts.push(format!(
+            "When you open a pull request, end its description with:\n\n{pr}"
+        ));
+    }
+    (!parts.is_empty()).then(|| {
+        format!(
+            "# Commits and pull requests\n\n{}\n\nKeep any other trailers the user's instructions ask for. If \
+             they ask for no attribution, leave these out.",
+            parts.join("\n\n")
+        )
+    })
 }
 
 /// Most models listed in the prompt.
@@ -282,6 +310,23 @@ mod tests {
         assert!(section.contains("- lora/smart (yours)\n"));
         assert!(section.contains("- lora/fast: fast and cheap"));
         assert!(section.contains("- other/vision: sees images"));
+    }
+
+    #[test]
+    fn credits_malac_unless_turned_off() {
+        let section = attribution(&config::AttributionConfig::default()).unwrap();
+        assert!(section.contains("blank line and:\n\nCo-Authored-By: malac <noreply@malac.io>"));
+        assert!(section.contains("Generated with [malac](https://malac.io)"));
+        let commits_only = config::AttributionConfig {
+            pr: String::new(),
+            ..Default::default()
+        };
+        assert!(!attribution(&commits_only).unwrap().contains("open a pull request"));
+        let none = config::AttributionConfig {
+            commit: " ".into(),
+            pr: String::new(),
+        };
+        assert!(attribution(&none).is_none());
     }
 
     #[test]
