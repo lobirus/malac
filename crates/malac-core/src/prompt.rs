@@ -321,7 +321,11 @@ mod tests {
             pr: String::new(),
             ..Default::default()
         };
-        assert!(!attribution(&commits_only).unwrap().contains("open a pull request"));
+        assert!(
+            !attribution(&commits_only)
+                .unwrap()
+                .contains("open a pull request")
+        );
         let none = config::AttributionConfig {
             commit: " ".into(),
             pr: String::new(),
