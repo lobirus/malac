@@ -27,9 +27,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import kotlin.coroutines.resume
 
@@ -37,7 +37,9 @@ import kotlin.coroutines.resume
  * malac's speech on this phone. While the daemon's speech is ready and
  * "Speak on this device" is on, the connection says it plays speech
  * (`voice_listen`), again after every reconnect, and the sentences the
- * daemon picks this phone for are fetched and played one at a time.
+ * daemon picks this phone for are fetched and played one at a time. Once
+ * the user answers an approval or sends a prompt they are stale: the daemon
+ * cancels them (`say_cancelled`) and they stop at once.
  */
 class Speech(
     context: Context,
@@ -46,14 +48,17 @@ class Speech(
     private val scope: CoroutineScope,
 ) {
     private val audio = context.getSystemService(AudioManager::class.java)
-    private val queue = Channel<Pair<ActiveDaemon, ServerMessage.Say>>(Channel.UNLIMITED)
     private val main = Handler(Looper.getMainLooper())
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+
+    // Guarded by itself: the sentences waiting, and the one being fetched or played.
+    private val waiting = ArrayDeque<Pair<ActiveDaemon, ServerMessage.Say>>()
+    private var playing: Pair<ServerMessage.Say, Job>? = null
+
     private val _lines = MutableSharedFlow<String>(extraBufferCapacity = 8)
 
     /** Each sentence as it starts playing, to show briefly. */
     val lines: SharedFlow<String> = _lines.asSharedFlow()
-
-    @Volatile private var playing: Job? = null
 
     /** Talk mode holds speech while it runs, so two voices never talk at once. */
     @Volatile var held: Boolean = false
@@ -79,7 +84,18 @@ class Speech(
 
     private suspend fun follow(active: ActiveDaemon) = coroutineScope {
         val connection = active.connection
-        launch { connection.effects.filterIsInstance<Effect.Say>().collect { queue.send(active to it.say) } }
+        launch {
+            connection.effects.collect { effect ->
+                when (effect) {
+                    is Effect.Say -> {
+                        synchronized(waiting) { waiting.addLast(active to effect.say) }
+                        wake.trySend(Unit)
+                    }
+                    is Effect.SayCancelled -> stop { it.id in effect.ids }
+                    else -> Unit
+                }
+            }
+        }
         // A new connection has no listener, so this asks again after every reconnect.
         combine(connection.status, connection.state, prefs.speakHere) { status, state, here ->
             Listen(status == DaemonConnection.Status.Online, here && state.voice?.speech?.ready == true, state.listener != null)
@@ -96,22 +112,29 @@ class Speech(
             }
     }
 
+    /** The user answered an approval here: what reads approvals aloud is stale, without waiting for the daemon to say so. */
+    fun approvalAnswered() = stop { it.reason == "approval" }
+
     private suspend fun play() {
         while (true) {
-            var next = queue.receive()
+            wake.receive()
             var focused = false
             try {
                 while (true) {
-                    val (active, say) = next
-                    val clip = fetch(active, say)
-                    if (clip != null) {
-                        if (!focused) focused = audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-                        _lines.tryEmit(say.text)
-                        val job = scope.launch(Dispatchers.Main) { playClip(clip) }
-                        playing = job
-                        job.join()
-                    }
-                    next = queue.tryReceive().getOrNull() ?: break
+                    // Fetching and playing are one job, so stopping a sentence also drops its fetch.
+                    val job = synchronized(waiting) {
+                        val (active, say) = waiting.removeFirstOrNull() ?: return@synchronized null
+                        scope.launch {
+                            val clip = fetch(active, say) ?: return@launch
+                            withContext(Dispatchers.Main) {
+                                if (!focused) focused = audio.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                                _lines.tryEmit(say.text)
+                                playClip(clip)
+                            }
+                        }.also { playing = say to it }
+                    } ?: break
+                    job.join()
+                    synchronized(waiting) { playing = null }
                 }
             } finally {
                 if (focused) audio.abandonAudioFocusRequest(focus)
@@ -156,11 +179,15 @@ class Speech(
         }
     }
 
-    private fun skip() {
-        do {
-            val dropped = queue.tryReceive()
-        } while (dropped.isSuccess)
-        playing?.cancel()
+    private fun skip() = stop { true }
+
+    /** Drops the waiting sentences [which] picks, and stops the current one at once if it is one. */
+    private fun stop(which: (ServerMessage.Say) -> Boolean) {
+        val current = synchronized(waiting) {
+            waiting.removeAll { (_, say) -> which(say) }
+            playing?.takeIf { (say, _) -> which(say) }?.second
+        }
+        current?.cancel()
     }
 
     /** A clip in memory, as MediaPlayer reads it. */

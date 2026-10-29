@@ -106,7 +106,8 @@ private fun Main(graph: AppGraph, active: ActiveDaemon, opens: Flow<OpenAgent>) 
     val snackbar = remember { SnackbarHostState() }
     val state by active.connection.state.collectAsStateWithLifecycle()
     val status by active.connection.status.collectAsStateWithLifecycle()
-    val commands = rememberCommands(active) { graph.connections.notice(it) }
+    // An approval answered here silences its announcement at once, not a round trip later.
+    val commands = rememberCommands(active, answered = graph.speech::approvalAnswered) { graph.connections.notice(it) }
     val viewer = remember { ImageViewerState() }
 
     LaunchedEffect(graph) {

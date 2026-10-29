@@ -129,8 +129,8 @@ class ConnectionManager(
             is Effect.TurnFinished -> if (!inForeground) {
                 notifier.turnFinished(active.daemon, effect.agent.id, effect.agent.displayName, effect.status, effect.text)
             }
-            // Played by io.malac.app.voice.Speech, which follows the active daemon itself.
-            is Effect.Say -> Unit
+            // Played and stopped by io.malac.app.voice.Speech, which follows the active daemon itself.
+            is Effect.Say, is Effect.SayCancelled -> Unit
             is Effect.Resync -> Unit
         }
     }

@@ -68,6 +68,8 @@ class AppGraph(context: Context, val crashes: CrashLog) {
 
     /** Answers a request from a notification: over the open WebSocket if there is one, else over REST. */
     suspend fun answer(daemonId: String, requestId: String, decision: Decision) {
+        // Speech may still be reading it out while the app is in the background.
+        speech.approvalAnswered()
         val command = Command.Approve(requestId, decision)
         val active = connections.active.value
         val sent = active?.daemon?.id == daemonId &&

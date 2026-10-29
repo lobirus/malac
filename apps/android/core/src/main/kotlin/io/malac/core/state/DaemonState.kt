@@ -50,6 +50,9 @@ sealed interface Effect {
 
     /** A sentence for this connection to read aloud: fetch `/api/voice/say/{id}` and play it. */
     data class Say(val say: ServerMessage.Say) : Effect
+
+    /** Stop these sentences: the one playing at once, the queued ones before they start. */
+    data class SayCancelled(val ids: Set<String>) : Effect
 }
 
 data class Reduction(val state: DaemonState, val effects: List<Effect> = emptyList())
@@ -195,6 +198,8 @@ private class Reducer(private var state: DaemonState) {
             is ServerMessage.VoiceListening -> state = state.copy(listener = message.listener)
             // Every client gets every sentence; the one whose listener it names plays it.
             is ServerMessage.Say -> if (state.listener != null && message.listener == state.listener) effects += Effect.Say(message)
+            // Whatever the listener now, this connection may still be playing one of them.
+            is ServerMessage.SayCancelled -> if (message.ids.isNotEmpty()) effects += Effect.SayCancelled(message.ids.toSet())
             is ServerMessage.Notice -> effects += Effect.Notice(message.level, message.message)
             is ServerMessage.Lagged -> effects += Effect.Resync(state.workspace?.id)
             is ServerMessage.Shutdown -> state = state.copy(shutdownReason = message.reason.ifEmpty { "stopped" })

@@ -170,4 +170,14 @@ class DaemonStateTest {
         assertNull(stopped.listener)
         assertTrue(stopped.reduce(say).effects.isEmpty())
     }
+
+    @Test
+    fun cancelledSentencesStopOnEveryConnection() {
+        val cancelled = ServerMessage.SayCancelled(listOf("c1", "c2"))
+        val idle = DaemonState().reduce(ServerMessage.Snapshot()).state
+        assertEquals(listOf<Effect>(Effect.SayCancelled(setOf("c1", "c2"))), idle.reduce(cancelled).effects, "not listening any more")
+        val listening = idle.reduce(ServerMessage.VoiceListening("a1", 2)).state
+        assertEquals(listOf<Effect>(Effect.SayCancelled(setOf("c1", "c2"))), listening.reduce(cancelled).effects)
+        assertTrue(listening.reduce(ServerMessage.SayCancelled()).effects.isEmpty(), "nothing to stop")
+    }
 }

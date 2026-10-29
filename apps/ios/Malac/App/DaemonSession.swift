@@ -124,6 +124,8 @@ final class DaemonSession {
             if !inForeground { notifier.turnFinished(agent: agent.id, name: agent.displayName, status: status, text: text, daemon: daemon) }
         case .speak(let line):
             if inForeground, Self.speakHere { speech.enqueue(line) }
+        case .stopSpeaking(let ids):
+            speech.stop { ids.contains($0.id) }
         }
     }
 
@@ -167,6 +169,8 @@ final class DaemonSession {
 
     func approve(_ requestId: String, _ decision: Decision) async {
         answering.insert(requestId)
+        // Its announcement is stale now; this stops it before the daemon says so.
+        speech.stop { $0.reason == "approval" }
         do {
             _ = try await connection.request(.approve(requestId: requestId, decision: decision))
         } catch DaemonError.command(let message) {

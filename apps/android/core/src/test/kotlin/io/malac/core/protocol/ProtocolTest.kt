@@ -186,6 +186,7 @@ class ProtocolTest {
             ServerMessage.Say("c1", "malac needs your approval to run cargo publish.", "approval", "t", "a", 3),
             decodeServerMessage("""{"type":"say","id":"c1","text":"malac needs your approval to run cargo publish.","reason":"approval","tab":"t","agent":"a","listener":3}"""),
         )
+        assertEquals(ServerMessage.SayCancelled(listOf("c1", "c2")), decodeServerMessage("""{"type":"say_cancelled","ids":["c1","c2"]}"""))
         assertEquals(ServerMessage.VoiceListening("a4", 7), decodeServerMessage("""{"type":"voice_listening","client_ref":"a4","listener":7}"""))
         assertEquals(ServerMessage.VoiceListening("a5", null), decodeServerMessage("""{"type":"voice_listening","client_ref":"a5","listener":null}"""))
         assertEquals(

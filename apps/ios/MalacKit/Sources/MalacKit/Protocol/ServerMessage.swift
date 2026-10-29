@@ -46,6 +46,9 @@ public enum ServerMessage: Sendable {
     case voice(VoiceStatus)
     /// A sentence to read aloud, played by the connection whose listener it names.
     case say(SpokenLine)
+    /// The user answered an approval or sent a prompt: stop these sentences
+    /// at once if one is playing, and drop the rest from the queue.
+    case sayCancelled(ids: [String])
     /// The reply to `voice_listen`: this connection's listener id, nil after `on: false`.
     case voiceListening(clientRef: String?, listener: Int?)
     case reloaded
@@ -147,6 +150,8 @@ extension ServerMessage: Decodable {
                 agent: c.optional("agent"),
                 listener: try c.value("listener")
             ))
+        case "say_cancelled":
+            self = .sayCancelled(ids: c.value("ids", default: []))
         case "voice_listening":
             self = .voiceListening(clientRef: ref, listener: c.optional("listener"))
         case "reloaded":

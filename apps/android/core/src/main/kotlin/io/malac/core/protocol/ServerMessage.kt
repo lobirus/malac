@@ -166,6 +166,13 @@ sealed interface ServerMessage {
         val listener: Long = 0,
     ) : ServerMessage
 
+    /**
+     * The user answered an approval or sent a prompt: stop these sentences
+     * at once if one is playing, and drop the rest from the queue.
+     */
+    @Serializable
+    data class SayCancelled(val ids: List<String> = emptyList()) : ServerMessage
+
     /** The reply to `voice_listen`: this connection's listener id, or null after `on: false`. */
     @Serializable
     data class VoiceListening(
@@ -217,6 +224,7 @@ internal object ServerMessageSerializer : JsonContentPolymorphicSerializer<Serve
             "awake" -> ServerMessage.Awake.serializer()
             "voice" -> ServerMessage.Voice.serializer()
             "say" -> ServerMessage.Say.serializer()
+            "say_cancelled" -> ServerMessage.SayCancelled.serializer()
             "voice_listening" -> ServerMessage.VoiceListening.serializer()
             "reloaded" -> UnknownSerializer(type) { ServerMessage.Reloaded }
             "lagged" -> ServerMessage.Lagged.serializer()

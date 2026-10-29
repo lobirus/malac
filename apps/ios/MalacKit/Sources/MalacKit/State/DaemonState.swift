@@ -26,6 +26,8 @@ public enum Effect: Hashable, Sendable {
     case turnFinished(AgentState, TurnStatus, text: String)
     /// A sentence for this connection to read aloud.
     case speak(SpokenLine)
+    /// Stop these sentences: the one playing at once, the queued ones before they start.
+    case stopSpeaking(ids: Set<String>)
 }
 
 /// The daemon as one connection sees it: the first message is a snapshot of
@@ -241,6 +243,9 @@ public struct DaemonState: Sendable {
         case .say(let line):
             // Every client gets every sentence; only the one it names plays it.
             if line.listener == listener { effects.append(.speak(line)) }
+        case .sayCancelled(let ids):
+            // Whatever the listener now, this connection may still be playing one of them.
+            if !ids.isEmpty { effects.append(.stopSpeaking(ids: Set(ids))) }
         case let .notice(level, text, _):
             effects.append(.notice(level, text))
         case .lagged:

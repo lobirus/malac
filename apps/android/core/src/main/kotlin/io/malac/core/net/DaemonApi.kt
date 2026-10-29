@@ -126,8 +126,8 @@ class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint
         val url = url("api/shared", id).newBuilder().addQueryParameter("download", "true").build()
         val response = client.newCall(authorized(url).get().build()).await()
         val partial = File(file.path + ".part")
-        withContext(Dispatchers.IO) {
-            response.use {
+        response.use {
+            withContext(Dispatchers.IO) {
                 try {
                     it.requireSuccess()
                     file.parentFile?.mkdirs()
@@ -225,8 +225,9 @@ internal suspend fun <T> OkHttpClient.fetch(request: Request, deserializer: Dese
 /** Sends [request] and reads the whole body on the IO dispatcher, failing only with [DaemonException]. */
 internal suspend fun OkHttpClient.download(request: Request): Download {
     val response = newCall(request).await()
-    return withContext(Dispatchers.IO) {
-        response.use {
+    // Closed even when the download is cancelled before it reads the body.
+    return response.use {
+        withContext(Dispatchers.IO) {
             try {
                 it.requireSuccess()
                 val type = it.header("Content-Type")?.substringBefore(';')?.trim().orEmpty()

@@ -83,6 +83,19 @@ final class VoiceTests: XCTestCase {
         XCTAssertEqual(state.voice, changed)
     }
 
+    func testCancelledSentencesStopOnEveryConnection() throws {
+        let cancelled = try decode(#"{"type":"say_cancelled","ids":["c1","c2"]}"#)
+        guard case .sayCancelled(let ids) = cancelled else { return XCTFail("say_cancelled") }
+        XCTAssertEqual(ids, ["c1", "c2"])
+        XCTAssertNil(cancelled.clientRef, "a broadcast")
+
+        var state = DaemonState()
+        XCTAssertEqual(state.apply(cancelled), [.stopSpeaking(ids: ["c1", "c2"])], "not listening any more")
+        state.apply(try decode(#"{"type":"voice_listening","client_ref":"m1","listener":3}"#))
+        XCTAssertEqual(state.apply(cancelled), [.stopSpeaking(ids: ["c1", "c2"])])
+        XCTAssertEqual(state.apply(try decode(#"{"type":"say_cancelled"}"#)), [], "nothing to stop")
+    }
+
     // MARK: Shared files
 
     func testSharedTags() throws {

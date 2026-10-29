@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 class Commands(
     private val active: ActiveDaemon,
     private val scope: CoroutineScope,
+    private val onAnswer: () -> Unit,
     private val onReport: (String) -> Unit,
 ) {
     /** Requests answered here and not settled yet; their buttons are disabled. */
@@ -39,6 +40,7 @@ class Commands(
 
     fun approve(requestId: String, decision: Decision) {
         answering = answering + requestId
+        onAnswer()
         scope.launch {
             try {
                 active.connection.request(Command.Approve(requestId, decision))
@@ -52,8 +54,9 @@ class Commands(
     }
 }
 
+/** [answered] runs as the user answers an approval, before the daemon hears of it. */
 @Composable
-fun rememberCommands(active: ActiveDaemon, report: (String) -> Unit): Commands {
+fun rememberCommands(active: ActiveDaemon, answered: () -> Unit, report: (String) -> Unit): Commands {
     val scope = rememberCoroutineScope()
-    return remember(active) { Commands(active, scope, report) }
+    return remember(active) { Commands(active, scope, answered, report) }
 }

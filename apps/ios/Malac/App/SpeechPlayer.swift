@@ -4,7 +4,8 @@ import Observation
 
 /// Plays the sentences the daemon reads aloud on this device, one after
 /// another: each clip is fetched as soon as it is announced and played when
-/// the one before it ends.
+/// the one before it ends. Once the user answers an approval or sends a
+/// prompt they are stale: the daemon cancels them and they stop at once.
 @MainActor
 @Observable
 final class SpeechPlayer {
@@ -46,6 +47,18 @@ final class SpeechPlayer {
         deactivate()
     }
 
+    /// Drops the waiting sentences `which` picks, unfetched, and stops the one playing at once if it is one.
+    func stop(where which: (SpokenLine) -> Bool) {
+        for entry in queue where which(entry.line) { entry.audio.cancel() }
+        queue.removeAll { which($0.line) }
+        guard let current, which(current) else { return }
+        advancing?.cancel()
+        advancing = nil
+        player?.stop()
+        player = nil
+        next()
+    }
+
     private func next() {
         guard !queue.isEmpty else {
             current = nil
@@ -54,8 +67,10 @@ final class SpeechPlayer {
         }
         let entry = queue.removeFirst()
         current = entry.line
+        let fetching = entry.audio
         advancing = Task { [weak self] in
-            let audio = await entry.audio.value
+            // Stopping it drops its fetch too.
+            let audio = await withTaskCancellationHandler { await fetching.value } onCancel: { fetching.cancel() }
             guard let self, !Task.isCancelled else { return }
             if let audio, self.play(audio) { return }
             // The clip could not be fetched or played: show the sentence a moment instead.
