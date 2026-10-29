@@ -55,6 +55,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +69,8 @@ import io.malac.app.ui.theme.malac
 import io.malac.app.voice.Dictation
 import io.malac.core.format.formatClock
 import io.malac.core.protocol.Mode
+import io.malac.core.state.groupModels
+import io.malac.core.state.modelName
 import kotlinx.coroutines.launch
 
 /**
@@ -137,11 +140,13 @@ fun Composer(
             Recording(dictation, onCancel = viewModel.dictation::cancel)
         } else {
             Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                // A header per provider, so models of another gateway are easy to find.
+                val groups = remember(models) { groupModels(models).map { it.provider.ifEmpty { null } to it.models } }
                 Picker(
                     label = stringResource(R.string.model),
                     value = model ?: stringResource(R.string.default_model),
-                    options = models,
-                    display = { it },
+                    sections = groups,
+                    display = { modelName(it) },
                     onPick = onModel,
                     enabled = enabled && models.isNotEmpty(),
                 )
@@ -149,7 +154,7 @@ fun Composer(
                     Picker(
                         label = stringResource(R.string.mode),
                         value = mode.label(),
-                        options = Mode.entries,
+                        sections = listOf(null to Mode.entries),
                         display = { it.label() },
                         onPick = onMode,
                         enabled = enabled,
@@ -276,11 +281,12 @@ fun LevelMeter(level: Float, modifier: Modifier = Modifier) {
     }
 }
 
+/** A menu of options in [sections], each under its header when it has one. */
 @Composable
 private fun <T> Picker(
     label: String,
     value: String,
-    options: List<T>,
+    sections: List<Pair<String?, List<T>>>,
     display: @Composable (T) -> String,
     onPick: (T) -> Unit,
     enabled: Boolean,
@@ -298,14 +304,25 @@ private fun <T> Picker(
             Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = MaterialTheme.malac.text3)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            for (option in options) {
-                DropdownMenuItem(
-                    text = { Text(display(option)) },
-                    onClick = {
-                        open = false
-                        onPick(option)
-                    },
-                )
+            sections.forEachIndexed { index, (header, options) ->
+                if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                if (header != null) {
+                    Text(
+                        header,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.malac.text3,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).semantics { heading() },
+                    )
+                }
+                for (option in options) {
+                    DropdownMenuItem(
+                        text = { Text(display(option)) },
+                        onClick = {
+                            open = false
+                            onPick(option)
+                        },
+                    )
+                }
             }
         }
     }

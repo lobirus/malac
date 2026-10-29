@@ -147,6 +147,16 @@ sealed interface ServerMessage {
     @Serializable
     data class Awake(val awake: AwakeStatus) : ServerMessage
 
+    /**
+     * The user's configuration changed: a provider was added, removed or
+     * edited, a key stored, or the default model moved. Pickers take the new list.
+     */
+    @Serializable
+    data class Models(
+        val models: List<String> = emptyList(),
+        @SerialName("default_model") val defaultModel: String? = null,
+    ) : ServerMessage
+
     /** Voice settings changed, or the providers' model lists were read again. */
     @Serializable
     data class Voice(val voice: VoiceStatus) : ServerMessage
@@ -222,6 +232,7 @@ internal object ServerMessageSerializer : JsonContentPolymorphicSerializer<Serve
             "clients" -> ServerMessage.Clients.serializer()
             "remote" -> ServerMessage.Remote.serializer()
             "awake" -> ServerMessage.Awake.serializer()
+            "models" -> ServerMessage.Models.serializer()
             "voice" -> ServerMessage.Voice.serializer()
             "say" -> ServerMessage.Say.serializer()
             "say_cancelled" -> ServerMessage.SayCancelled.serializer()

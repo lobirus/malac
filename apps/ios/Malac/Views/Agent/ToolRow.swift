@@ -46,13 +46,20 @@ struct ToolRow: View {
             .accessibilityValue(stateText)
             .accessibilityHint(expanded ? "Collapses the details" : "Shows the details")
 
-            if call.isError, let output = call.output, !expanded {
-                Text(Format.firstLine(output))
-                    .font(.caption)
-                    .foregroundStyle(Palette.red)
-                    .lineLimit(2)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
+            // Who answered the approval, quietly; a denial in red, in place of its error.
+            let failure = call.isError && call.decision != .deny && !expanded ? call.output.map { Format.firstLine($0) } : nil
+            if call.decisionText != nil || failure != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let answer = call.decisionText {
+                        Text(answer).foregroundStyle(call.decision == .deny ? Palette.red : Palette.text3)
+                    }
+                    if let failure {
+                        Text(failure).foregroundStyle(Palette.red).lineLimit(2)
+                    }
+                }
+                .font(.caption)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
             }
             if call.state == .awaitingApproval, let request = call.requestId {
                 ApprovalBar(session: session, requestId: request)

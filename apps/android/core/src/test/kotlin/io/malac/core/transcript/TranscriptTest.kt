@@ -3,9 +3,11 @@ package io.malac.core.transcript
 import io.malac.core.Fixtures
 import io.malac.core.protocol.AgentEvent
 import io.malac.core.protocol.AgentStatus
+import io.malac.core.protocol.Decision
 import io.malac.core.protocol.Envelope
 import io.malac.core.protocol.MalacJson
 import io.malac.core.protocol.Message
+import io.malac.core.protocol.PendingApproval
 import io.malac.core.protocol.ServerMessage
 import io.malac.core.protocol.SessionTranscript
 import io.malac.core.protocol.TurnStatus
@@ -122,6 +124,72 @@ class TranscriptTest {
         val matched = transcriptOf(beforeRequest)
         matched.claim(listOf(request.copy(callId = "")))
         assertEquals(request.id, matched.items.only<TranscriptItem.Tool>().single().call.requestId)
+    }
+
+    @Test
+    fun savedAnswersAreMatchedToTheirCalls() {
+        val saved = MalacJson.decodeFromString(
+            SessionTranscript.serializer(),
+            """{"meta":{"id":"a"},"history":[
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"c1","name":"bash","input":{"command":"cargo publish"}},
+                    {"type":"tool_use","id":"c2","name":"bash","input":{"command":"rm -rf target"}},
+                    {"type":"tool_use","id":"c3","name":"read","input":{"path":"README.md"}}]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"Published"}]},
+                    {"type":"tool_result","tool_use_id":"c2","content":[{"type":"text","text":"The user denied this tool call. Try a different approach or ask the user."}],"is_error":true},
+                    {"type":"tool_result","tool_use_id":"c3","content":[{"type":"text","text":"# demo"}]}]}],
+             "decisions":[
+                {"call_id":"c2","tool":"bash","summary":"rm -rf target","decision":"deny","by":"talk mode","at":"2026-10-29T10:01:00Z"},
+                {"call_id":"c1","tool":"bash","summary":"cargo publish","decision":"allow_session","by":"Pixel 9","at":"2026-10-29T10:00:00Z"},
+                {"call_id":"gone","tool":"bash","summary":"ls","decision":"allow","at":"2026-10-29T10:02:00Z"}]}""",
+        )
+        val calls = Transcript().apply { load(saved.history, saved.decisions) }.items.only<TranscriptItem.Tool>().map { it.call }
+        assertEquals(listOf(Decision.AllowSession, Decision.Deny, null), calls.map { it.decision })
+        assertEquals(listOf("Pixel 9", "talk mode", null), calls.map { it.decidedBy })
+        assertEquals(listOf(ToolState.Done, ToolState.Denied, ToolState.Done), calls.map { it.state }, "a denied call reads as denied, not failed")
+        assertEquals(ToolState.Failed, Transcript().apply { load(saved.history) }.items.only<TranscriptItem.Tool>()[1].call.state)
+    }
+
+    @Test
+    fun liveAnswersSayWhoGaveThem() {
+        val at = Instant.parse("2026-10-29T10:00:00Z")
+        val history = listOf(
+            """{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"bash","input":{"command":"cargo publish"}},""" +
+                """{"type":"tool_use","id":"c2","name":"bash","input":{"command":"rm -rf target"}}]}""",
+        ).map { MalacJson.decodeFromString(Message.serializer(), it) }
+        val transcript = Transcript().apply { load(history) }
+        val input = MalacJson.parseToJsonElement("""{"command":"cargo publish"}""")
+        transcript.apply(Envelope("a", 1, at, AgentEvent.PermissionRequested("r1", "c1", "bash", "cargo publish", input)))
+        transcript.apply(Envelope("a", 2, at, AgentEvent.PermissionRequested("r2", "c2", "bash", "rm -rf target")))
+        val waiting = transcript.items.only<TranscriptItem.Tool>().map { it.call }
+        assertEquals(listOf(ToolState.AwaitingApproval, ToolState.AwaitingApproval), waiting.map { it.state })
+        assertEquals(listOf(null, null), waiting.map { it.decision }, "no answer while it waits")
+
+        transcript.apply(Envelope("a", 3, at, AgentEvent.PermissionResolved("r1", allowed = true, decision = Decision.Allow, by = "this computer")))
+        transcript.apply(Envelope("a", 4, at, AgentEvent.PermissionResolved("r2", allowed = false, decision = Decision.Deny, by = "Pixel 9")))
+        transcript.apply(Envelope("a", 5, at, AgentEvent.ToolFinished("c1", "bash", "Published", millis = 900)))
+        val (allowed, denied) = transcript.items.only<TranscriptItem.Tool>().map { it.call }
+        assertEquals(ToolState.Done, allowed.state)
+        assertEquals(Decision.Allow to "this computer", allowed.decision to allowed.decidedBy)
+        assertEquals(ToolState.Denied, denied.state)
+        assertEquals(Decision.Deny to "Pixel 9", denied.decision to denied.decidedBy)
+    }
+
+    @Test
+    fun anAnswerAfterTheHistoryWasReadFindsItsRow() {
+        val history = listOf(
+            """{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"bash","input":{"command":"cargo publish"}}]}""",
+        ).map { MalacJson.decodeFromString(Message.serializer(), it) }
+        // The request was asked before the cutoff, so only its answer is in the log after it.
+        val open = PendingApproval("r1", "c1", "a", "main", "bash", "cargo publish")
+        val transcript = Transcript().apply { load(history) }
+        transcript.claim(listOf(open))
+        transcript.apply(Envelope("a", 9, Instant.parse("2026-10-29T10:00:00Z"), AgentEvent.PermissionResolved("r1", true, Decision.Allow, "Pixel 9")))
+        transcript.claim(emptyList())
+        val call = transcript.items.only<TranscriptItem.Tool>().single().call
+        assertEquals(ToolState.Running, call.state)
+        assertEquals(Decision.Allow to "Pixel 9", call.decision to call.decidedBy)
     }
 
     @Test

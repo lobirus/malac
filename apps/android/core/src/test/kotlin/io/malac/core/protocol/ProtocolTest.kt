@@ -197,6 +197,48 @@ class ProtocolTest {
     }
 
     @Test
+    fun approvalAnswersDecode() {
+        fun resolved(fields: String) = assertIs<ServerMessage.Event>(
+            decodeServerMessage(
+                """{"type":"event","tab":"t","envelope":{"agent":"a","seq":4,"at":"2026-10-29T10:00:00Z","type":"permission_resolved",$fields}}""",
+            ),
+        ).envelope.event
+        assertEquals(
+            AgentEvent.PermissionResolved("r1", allowed = true, decision = Decision.AllowSession, by = "Pixel 9"),
+            resolved(""""request_id":"r1","allowed":true,"decision":"allow_session","by":"Pixel 9""""),
+        )
+        assertEquals(AgentEvent.PermissionResolved("r2", allowed = false), resolved(""""request_id":"r2","allowed":false"""), "an older daemon")
+        assertEquals(
+            AgentEvent.PermissionResolved("r3", allowed = true, by = "talk mode"),
+            resolved(""""request_id":"r3","allowed":true,"decision":"allow_forever","by":"talk mode""""),
+            "an answer this app does not know",
+        )
+
+        val transcript = MalacJson.decodeFromString(
+            SessionTranscript.serializer(),
+            """{"meta":{"id":"a"},"history":[],"decisions":[
+                {"call_id":"c1","tool":"bash","summary":"cargo publish","decision":"allow","by":"this computer","at":"2026-10-29T10:00:00.123456789Z"},
+                {"call_id":"c2","tool":"bash","summary":"rm -rf target","decision":"deny","at":"2026-10-29T10:01:00Z"}]}""",
+        )
+        assertEquals(
+            DecisionRecord("c1", "bash", "cargo publish", Decision.Allow, "this computer", Instant.parse("2026-10-29T10:00:00.123456789Z")),
+            transcript.decisions[0],
+        )
+        assertEquals(Decision.Deny, transcript.decisions[1].decision)
+        assertNull(transcript.decisions[1].by)
+        assertTrue(MalacJson.decodeFromString(SessionTranscript.serializer(), """{"meta":{"id":"a"}}""").decisions.isEmpty(), "an older daemon")
+    }
+
+    @Test
+    fun theModelListArrivesWhenTheConfigurationChanges() {
+        assertEquals(
+            ServerMessage.Models(listOf("lora/fast", "openrouter/anthropic/claude-sonnet"), "openrouter/anthropic/claude-sonnet"),
+            decodeServerMessage("""{"type":"models","models":["lora/fast","openrouter/anthropic/claude-sonnet"],"default_model":"openrouter/anthropic/claude-sonnet"}"""),
+        )
+        assertEquals(ServerMessage.Models(listOf("lora/fast"), null), decodeServerMessage("""{"type":"models","models":["lora/fast"],"default_model":null}"""))
+    }
+
+    @Test
     fun talkMessagesDecode() {
         assertEquals(TalkMessage.Ready("fake/gpt-realtime", "marin"), decodeTalkMessage("""{"type":"ready","model":"fake/gpt-realtime","voice":"marin"}"""))
         assertEquals(TalkMessage.Listening, decodeTalkMessage("""{"type":"listening"}"""))

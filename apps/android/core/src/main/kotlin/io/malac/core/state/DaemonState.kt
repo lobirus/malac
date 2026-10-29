@@ -194,6 +194,7 @@ private class Reducer(private var state: DaemonState) {
             is ServerMessage.Clients -> state = state.copy(daemon = state.daemon?.copy(clients = message.clients))
             is ServerMessage.Remote -> state = state.copy(remote = message.remote)
             is ServerMessage.Awake -> state = state.copy(awake = message.awake)
+            is ServerMessage.Models -> state = state.copy(models = message.models, defaultModel = message.defaultModel)
             is ServerMessage.Voice -> state = state.copy(voice = message.voice)
             is ServerMessage.VoiceListening -> state = state.copy(listener = message.listener)
             // Every client gets every sentence; the one whose listener it names plays it.
@@ -481,3 +482,16 @@ internal fun cleanTitle(title: String?): String = title.orEmpty().takeUnless { i
 
 /** Drops a request locally, e.g. after the daemon said it was already answered. */
 fun DaemonState.withoutRequest(requestId: String): DaemonState = copy(pending = pending - requestId)
+
+/** One provider's models, as `provider/model` ids. */
+data class ModelGroup(val provider: String, val models: List<String>)
+
+/**
+ * [models] by provider, the part before the first `/`, in the order the
+ * daemon lists them: model pickers show a header per provider.
+ */
+fun groupModels(models: List<String>): List<ModelGroup> =
+    models.groupBy { it.substringBefore('/', "") }.map { (provider, ids) -> ModelGroup(provider, ids) }
+
+/** A model's name under its provider's header: `anthropic/claude-x` reads as `claude-x`. */
+fun modelName(model: String): String = model.substringAfter('/')

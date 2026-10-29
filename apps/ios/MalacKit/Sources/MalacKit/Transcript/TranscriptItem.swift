@@ -71,9 +71,18 @@ public struct ToolCall: Hashable, Sendable {
     /// What a `send_to_user` call sent: shown as the files themselves.
     public var shared: SharedFiles?
     public var at: Date?
+    /// The user's answer, when the call waited for approval; nil while it waits.
+    public var decision: Decision?
+    /// Where it was answered, when known: a paired device's name, "this computer", "talk mode".
+    public var decidedBy: String?
 
     public var isError: Bool { state == .failed || state == .denied }
     public var isFinished: Bool { [.done, .failed, .denied].contains(state) }
+
+    /// "Allowed · Pixel 9", "Allowed for the session · this computer", "Denied · talk mode".
+    public var decisionText: String? {
+        decision.map { ToolPresentation.decision($0, by: decidedBy) }
+    }
 }
 
 /// An `agent_spawn` call and the subagent it started.

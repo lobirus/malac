@@ -154,4 +154,46 @@ final class ProtocolTests: XCTestCase {
         ).encoded()) as! NSDictionary
         XCTAssertEqual(encoded, approve)
     }
+
+    func testApprovalAnswersDecode() throws {
+        func resolved(_ fields: String) throws -> AgentEvent {
+            let json = #"{"type":"event","tab":"t","envelope":{"agent":"a","seq":4,"at":"2026-10-29T10:00:00Z","type":"permission_resolved",\#(fields)}}"#
+            guard case .event(_, _, let envelope) = try ServerMessage.decode(Data(json.utf8)) else {
+                XCTFail("not an event")
+                return .unknown(type: "")
+            }
+            return envelope.event
+        }
+        XCTAssertEqual(try resolved(#""request_id":"r1","allowed":true,"decision":"allow_session","by":"Pixel 9""#),
+                       .permissionResolved(requestId: "r1", allowed: true, decision: .allowSession, by: "Pixel 9"))
+        XCTAssertEqual(try resolved(#""request_id":"r2","allowed":false"#), .permissionResolved(requestId: "r2", allowed: false),
+                       "an older daemon")
+        XCTAssertEqual(try resolved(#""request_id":"r3","allowed":true,"decision":"allow_forever","by":"talk mode""#),
+                       .permissionResolved(requestId: "r3", allowed: true, decision: nil, by: "talk mode"),
+                       "an answer this app does not know")
+
+        let json = #"""
+        {"meta":{"id":"a"},"history":[],"decisions":[
+            {"call_id":"c1","tool":"bash","summary":"cargo publish","decision":"allow","by":"this computer","at":"2026-10-29T10:00:00.123456789Z"},
+            {"call_id":"c2","tool":"bash","summary":"rm -rf target","decision":"deny","at":"2026-10-29T10:01:00Z"}]}
+        """#
+        let transcript = try JSONDecoder.malac().decode(SessionTranscript.self, from: Data(json.utf8))
+        XCTAssertEqual(transcript.decisions.map(\.callId), ["c1", "c2"])
+        XCTAssertEqual(transcript.decisions.map(\.decision), [.allow, .deny])
+        XCTAssertEqual(transcript.decisions.map(\.by), ["this computer", nil])
+        XCTAssertEqual(transcript.decisions[0].summary, "cargo publish")
+        XCTAssertEqual(transcript.decisions[1].at, Timestamp.parse("2026-10-29T10:01:00Z"))
+        let older = try JSONDecoder.malac().decode(SessionTranscript.self, from: Data(#"{"meta":{"id":"a"}}"#.utf8))
+        XCTAssertTrue(older.decisions.isEmpty)
+    }
+
+    func testTheModelListArrivesWhenTheConfigurationChanges() throws {
+        let json = #"{"type":"models","models":["lora/fast","openrouter/anthropic/claude-sonnet"],"default_model":"openrouter/anthropic/claude-sonnet"}"#
+        guard case let .models(models, defaultModel) = try ServerMessage.decode(Data(json.utf8)) else { return XCTFail("models") }
+        XCTAssertEqual(models, ["lora/fast", "openrouter/anthropic/claude-sonnet"])
+        XCTAssertEqual(defaultModel, "openrouter/anthropic/claude-sonnet")
+        guard case .models(_, nil) = try ServerMessage.decode(Data(#"{"type":"models","models":[],"default_model":null}"#.utf8)) else {
+            return XCTFail("no default")
+        }
+    }
 }

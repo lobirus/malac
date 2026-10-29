@@ -159,4 +159,63 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(rows.last, .gap(7))
         XCTAssertEqual(rows.count, 2 + 3 + 2 + 3)
     }
+
+    func testSavedAnswersAreMatchedToTheirCalls() throws {
+        let json = #"""
+        {"meta":{"id":"a"},"history":[
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"c1","name":"bash","input":{"command":"cargo publish"}},
+                {"type":"tool_use","id":"c2","name":"bash","input":{"command":"rm -rf target"}},
+                {"type":"tool_use","id":"c3","name":"read","input":{"path":"README.md"}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"Published"}]},
+                {"type":"tool_result","tool_use_id":"c2","content":[{"type":"text","text":"The user denied this tool call. Try a different approach or ask the user."}],"is_error":true},
+                {"type":"tool_result","tool_use_id":"c3","content":[{"type":"text","text":"# demo"}]}]}],
+         "decisions":[
+            {"call_id":"c2","tool":"bash","summary":"rm -rf target","decision":"deny","by":"talk mode","at":"2026-10-29T10:01:00Z"},
+            {"call_id":"c1","tool":"bash","summary":"cargo publish","decision":"allow_session","by":"Pixel 9","at":"2026-10-29T10:00:00Z"},
+            {"call_id":"gone","tool":"bash","summary":"ls","decision":"allow","at":"2026-10-29T10:02:00Z"}]}
+        """#
+        let saved = try JSONDecoder.malac().decode(SessionTranscript.self, from: Data(json.utf8))
+        let calls = tools(Transcript(history: saved.history, decisions: saved.decisions, log: [], after: 0, pending: [], children: []).items)
+        XCTAssertEqual(calls.map(\.decision), [.allowSession, .deny, nil])
+        XCTAssertEqual(calls.map(\.decidedBy), ["Pixel 9", "talk mode", nil])
+        XCTAssertEqual(calls.map(\.state), [.done, .denied, .done], "a denied call reads as denied, not failed")
+        XCTAssertEqual(calls.map(\.decisionText), ["Allowed for the session · Pixel 9", "Denied · talk mode", nil])
+        let without = tools(Transcript(history: saved.history, log: [], after: 0, pending: [], children: []).items)
+        XCTAssertEqual(without[1].state, .failed)
+    }
+
+    func testLiveAnswersSayWhoGaveThem() throws {
+        let history = [Message(role: .assistant, content: [
+            .toolUse(id: "c1", name: "bash", input: .object(["command": .string("cargo publish")])),
+            .toolUse(id: "c2", name: "bash", input: .object(["command": .string("rm -rf target")])),
+        ])]
+        var transcript = Transcript(history: history, log: [], after: 0, pending: [], children: [])
+        let at = Date()
+        func apply(_ seq: Int, _ event: AgentEvent) { transcript.apply(Envelope(agent: "a", seq: seq, at: at, event: event)) }
+        apply(1, .permissionRequested(requestId: "r1", callId: "c1", tool: "bash", summary: "cargo publish", input: .null))
+        apply(2, .permissionRequested(requestId: "r2", callId: "c2", tool: "bash", summary: "rm -rf target", input: .null))
+        XCTAssertEqual(tools(transcript.items).map(\.state), [.awaitingApproval, .awaitingApproval])
+        XCTAssertEqual(tools(transcript.items).map(\.decisionText), [nil, nil], "no answer while it waits")
+
+        apply(3, .permissionResolved(requestId: "r1", allowed: true, decision: .allow, by: "this computer"))
+        apply(4, .permissionResolved(requestId: "r2", allowed: false, decision: .deny, by: "Pixel 9"))
+        apply(5, .toolFinished(callId: "c1", tool: "bash", output: "Published", isError: false, millis: 900))
+        let calls = tools(transcript.items)
+        XCTAssertEqual(calls.map(\.state), [.done, .denied])
+        XCTAssertEqual(calls.map(\.decisionText), ["Allowed · this computer", "Denied · Pixel 9"])
+
+        // A request asked before the cutoff has only its answer in the log after it.
+        let open = PendingApproval(id: "r1", callId: "c1", agent: "a", agentLabel: "main", tool: "bash", summary: "cargo publish",
+                                   input: .null, tab: nil)
+        let answered = [LogEntry.event(Envelope(agent: "a", seq: 9, at: at,
+                                                event: .permissionResolved(requestId: "r1", allowed: true, decision: .allowSession, by: "Pixel 9")))]
+        let later = tools(Transcript(history: history, log: answered, after: 8, openAtCutoff: [open], pending: [], children: []).items)
+        XCTAssertEqual(later.first?.state, .running)
+        XCTAssertEqual(later.first?.decisionText, "Allowed for the session · Pixel 9")
+
+        XCTAssertEqual(ToolPresentation.decision(.allowSession, by: nil), "Allowed for the session")
+        XCTAssertEqual(ToolPresentation.decision(.deny, by: ""), "Denied")
+    }
 }

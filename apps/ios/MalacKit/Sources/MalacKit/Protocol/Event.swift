@@ -28,7 +28,9 @@ public enum AgentEvent: Hashable, Sendable {
     case toolStarted(callId: String, tool: String, summary: String, input: JSONValue)
     case toolFinished(callId: String, tool: String, output: String, isError: Bool, millis: Int)
     case permissionRequested(requestId: String, callId: String, tool: String, summary: String, input: JSONValue)
-    case permissionResolved(requestId: String, allowed: Bool)
+    /// `decision` is nil from older daemons; `by` says where it was answered,
+    /// when known: a paired device's name, "this computer", "talk mode".
+    case permissionResolved(requestId: String, allowed: Bool, decision: Decision? = nil, by: String? = nil)
     case todos([Todo])
     case usage(turn: Usage, total: Usage, contextTokens: Int)
     case compacted(summary: String)
@@ -91,7 +93,12 @@ extension Envelope: Decodable {
                 input: c.value("input", default: .null)
             )
         case "permission_resolved":
-            event = .permissionResolved(requestId: try c.value("request_id"), allowed: c.value("allowed", default: false))
+            event = .permissionResolved(
+                requestId: try c.value("request_id"),
+                allowed: c.value("allowed", default: false),
+                decision: c.optional("decision"),
+                by: c.optional("by")
+            )
         case "todos":
             event = .todos(c.value("items", default: []))
         case "usage":

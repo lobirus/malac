@@ -15,6 +15,9 @@ final class TranscriptModel {
     @ObservationIgnored private let session: DaemonSession
     @ObservationIgnored let agent: String
     @ObservationIgnored private var history: [Message] = []
+    @ObservationIgnored private var decisions: [DecisionRecord] = []
+    /// Requests that were waiting when the history was read.
+    @ObservationIgnored private var openAtCutoff: [PendingApproval] = []
     @ObservationIgnored private var cutoff = -1
     @ObservationIgnored private var loadedGeneration = -1
     @ObservationIgnored private var sentImages: [(text: String, images: [ImageBlock])] = []
@@ -44,14 +47,19 @@ final class TranscriptModel {
         guard generation != loadedGeneration else { return }
         loadedGeneration = generation
         var saved: [Message] = []
+        var answers: [DecisionRecord] = []
+        var open: [PendingApproval] = []
         var cutoff = -1
         var failure: String?
         if !session.state.sawCreation(of: agent) {
             cutoff = session.state.lastSeq
+            open = session.state.pending(for: agent)
             fetching = true
             defer { fetching = false }
             do {
-                saved = try await session.api.transcript(agent).history
+                let transcript = try await session.api.transcript(agent)
+                saved = transcript.history
+                answers = transcript.decisions
             } catch DaemonError.http(404, _) {
                 // A brand-new agent has no saved transcript yet.
             } catch {
@@ -59,6 +67,8 @@ final class TranscriptModel {
             }
         }
         history = saved
+        decisions = answers
+        openAtCutoff = open
         self.cutoff = cutoff
         error = failure
         built = nil
@@ -76,6 +86,8 @@ final class TranscriptModel {
         guard !loading, !fetching else { return }
         let state = session.state
         let history = history
+        let decisions = decisions
+        let openAtCutoff = openAtCutoff
         let cutoff = cutoff
         let log = state.log(agent)
         let pending = state.pending(for: agent)
@@ -88,7 +100,8 @@ final class TranscriptModel {
         building?.cancel()
         building = Task {
             let transcript = await Task.detached(priority: .userInitiated) {
-                Transcript(history: history, log: log, after: cutoff, pending: pending, children: children, sentImages: sent)
+                Transcript(history: history, decisions: decisions, log: log, after: cutoff, openAtCutoff: openAtCutoff,
+                           pending: pending, children: children, sentImages: sent)
             }.value
             guard !Task.isCancelled else { return }
             items = transcript.items

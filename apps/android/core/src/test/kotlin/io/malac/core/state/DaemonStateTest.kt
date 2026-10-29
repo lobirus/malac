@@ -180,4 +180,32 @@ class DaemonStateTest {
         assertEquals(listOf<Effect>(Effect.SayCancelled(setOf("c1", "c2"))), listening.reduce(cancelled).effects)
         assertTrue(listening.reduce(ServerMessage.SayCancelled()).effects.isEmpty(), "nothing to stop")
     }
+
+    @Test
+    fun aModelsBroadcastReplacesTheListAndDefault() {
+        val (connected, _) = replay(listOf(MalacJson.decodeFromString(ServerMessage.Snapshot.serializer(), Fixtures.text("rest/snapshot.json"))))
+        assertEquals("lora/fast", connected.defaultModel)
+        val (state, effects) = replay(listOf(ServerMessage.Models(listOf("lora/fast", "gateway/openai/gpt-5", "gateway/anthropic/claude"), "gateway/openai/gpt-5")), connected)
+        assertEquals(listOf("lora/fast", "gateway/openai/gpt-5", "gateway/anthropic/claude"), state.models)
+        assertEquals("gateway/openai/gpt-5", state.defaultModel)
+        assertTrue(effects.isEmpty())
+        assertEquals(connected.generation, state.generation, "transcripts keep their history")
+        assertNull(replay(listOf(ServerMessage.Models(listOf("lora/fast"), null)), state).first.defaultModel)
+    }
+
+    @Test
+    fun modelsAreGroupedByProvider() {
+        val groups = groupModels(listOf("lora/fast", "gateway/openai/gpt-5", "lora/smart", "gateway/anthropic/claude", "local"))
+        assertEquals(
+            listOf(
+                ModelGroup("lora", listOf("lora/fast", "lora/smart")),
+                ModelGroup("gateway", listOf("gateway/openai/gpt-5", "gateway/anthropic/claude")),
+                ModelGroup("", listOf("local")),
+            ),
+            groups,
+        )
+        assertEquals("openai/gpt-5", modelName("gateway/openai/gpt-5"))
+        assertEquals("local", modelName("local"))
+        assertTrue(groupModels(emptyList()).isEmpty())
+    }
 }

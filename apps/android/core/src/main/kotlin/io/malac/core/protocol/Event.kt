@@ -86,6 +86,10 @@ sealed interface AgentEvent {
     data class PermissionResolved(
         @SerialName("request_id") val requestId: String,
         val allowed: Boolean = false,
+        /** How it was answered; null from older daemons. */
+        val decision: Decision? = null,
+        /** Where it was answered, when known: a paired device's name, `this computer`, `talk mode`. */
+        val by: String? = null,
     ) : AgentEvent
 
     @Serializable

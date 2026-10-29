@@ -2,6 +2,8 @@ package io.malac.core.transcript
 
 import io.malac.core.protocol.AgentEvent
 import io.malac.core.protocol.Block
+import io.malac.core.protocol.Decision
+import io.malac.core.protocol.DecisionRecord
 import io.malac.core.protocol.Envelope
 import io.malac.core.protocol.MalacJson
 import io.malac.core.protocol.Message
@@ -44,11 +46,12 @@ class Transcript {
 
     private data class Turn(val started: Instant, val usage: Usage = Usage.Zero, val context: Long = 0)
 
-    /** The saved history from `GET /api/sessions/{id}`. */
-    fun load(history: List<Message>) {
+    /** The saved history from `GET /api/sessions/{id}`, with the answers to its approvals. */
+    fun load(history: List<Message>, decisions: List<DecisionRecord> = emptyList()) {
         for (message in history) {
             if (message.role == Role.User) userBlocks(message.content) else assistantBlocks(message.content, null)
         }
+        decisions.forEach(::decided)
     }
 
     fun apply(entry: LogEntry) = when (entry) {
@@ -76,7 +79,7 @@ class Transcript {
             }
             is AgentEvent.ToolFinished -> finish(event.callId, event.output, event.isError, event.millis)
             is AgentEvent.PermissionRequested -> permissionRequested(event.requestId, event.callId, event.tool, event.input)
-            is AgentEvent.PermissionResolved -> permissionResolved(event.requestId, event.allowed)
+            is AgentEvent.PermissionResolved -> permissionResolved(event.requestId, event.allowed, event.decision, event.by)
             is AgentEvent.UsageReport -> turn = turn?.let { it.copy(usage = it.usage + event.turn, context = event.contextTokens) }
             is AgentEvent.Compacted -> append(TranscriptItem.Compacted(nextKey(), event.summary))
             is AgentEvent.ModelChanged -> append(TranscriptItem.ModelChanged(nextKey(), event.model))
@@ -233,19 +236,27 @@ class Transcript {
         }
     }
 
-    private fun permissionResolved(requestId: String, allowed: Boolean) {
+    private fun permissionResolved(requestId: String, allowed: Boolean, decision: Decision?, by: String?) {
         val key = approvals.remove(requestId) ?: return
         replace(key) { item ->
             item as TranscriptItem.Tool
-            val call = item.call
+            val call = item.call.copy(requestId = null, decision = decision, decidedBy = by)
             item.copy(
                 call = if (allowed) {
-                    call.copy(state = ToolState.Running, requestId = null)
+                    call.copy(state = ToolState.Running)
                 } else {
-                    call.copy(state = ToolState.Denied, requestId = null, output = "Denied")
+                    call.copy(state = ToolState.Denied, output = "Denied")
                 },
             )
         }
+    }
+
+    // A saved answer, matched to its call by id. A denied call's result is an error; it reads as denied.
+    private fun decided(record: DecisionRecord) {
+        val decision = record.decision ?: return
+        val item = positions[toolKey(record.callId)]?.let { rows[it] } as? TranscriptItem.Tool ?: return
+        val call = item.call.copy(decision = decision, decidedBy = record.by)
+        replace(item.key) { item.copy(call = if (decision == Decision.Deny) call.copy(state = ToolState.Denied) else call) }
     }
 
     // Requests that were open before this transcript loaded may carry no call id.

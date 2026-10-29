@@ -414,10 +414,44 @@ public struct SessionSummary: Identifiable, Hashable, Sendable, Decodable {
 public struct SessionTranscript: Sendable, Decodable {
     public var history: [Message]
     public var usage: Usage?
+    /// The approvals asked for and their answers, in order; empty from older daemons.
+    public var decisions: [DecisionRecord]
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.fields()
         history = c.value("history", default: [])
         usage = c.optional("usage")
+        decisions = c.value("decisions", default: [])
+    }
+}
+
+/// A tool call that waited for approval, and the user's answer.
+public struct DecisionRecord: Hashable, Sendable, Decodable {
+    public var callId: String
+    public var tool: String
+    public var summary: String
+    /// Nil for an answer this app does not know.
+    public var decision: Decision?
+    /// Where it was answered, when known.
+    public var by: String?
+    public var at: Date?
+
+    public init(callId: String, tool: String = "", summary: String = "", decision: Decision?, by: String? = nil, at: Date? = nil) {
+        self.callId = callId
+        self.tool = tool
+        self.summary = summary
+        self.decision = decision
+        self.by = by
+        self.at = at
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.fields()
+        callId = try c.value("call_id")
+        tool = c.value("tool", default: "")
+        summary = c.value("summary", default: "")
+        decision = c.optional("decision")
+        by = c.optional("by")
+        at = c.optional("at")
     }
 }

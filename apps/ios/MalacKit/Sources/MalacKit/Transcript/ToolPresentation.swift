@@ -2,6 +2,18 @@ import Foundation
 
 /// How tool calls read in compact rows, as in the web UI.
 public enum ToolPresentation {
+    /// The answer to a call that asked for approval, and where it was given,
+    /// worded as the terminal UI does: "Allowed for the session · Pixel 9".
+    public static func decision(_ decision: Decision, by: String?) -> String {
+        let verb = switch decision {
+        case .allow: "Allowed"
+        case .allowSession: "Allowed for the session"
+        case .deny: "Denied"
+        }
+        guard let by, !by.isEmpty else { return verb }
+        return "\(verb) · \(by)"
+    }
+
     /// A title and an optional tag such as an MCP server or "browser".
     public static func title(_ name: String) -> (title: String, tag: String?) {
         if let title = titles[name] { return (title, nil) }

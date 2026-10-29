@@ -14,7 +14,9 @@ import io.malac.core.net.CommandException
 import io.malac.core.net.DaemonException
 import io.malac.core.protocol.Block
 import io.malac.core.protocol.Command
+import io.malac.core.protocol.DecisionRecord
 import io.malac.core.protocol.Message
+import io.malac.core.protocol.PendingApproval
 import io.malac.core.protocol.ServerMessage
 import io.malac.core.state.DaemonState
 import io.malac.core.transcript.Draft
@@ -51,7 +53,14 @@ data class TranscriptUi(
  * keeps it a pure function of the daemon state.
  */
 class AgentViewModel(context: Context, private val active: ActiveDaemon, val agentId: String?) : ViewModel() {
-    private class History(val messages: List<Message>, val cutoff: Long, val error: String?)
+    /** A saved transcript, read after [cutoff]; [open] are the requests that were waiting then. */
+    private class History(
+        val messages: List<Message>,
+        val decisions: List<DecisionRecord>,
+        val cutoff: Long,
+        val open: List<PendingApproval>,
+        val error: String?,
+    )
 
     private val history = MutableStateFlow<History?>(null)
     private val outgoing = MutableStateFlow<List<Pair<String, List<Block.Image>>>>(emptyList())
@@ -98,12 +107,15 @@ class AgentViewModel(context: Context, private val active: ActiveDaemon, val age
     }
 
     private suspend fun load(agent: String) {
-        val cutoff = active.connection.state.value.lastSeq
+        val state = active.connection.state.value
+        val cutoff = state.lastSeq
+        val open = state.pendingFor(agent)
         history.value = try {
-            History(active.api.session(agent).history, cutoff, null)
+            val saved = active.api.session(agent)
+            History(saved.history, saved.decisions, cutoff, open, null)
         } catch (error: DaemonException) {
             // A brand-new agent may not have a saved transcript yet.
-            if (error.status == 404) History(emptyList(), cutoff, null) else History(emptyList(), cutoff, error.message)
+            History(emptyList(), emptyList(), cutoff, open, error.message.takeUnless { error.status == 404 })
         }
     }
 
@@ -112,7 +124,9 @@ class AgentViewModel(context: Context, private val active: ActiveDaemon, val age
         history ?: return TranscriptUi(loading = true)
         val transcript = Transcript()
         outgoing.forEach { (text, images) -> transcript.expectImages(text, images) }
-        transcript.load(history.messages)
+        transcript.load(history.messages, history.decisions)
+        // Requests asked before the cutoff are answered after it: claimed first, the answer finds its row.
+        transcript.claim(history.open)
         state.log(agent).filter { it.seq > history.cutoff }.forEach(transcript::apply)
         transcript.claim(state.pendingFor(agent))
         transcript.linkChildren(state.childrenOf(agent))

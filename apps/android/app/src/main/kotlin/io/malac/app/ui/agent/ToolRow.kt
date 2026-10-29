@@ -98,9 +98,19 @@ fun ToolRow(call: ToolCall, cwd: String?, answering: Boolean, onDecide: (String,
                 Text(formatDuration(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.malac.text3)
             }
         }
+        val answer = call.decision?.let { decisionText(it, call.decidedBy) }
+        // Who allowed the call, quietly; a denied call says it in red below.
+        if (answer != null && call.decision != Decision.Deny) {
+            Text(
+                answer,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.malac.text3,
+                modifier = Modifier.padding(start = 24.dp, bottom = 4.dp),
+            )
+        }
         if (call.state == ToolState.Failed || call.state == ToolState.Denied) {
             Text(
-                firstLine(call.output).ifEmpty { stringResource(R.string.phase_failed) },
+                answer.takeIf { call.decision == Decision.Deny } ?: firstLine(call.output).ifEmpty { stringResource(R.string.phase_failed) },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.malac.red,
                 maxLines = 2,
@@ -206,6 +216,19 @@ private fun StateMark(state: ToolState) {
             Text(mark, color = color, style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(16.dp))
         }
     }
+}
+
+/** "Allowed · Pixel 9", "Allowed for the session · this computer", "Denied · talk mode". */
+@Composable
+private fun decisionText(decision: Decision, by: String?): String {
+    val verb = stringResource(
+        when (decision) {
+            Decision.Allow -> R.string.decision_allowed
+            Decision.AllowSession -> R.string.decision_allowed_session
+            Decision.Deny -> R.string.decision_denied
+        },
+    )
+    return if (by.isNullOrEmpty()) verb else stringResource(R.string.decision_by, verb, by)
 }
 
 @Composable

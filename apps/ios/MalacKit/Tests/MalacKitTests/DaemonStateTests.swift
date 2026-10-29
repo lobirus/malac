@@ -136,4 +136,31 @@ final class DaemonStateTests: XCTestCase {
         XCTAssertEqual(later.finished.map(\.id), [Fixtures.main])
         XCTAssertTrue(later.ledger.requests.isEmpty)
     }
+
+    func testAModelsBroadcastReplacesTheListAndDefault() throws {
+        var state = DaemonState()
+        state.apply(.snapshot(try Fixtures.decode(Snapshot.self, "rest/snapshot.json")))
+        XCTAssertEqual(state.defaultModel, "lora/fast")
+        let generation = state.generation
+        let effects = state.apply(.models(["lora/fast", "gateway/openai/gpt-5", "gateway/anthropic/claude"], defaultModel: "gateway/openai/gpt-5"))
+        XCTAssertTrue(effects.isEmpty)
+        XCTAssertEqual(state.models, ["lora/fast", "gateway/openai/gpt-5", "gateway/anthropic/claude"])
+        XCTAssertEqual(state.defaultModel, "gateway/openai/gpt-5")
+        XCTAssertEqual(state.generation, generation, "transcripts keep their history")
+        XCTAssertEqual(state.modelGroups.map(\.provider), ["lora", "gateway"])
+        state.apply(.models(["lora/fast"], defaultModel: nil))
+        XCTAssertNil(state.defaultModel)
+    }
+
+    func testModelsAreGroupedByProvider() {
+        let groups = ModelGroup.group(["lora/fast", "gateway/openai/gpt-5", "lora/smart", "gateway/anthropic/claude", "local"])
+        XCTAssertEqual(groups, [
+            ModelGroup(provider: "lora", models: ["lora/fast", "lora/smart"]),
+            ModelGroup(provider: "gateway", models: ["gateway/openai/gpt-5", "gateway/anthropic/claude"]),
+            ModelGroup(provider: "", models: ["local"]),
+        ])
+        XCTAssertEqual(ModelGroup.name(of: "gateway/openai/gpt-5"), "openai/gpt-5")
+        XCTAssertEqual(ModelGroup.name(of: "local"), "local")
+        XCTAssertTrue(ModelGroup.group([]).isEmpty)
+    }
 }

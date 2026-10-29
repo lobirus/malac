@@ -98,6 +98,9 @@ public struct DaemonState: Sendable {
     /// The top-level agents of `tab`, in order.
     public func agents(of tab: WorkspaceTab) -> [AgentState] { tab.agents.compactMap { agents[$0] } }
 
+    /// The models by provider, for pickers with a header per provider.
+    public var modelGroups: [ModelGroup] { ModelGroup.group(models) }
+
     public func children(of agent: String) -> [AgentState] {
         agents.values.filter { $0.parent == agent }.sorted { ($0.created ?? .distantPast) < ($1.created ?? .distantPast) }
     }
@@ -236,6 +239,9 @@ public struct DaemonState: Sendable {
             remote = status
         case .awake(let status):
             awake = status
+        case let .models(list, defaultModel):
+            models = list
+            self.defaultModel = defaultModel
         case .voice(let status):
             voice = status
         case .voiceListening(_, let id):
@@ -443,7 +449,7 @@ public struct DaemonState: Sendable {
             pending.removeAll { $0.id == requestId }
             pending.append(approval)
             effects.append(.approvalRequested(approval))
-        case .permissionResolved(let requestId, _):
+        case .permissionResolved(let requestId, _, _, _):
             pending.removeAll { $0.id == requestId }
             effects.append(.approvalResolved(requestId: requestId))
         default:
@@ -454,5 +460,33 @@ public struct DaemonState: Sendable {
     /// A session title, unless it is attached content rather than typed text.
     static func cleanTitle(_ title: String) -> String {
         title.hasPrefix("<attachment ") ? "" : title
+    }
+}
+
+/// One provider's models, as `provider/model` ids.
+public struct ModelGroup: Hashable, Sendable, Identifiable {
+    /// The part before the first `/`; empty for a model without one.
+    public var provider: String
+    public var models: [String]
+
+    public var id: String { provider }
+
+    /// `models` by provider, in the order the daemon lists them.
+    public static func group(_ models: [String]) -> [ModelGroup] {
+        var groups: [ModelGroup] = []
+        for model in models {
+            let provider = model.firstIndex(of: "/").map { String(model[..<$0]) } ?? ""
+            if let index = groups.firstIndex(where: { $0.provider == provider }) {
+                groups[index].models.append(model)
+            } else {
+                groups.append(ModelGroup(provider: provider, models: [model]))
+            }
+        }
+        return groups
+    }
+
+    /// A model's name under its provider's header: `gateway/openai/gpt-5` reads as `openai/gpt-5`.
+    public static func name(of model: String) -> String {
+        model.firstIndex(of: "/").map { String(model[model.index(after: $0)...]) } ?? model
     }
 }

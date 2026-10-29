@@ -21,16 +21,21 @@ public struct Transcript: Sendable {
 
     /// History from `GET /api/sessions/{id}`, then the log entries that came
     /// after `cutoff`, with the open requests and known subagents linked.
+    /// `openAtCutoff` are the requests that were waiting at `cutoff`: claimed
+    /// before the log, so the answers that come after it find their rows.
     public init(
         history: [Message],
+        decisions: [DecisionRecord] = [],
         log: [LogEntry],
         after cutoff: Int,
+        openAtCutoff: [PendingApproval] = [],
         pending: [PendingApproval],
         children: [AgentState],
         sentImages: [(text: String, images: [ImageBlock])] = []
     ) {
         outgoing = sentImages
-        load(history)
+        load(history, decisions: decisions)
+        claim(openAtCutoff)
         for entry in log where entry.seq > cutoff { apply(entry) }
         claim(pending)
         link(children)
@@ -38,10 +43,12 @@ public struct Transcript: Sendable {
 
     // MARK: Input
 
-    public mutating func load(_ history: [Message]) {
+    /// The saved history, with the answers to its approvals.
+    public mutating func load(_ history: [Message], decisions: [DecisionRecord] = []) {
         for message in history {
             if message.role == .user { userBlocks(message.content) } else { assistantBlocks(message.content, at: nil) }
         }
+        for record in decisions { decided(record) }
     }
 
     public mutating func apply(_ entry: LogEntry) {
@@ -78,8 +85,8 @@ public struct Transcript: Sendable {
             finish(callId, output: output, isError: isError, millis: millis)
         case let .permissionRequested(requestId, callId, tool, _, input):
             permissionRequested(requestId, callId: callId, tool: tool, input: input)
-        case let .permissionResolved(requestId, allowed):
-            permissionResolved(requestId, allowed: allowed)
+        case let .permissionResolved(requestId, allowed, decision, by):
+            permissionResolved(requestId, allowed: allowed, decision: decision, by: by)
         case let .usage(usage, _, context):
             if let current = turn { turn = (current.started, current.usage + usage, context) }
         case .compacted(let summary):
@@ -261,15 +268,26 @@ public struct Transcript: Sendable {
         replace(.tool(call))
     }
 
-    private mutating func permissionResolved(_ requestId: String, allowed: Bool) {
+    private mutating func permissionResolved(_ requestId: String, allowed: Bool, decision: Decision?, by: String?) {
         guard let key = approvals.removeValue(forKey: requestId), case .tool(var call)? = item(key) else { return }
         call.requestId = nil
+        call.decision = decision
+        call.decidedBy = by
         if allowed {
             call.state = .running
         } else {
             call.state = .denied
             call.output = "Denied"
         }
+        replace(.tool(call))
+    }
+
+    // A saved answer, matched to its call by id. A denied call's result is an error; it reads as denied.
+    private mutating func decided(_ record: DecisionRecord) {
+        guard let decision = record.decision, case .tool(var call)? = item(Self.toolKey(record.callId)) else { return }
+        call.decision = decision
+        call.decidedBy = record.by
+        if decision == .deny { call.state = .denied }
         replace(.tool(call))
     }
 

@@ -211,6 +211,21 @@ data class SessionTranscript(
     val meta: SessionMeta,
     val history: List<Message> = emptyList(),
     val usage: Usage = Usage.Zero,
+    /** The approvals asked for and their answers, in order; empty from older daemons. */
+    val decisions: List<DecisionRecord> = emptyList(),
+)
+
+/** A tool call that waited for approval, and the user's answer. */
+@Serializable
+data class DecisionRecord(
+    @SerialName("call_id") val callId: String,
+    val tool: String = "",
+    val summary: String = "",
+    /** Null for an answer this app does not know. */
+    val decision: Decision? = null,
+    /** Where it was answered, when known. */
+    val by: String? = null,
+    val at: Timestamp? = null,
 )
 
 @Serializable

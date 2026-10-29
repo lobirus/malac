@@ -42,6 +42,9 @@ public enum ServerMessage: Sendable {
     case remote(RemoteStatus)
     /// Keep-awake took or released its assertion, or its mode changed.
     case awake(AwakeStatus)
+    /// The user's configuration changed: a provider was added, removed or
+    /// edited, a key stored, or the default model moved. Pickers take the new list.
+    case models([String], defaultModel: String?)
     /// Voice settings changed or the providers' model lists were read again.
     case voice(VoiceStatus)
     /// A sentence to read aloud, played by the connection whose listener it names.
@@ -139,6 +142,8 @@ extension ServerMessage: Decodable {
             self = .remote(try c.value("remote"))
         case "awake":
             self = .awake(try c.value("awake"))
+        case "models":
+            self = .models(c.value("models", default: []), defaultModel: c.optional("default_model"))
         case "voice":
             self = .voice(try c.value("voice"))
         case "say":

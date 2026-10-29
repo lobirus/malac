@@ -2,6 +2,7 @@ package io.malac.core.transcript
 
 import io.malac.core.protocol.AgentStatus
 import io.malac.core.protocol.Block
+import io.malac.core.protocol.Decision
 import io.malac.core.protocol.Level
 import io.malac.core.protocol.Todo
 import io.malac.core.protocol.TurnStatus
@@ -72,6 +73,10 @@ data class ToolCall(
     val at: Instant? = null,
     /** What a finished `send_to_user` call sent; null for other tools and failed calls. */
     val shared: SharedFiles? = null,
+    /** The user's answer, when the call waited for approval; null while it waits. */
+    val decision: Decision? = null,
+    /** Where it was answered, when known: a paired device's name, `this computer`, `talk mode`. */
+    val decidedBy: String? = null,
 ) {
     val isError: Boolean get() = state == ToolState.Failed || state == ToolState.Denied
     val isFinished: Boolean get() = state in setOf(ToolState.Done, ToolState.Failed, ToolState.Denied)

@@ -149,10 +149,19 @@ struct Composer: View {
         if !models.isEmpty {
             let current = agent?.model ?? newModel ?? tab?.options?.model ?? session.state.defaultModel ?? ""
             Menu {
+                // A section per provider, so models of another gateway are easy to find.
                 Picker("Model", selection: Binding(get: { current }, set: { model in
                     if let agent { session.setModel(model, agent: agent.id) } else { newModel = model }
                 })) {
-                    ForEach(models, id: \.self) { Text($0).tag($0) }
+                    ForEach(session.state.modelGroups) { group in
+                        if group.provider.isEmpty {
+                            ForEach(group.models, id: \.self) { Text($0).tag($0) }
+                        } else {
+                            Section(group.provider) {
+                                ForEach(group.models, id: \.self) { Text(ModelGroup.name(of: $0)).tag($0) }
+                            }
+                        }
+                    }
                 }
             } label: {
                 Label(current.isEmpty ? "Model" : current, systemImage: "cpu").lineLimit(1)
