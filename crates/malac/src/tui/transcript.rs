@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use malac_core::attach as core_attach;
 use malac_core::event::{AgentId, Envelope, Event, Level, Todo, TodoStatus, TurnStatus};
 use malac_core::message::{Message, Role, Usage};
+use malac_core::permission::Decision;
+use malac_core::session::DecisionRecord;
 use malac_core::shared::{SharedFile, parse_tags};
 use malac_core::{AgentSnapshot, Block};
 use ratatui::style::{Modifier, Style};
@@ -48,6 +50,8 @@ pub struct ToolCall {
     pub millis: u64,
     pub started: Instant,
     pub expanded: bool,
+    /// The approval it waited for: the answer and where it was given.
+    pub decision: Option<(Decision, Option<String>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -439,7 +443,12 @@ impl Transcript {
     /// Fills a transcript from a saved session's messages. A prompt reads
     /// as its `user_message` event did: the typed text, then the files it
     /// attached.
-    pub fn load(&mut self, history: &[Message], summarize: impl Fn(&str, &Value) -> String) {
+    pub fn load(
+        &mut self,
+        history: &[Message],
+        decisions: &[DecisionRecord],
+        summarize: impl Fn(&str, &Value) -> String,
+    ) {
         let mut calls: HashMap<String, usize> = HashMap::new();
         for message in history {
             let mut typed = Vec::new();
@@ -477,6 +486,7 @@ impl Transcript {
                             millis: 0,
                             started: Instant::now(),
                             expanded: false,
+                            decision: None,
                         }));
                     }
                     (
@@ -510,6 +520,16 @@ impl Transcript {
             if !typed.is_empty() || !attached.is_empty() {
                 let text = attach::user_text(&typed.join("\n"), &attached);
                 self.push(Entry::User(text));
+            }
+        }
+        for record in decisions {
+            if let Some(Entry::Tool(tool)) =
+                calls.get(&record.call_id).and_then(|&i| self.entry_mut(i))
+            {
+                tool.decision = Some((record.decision, record.by.clone()));
+                if record.decision == Decision::Deny {
+                    tool.state = ToolState::Denied;
+                }
             }
         }
         self.mark_answers();
@@ -647,10 +667,13 @@ impl AgentView {
                 millis: 0,
                 started: Instant::now(),
                 expanded: false,
+                decision: None,
             })),
             Event::PermissionResolved {
                 request_id,
                 allowed,
+                decision,
+                by,
             } => {
                 let index = t.items.iter().rposition(|i| {
                     matches!(&i.entry, Entry::Tool(c) if c.request_id.as_ref() == Some(request_id))
@@ -661,6 +684,7 @@ impl AgentView {
                     } else {
                         ToolState::Denied
                     };
+                    tool.decision = decision.map(|d| (d, by.clone()));
                 }
             }
             Event::ToolStarted {
@@ -684,6 +708,7 @@ impl AgentView {
                     millis: 0,
                     started: Instant::now(),
                     expanded: false,
+                    decision: None,
                 })),
             },
             Event::ToolFinished {
@@ -851,6 +876,7 @@ impl Agents {
         &mut self,
         id: &str,
         history: &[Message],
+        decisions: &[DecisionRecord],
         usage: Option<Usage>,
         summarize: impl Fn(&str, &Value) -> String,
     ) {
@@ -862,7 +888,7 @@ impl Agents {
         };
         // Cards of subagents that started meanwhile go after the history.
         let interim = std::mem::take(&mut view.transcript.items);
-        view.transcript.load(history, summarize);
+        view.transcript.load(history, decisions, summarize);
         // A prompt that began while the history was read is in both.
         let started = buffered.iter().find_map(|e| match &e.event {
             Event::UserMessage { text } => Some(text),
@@ -884,6 +910,18 @@ impl Agents {
         }
         for envelope in &buffered {
             self.apply(envelope);
+        }
+    }
+
+    /// Ties a request that was waiting when the history was read to its
+    /// tool call, so its answer lands on the right card.
+    pub fn claim_request(&mut self, agent: &str, call_id: &str, request_id: &str) {
+        let tool = self
+            .views
+            .get_mut(agent)
+            .and_then(|v| v.transcript.tool_mut(call_id));
+        if let Some(tool) = tool.filter(|t| t.request_id.is_none()) {
+            tool.request_id = Some(request_id.to_owned());
         }
     }
 
@@ -1184,6 +1222,19 @@ fn render_shared(tool: &ToolCall, files: &[SharedFile], width: usize, out: &mut 
     }
 }
 
+/// What the user answered when the call asked for approval, and where.
+fn decision_text(decision: Decision, by: Option<&str>) -> String {
+    let verb = match decision {
+        Decision::Allow => "allowed",
+        Decision::AllowSession => "allowed for the session",
+        Decision::Deny => "denied",
+    };
+    match by {
+        Some(by) => format!("{verb} · {by}"),
+        None => verb.to_owned(),
+    }
+}
+
 /// A tool call: one quiet line until expanded.
 fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mut Out) {
     let t = theme();
@@ -1203,7 +1254,13 @@ fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mu
     let mut meta = Vec::new();
     match tool.state {
         ToolState::Asking => meta.push(Span::styled("awaiting approval", t.fg(t.warning))),
-        ToolState::Denied => meta.push(Span::styled("denied", t.fg(t.error))),
+        ToolState::Denied => meta.push(Span::styled(
+            decision_text(
+                Decision::Deny,
+                tool.decision.as_ref().and_then(|(_, by)| by.as_deref()),
+            ),
+            t.fg(t.error),
+        )),
         ToolState::Running => meta.push(Span::styled(duration(tool.started.elapsed()), t.dim())),
         ToolState::Done | ToolState::Failed => {
             if tool.state == ToolState::Failed && !tool.expanded {
@@ -1230,6 +1287,14 @@ fn render_tool(tool: &ToolCall, cwd: &str, width: usize, ctx: &Ctx<'_>, out: &mu
                     t.faint(),
                 ));
             }
+        }
+    }
+    if let Some((decision, by)) = &tool.decision {
+        if *decision != Decision::Deny {
+            meta.push(Span::styled(
+                format!("  {}", decision_text(*decision, by.as_deref())),
+                t.faint(),
+            ));
         }
     }
     let expandable = !tool.output.is_empty() || !tool.input.is_null();
@@ -1589,6 +1654,8 @@ mod tests {
             Event::PermissionResolved {
                 request_id: "r1".into(),
                 allowed: false,
+                decision: None,
+                by: None,
             },
         ));
         let lines = rendered(&mut agents, "m", 50);
@@ -1715,7 +1782,9 @@ mod tests {
             ]),
         ];
         let mut transcript = Transcript::new("/work");
-        transcript.load(&history, |name, input| format!("{name}:{}", input["path"]));
+        transcript.load(&history, &[], |name, input| {
+            format!("{name}:{}", input["path"])
+        });
         let entries: Vec<String> = transcript
             .items()
             .iter()
@@ -1736,6 +1805,59 @@ mod tests {
     }
 
     #[test]
+    fn approvals_show_who_answered() {
+        let history = vec![Message::assistant(vec![
+            Block::ToolUse {
+                id: "c1".into(),
+                name: "bash".into(),
+                input: json!({"command": "cargo publish"}),
+            },
+            Block::ToolUse {
+                id: "c2".into(),
+                name: "bash".into(),
+                input: json!({"command": "rm -rf target"}),
+            },
+        ])];
+        let record = |call: &str, decision, by: &str| DecisionRecord {
+            call_id: call.into(),
+            tool: "bash".into(),
+            summary: String::new(),
+            decision,
+            by: Some(by.into()),
+            at: chrono::Utc::now(),
+        };
+        let decisions = [
+            record("c1", Decision::AllowSession, "Pixel 9"),
+            record("c2", Decision::Deny, "this computer"),
+        ];
+        let mut transcript = Transcript::new("/work");
+        transcript.load(&history, &decisions, |_, input| {
+            input["command"].as_str().unwrap_or_default().to_owned()
+        });
+        let tools: Vec<&ToolCall> = transcript
+            .items()
+            .iter()
+            .filter_map(|i| match &i.entry {
+                Entry::Tool(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools[0].decision,
+            Some((Decision::AllowSession, Some("Pixel 9".into())))
+        );
+        assert_eq!(tools[1].state, ToolState::Denied);
+        assert_eq!(
+            decision_text(Decision::AllowSession, Some("Pixel 9")),
+            "allowed for the session · Pixel 9"
+        );
+        assert_eq!(
+            decision_text(Decision::Deny, Some("this computer")),
+            "denied · this computer"
+        );
+    }
+
+    #[test]
     fn loading_views_hold_events_until_the_history_arrives() {
         let mut agents = Agents::default();
         agents.insert(AgentView::new("m", "main", None, "lora/smart", "/work").loading());
@@ -1753,7 +1875,7 @@ mod tests {
             Message::assistant(vec![Block::text("Done.")]),
             Message::user_text("second"),
         ];
-        agents.loaded("m", &history, None, |_, _| String::new());
+        agents.loaded("m", &history, &[], None, |_, _| String::new());
         assert!(agents.get("m").unwrap().pending.is_none());
         assert_eq!(
             kinds(&agents, "m"),

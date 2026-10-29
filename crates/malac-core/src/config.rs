@@ -75,7 +75,7 @@ impl ProviderKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,

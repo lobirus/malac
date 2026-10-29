@@ -72,6 +72,12 @@ pub enum Event {
     PermissionResolved {
         request_id: String,
         allowed: bool,
+        /// How it was answered; absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<crate::permission::Decision>,
+        /// Where it was answered, when known: a device's name, "this computer".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     Todos {
         items: Vec<Todo>,

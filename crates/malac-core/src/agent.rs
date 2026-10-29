@@ -27,7 +27,7 @@ use crate::plugins::hooks::{self, Decision as HookDecision};
 use crate::prompt::{self, PromptInputs};
 use crate::provider::{Completion, Delta, ProviderError, Request, ToolSpec};
 use crate::runtime::{AgentSpec, Runtime};
-use crate::session::{self, Record, SessionLog, SessionMeta, Transcript};
+use crate::session::{self, DecisionRecord, Record, SessionLog, SessionMeta, Transcript};
 use crate::tools::{
     AGENT_TOOLS, FileTracker, RecentImages, SessionEnv, Tool, ToolContext, ToolKind, ToolOutput,
     truncate_chars, truncate_middle,
@@ -1000,9 +1000,20 @@ impl Agent {
             decision = approver.approve(&request) => decision,
             _ = cancel.cancelled() => Decision::Deny,
         };
+        let by = approver.answered_by(&request.id);
+        self.log.append(&Record::Decision(DecisionRecord {
+            call_id: request.call_id.clone(),
+            tool: request.tool.clone(),
+            summary: request.summary.clone(),
+            decision,
+            by: by.clone(),
+            at: chrono::Utc::now(),
+        }));
         self.emit(Event::PermissionResolved {
             request_id: request.id,
             allowed: decision != Decision::Deny,
+            decision: Some(decision),
+            by,
         });
         match decision {
             Decision::Allow => Ok(()),

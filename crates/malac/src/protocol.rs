@@ -400,6 +400,12 @@ pub enum ServerMessage {
     Awake {
         awake: AwakeStatus,
     },
+    /// The configured models changed: a provider was added, removed or
+    /// edited, or the default model moved. Pickers take the new list.
+    Models {
+        models: Vec<String>,
+        default_model: Option<String>,
+    },
     /// What dictation, speech and talk mode offer changed.
     Voice {
         voice: VoiceStatus,

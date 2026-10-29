@@ -51,6 +51,9 @@ pub struct Runtime {
     /// Limits how many subagents run at once.
     pub(crate) agent_slots: Semaphore,
     providers: Mutex<HashMap<String, Arc<dyn Provider>>>,
+    /// The providers' settings: `config.providers`, kept current as the
+    /// user's configuration changes (see [`Runtime::update_providers`]).
+    provider_configs: RwLock<BTreeMap<String, crate::config::ProviderConfig>>,
     tools: RwLock<Vec<Arc<dyn Tool>>>,
     servers: RwLock<Vec<ServerStatus>>,
     mcp: Arc<McpPool>,
@@ -174,6 +177,7 @@ impl Runtime {
             warnings,
             agent_slots: Semaphore::new(config.agents.max_concurrent.max(1)),
             providers: Mutex::new(HashMap::new()),
+            provider_configs: RwLock::new(config.providers.clone()),
             tools: RwLock::new(tools::builtin()),
             servers: RwLock::new(Vec::new()),
             mcp,
@@ -252,9 +256,47 @@ impl Runtime {
         if let Some(provider) = cache.get(name) {
             return Ok(provider.clone());
         }
-        let provider = build_provider(&self.config, name)?;
+        let provider = {
+            let configs = self.provider_configs.read().unwrap();
+            let config = configs
+                .get(name)
+                .with_context(|| format!("unknown provider `{name}`"))?;
+            provider::build(config, config::api_key(name, config))
+        };
         cache.insert(name.to_owned(), provider.clone());
         Ok(provider)
+    }
+
+    /// Takes the providers of a changed user configuration without a
+    /// reload: new ones become usable, changed ones (or all, when keys
+    /// changed) are rebuilt on next use. Providers only the project
+    /// configures stay. Requests under way finish with the old client.
+    pub fn update_providers(
+        &self,
+        providers: &BTreeMap<String, crate::config::ProviderConfig>,
+        keys_changed: bool,
+    ) {
+        let mut configs = self.provider_configs.write().unwrap();
+        let mut cache = self.providers.lock().unwrap();
+        for (name, provider) in providers {
+            if configs.get(name) != Some(provider) {
+                configs.insert(name.clone(), provider.clone());
+                cache.remove(name);
+            }
+        }
+        if keys_changed {
+            cache.retain(|name, _| !providers.contains_key(name));
+        }
+    }
+
+    /// Every provider's name, as the configuration stands now.
+    pub fn provider_names(&self) -> Vec<String> {
+        self.provider_configs
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Checks for a newer release in the background (at most once a day) and,

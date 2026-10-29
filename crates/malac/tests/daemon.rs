@@ -149,6 +149,17 @@ async fn two_clients_share_tabs_agents_and_approvals() {
         .await;
     assert!(late.unwrap_err().to_string().contains("already answered"));
 
+    // Everyone hears how it was answered, and where.
+    let (decision, by) = wait_for(&mut a_events, |m| match m {
+        ServerMessage::Event { envelope, .. } if envelope.agent == agent => match &envelope.event {
+            Event::PermissionResolved { decision, by, .. } => Some((*decision, by.clone())),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    assert_eq!(decision, Some(Decision::Allow));
+    assert_eq!(by.as_deref(), Some("this computer"));
     let (status, text) = wait_for(&mut a_events, |m| match m {
         ServerMessage::Event { envelope, .. } if envelope.agent == agent => match &envelope.event {
             Event::TurnFinished { status, text } => Some((*status, text.clone())),
@@ -159,6 +170,12 @@ async fn two_clients_share_tabs_agents_and_approvals() {
     .await;
     assert_eq!(status, TurnStatus::Completed);
     assert_eq!(text, "ran it");
+    // The history keeps the question and the answer.
+    let saved: serde_json::Value = a.get(&format!("/api/sessions/{agent}")).await.unwrap();
+    assert_eq!(saved["decisions"][0]["tool"], "bash");
+    assert_eq!(saved["decisions"][0]["decision"], "allow");
+    assert_eq!(saved["decisions"][0]["by"], "this computer");
+    assert_eq!(saved["decisions"][0]["call_id"], "c1");
     wait_for(&mut b_events, |m| match m {
         ServerMessage::WorkspaceUpdated { workspace } if workspace.running == 0 => Some(()),
         _ => None,
@@ -746,6 +763,50 @@ async fn uploaded_files_travel_with_the_prompt() {
     assert_eq!(app["files"], json!(["Cargo.toml", "notes.txt"]));
     let outside = malac::client::get::<serde_json::Value>(&file, "/api/files?path=/etc").await;
     assert!(outside.is_err(), "the index stays inside the root");
+
+    hub.request_stop("done");
+    server.await.unwrap().unwrap();
+}
+
+/// A provider added to the configuration works at once, without a reload,
+/// and every client hears of the new models.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_provider_needs_no_reload() {
+    let _guard = exclusive().await;
+    let daemon = start_daemon(Scripted::new(vec![answer("hi")]), false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, mut events, _) = Client::connect(&file).await.unwrap();
+    let ServerMessage::Ack { tab: Some(tab), .. } = client
+        .request(Command::TabCreate(TabSpec {
+            cwd: project(&[]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("ack with a tab expected");
+    };
+    let runtime = hub.runtime(&tab).await.unwrap();
+    assert!(runtime.provider("fresh").is_err());
+
+    let config = home().join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{before}\n[providers.fresh]\nkind = \"openai\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodels = [\"one\"]\n"),
+    )
+    .unwrap();
+    let models = wait_for(&mut events, |m| match m {
+        ServerMessage::Models { models, .. } => Some(models.clone()),
+        _ => None,
+    })
+    .await;
+    std::fs::write(&config, before).unwrap();
+    assert!(models.contains(&"fresh/one".to_owned()), "{models:?}");
+    assert!(runtime.provider("fresh").is_ok(), "the loaded tab knows it");
+    assert!(runtime.provider("mock").is_ok(), "the others stay");
 
     hub.request_stop("done");
     server.await.unwrap().unwrap();

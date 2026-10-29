@@ -568,8 +568,12 @@ async fn answer(hub: &Arc<Hub>, target: &Target, allow: bool) -> Result<(String,
     } else {
         Decision::Deny
     };
+    let mut conn = Conn {
+        by: Some("talk mode".to_owned()),
+        ..Default::default()
+    };
     hub.execute(
-        &mut Conn::default(),
+        &mut conn,
         Command::Approve {
             request_id: id,
             decision,

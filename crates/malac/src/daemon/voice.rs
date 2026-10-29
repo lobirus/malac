@@ -573,6 +573,8 @@ mod tests {
         let resolved = |id: &str| Event::PermissionResolved {
             request_id: id.into(),
             allowed: true,
+            decision: None,
+            by: None,
         };
         assert!(!voice.holding_back());
         voice.announced("clip1", Some("r1"));

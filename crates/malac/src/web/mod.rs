@@ -515,7 +515,8 @@ async fn api_sessions(Query(query): Query<SessionsQuery>) -> Result<Json<Value>,
 async fn api_session(Path(id): Path<String>) -> Response {
     match session::load(&id) {
         Ok(t) => {
-            Json(json!({ "meta": t.meta, "history": t.history, "usage": t.usage })).into_response()
+            Json(json!({ "meta": t.meta, "history": t.history, "usage": t.usage, "decisions": t.decisions }))
+                .into_response()
         }
         Err(err) => (StatusCode::NOT_FOUND, format!("{err:#}")).into_response(),
     }
@@ -586,9 +587,15 @@ async fn api_snapshot(
 /// Runs any protocol command; the body is the same JSON as on the WebSocket.
 async fn api_command(
     State(state): Shared,
+    axum::Extension(caller): axum::Extension<Caller>,
     Json(request): Json<ClientRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        by: caller
+            .device()
+            .and_then(|id| state.hub.access().device_name(id)),
+        ..Default::default()
+    };
     let reply = state.hub.execute(&mut conn, request.command).await?;
     let reply = match reply {
         Some(reply) => reply.answering(request.client_ref),
@@ -681,10 +688,14 @@ async fn client_socket(
     let mut revoked = hub.access().subscribe();
     let _client = hub.connected();
     let (mut sink, mut source) = socket.split();
+    let by = device
+        .as_deref()
+        .and_then(|id| hub.access().device_name(id));
     let mut conn = Conn {
         workspace: None,
         version,
         listener: None,
+        by,
     };
     // Subscribed before the snapshot is taken, so no change falls between.
     let mut outbox = hub.subscribe();

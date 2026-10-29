@@ -444,10 +444,13 @@ async fn enable(manager: &Manager, spec: &str, scope: Scope, ctx: &ToolContext) 
         summary: request.summary.clone(),
         input: request.input.clone(),
     });
-    let decision = ctx.runtime.approver().approve(&request).await;
+    let approver = ctx.runtime.approver();
+    let decision = approver.approve(&request).await;
     ctx.emit(Event::PermissionResolved {
+        by: approver.answered_by(&request.id),
         request_id: request.id,
         allowed: decision != Decision::Deny,
+        decision: Some(decision),
     });
     if decision == Decision::Deny {
         bail!(

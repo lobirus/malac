@@ -1027,6 +1027,15 @@ impl App {
             }
             ServerMessage::Awake { awake } => self.awake = awake,
             ServerMessage::Voice { voice } => self.voice_changed(voice),
+            ServerMessage::Models {
+                models,
+                default_model,
+            } => {
+                self.models = models;
+                self.default_model = default_model;
+                // The next picker asks the providers again, new ones included.
+                self.discovered.clear();
+            }
             ServerMessage::Say {
                 id,
                 text,
@@ -1105,6 +1114,11 @@ impl App {
                 self.approvals_hidden = false;
             }
             Event::PermissionResolved { request_id, .. } => {
+                // One that waited before the history was read has no card of its own.
+                if let Some(waiting) = self.approvals.iter().find(|a| a.request.id == *request_id) {
+                    self.agents
+                        .claim_request(id, &waiting.request.call_id, request_id);
+                }
                 self.approvals.retain(|a| a.request.id != *request_id);
             }
             // The turn began, or ended before this terminal saw it begin.

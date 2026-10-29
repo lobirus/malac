@@ -172,7 +172,7 @@ The daemon serves the web UI for every session, so no flag is needed for it: `ma
 | `malac models` | Every model your providers offer |
 | `malac update [--check]` | Update to the latest release |
 | `malac sessions [list\|show <id>\|delete <id>]` | Saved transcripts, including subagents |
-| `malac provider add\|list\|models` | Providers and keys |
+| `malac provider add\|list\|models\|use` | Providers and keys; `use <name>` switches the default model to that provider. A running daemon picks up provider changes at once, without a reload |
 | `malac config [path\|show]` | Configuration files and the merged result |
 | `malac memory [list\|search\|reindex]` | Long-term memory |
 | `malac mcp` | Connected MCP servers and their tools |

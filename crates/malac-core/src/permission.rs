@@ -73,6 +73,12 @@ pub struct PermissionRequest {
 #[async_trait]
 pub trait Approver: Send + Sync {
     async fn approve(&self, request: &PermissionRequest) -> Decision;
+
+    /// Who answered `request_id` (a device's name, "this computer"), asked
+    /// once right after [`approve`](Self::approve) returns.
+    fn answered_by(&self, _request_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Used when nobody is around to answer.

@@ -932,6 +932,8 @@ async fn approvals_come_and_go_with_any_client() {
             Event::PermissionResolved {
                 request_id: "r0".into(),
                 allowed: true,
+                decision: None,
+                by: None,
             },
         ),
     });

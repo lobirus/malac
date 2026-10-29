@@ -173,7 +173,7 @@ Every agent event, tagged with its tab:
 
 The envelope is the runtime's event (`crates/malac-core/src/event.rs`): `agent_started`, `model_changed`, `user_message`, `text_delta`, `thinking_delta`, `tool_call_streaming`, `assistant_message`, `tool_started`, `tool_finished`, `permission_requested`, `permission_resolved`, `todos`, `usage`, `compacted`, `notice`, `turn_finished`, `agent_finished`. `seq` increases across all tabs. Update notices (`update`) come with `tab: null`.
 
-Approvals: `permission_requested` reaches every client; any of them may answer with `approve`, the first answer wins, and `permission_resolved` tells everyone it is settled. A client that connects later finds open requests in `snapshot.pending`.
+Approvals: `permission_requested` reaches every client; any of them may answer with `approve`, the first answer wins, and `permission_resolved` tells everyone it is settled: `allowed`, `decision` (`allow`, `allow_session` or `deny`) and `by`, where it was answered (a paired device's name, `this computer` for the daemon's own machine, `talk mode`). A client that connects later finds open requests in `snapshot.pending`. The answer is kept with the session: `GET /api/sessions/{id}` lists `decisions`, so a reopened transcript shows them too. Show it on the tool card, such as "Allowed · Pixel 9" or "Denied · this computer", so the history says what the user decided.
 
 #### Changes
 
@@ -193,6 +193,7 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `remote` | `remote`: RemoteStatus | a tunnel started, stopped or got its address; a device paired or was revoked |
 | `awake` | `awake`: AwakeStatus | keep-awake took or released its assertion, or its mode or reason changed |
 | `notice` | `level` (`info`, `warning`, `error`), `message`, `tab`? | e.g. a configuration warning or an unavailable MCP server while a tab loads |
+| `models` | `models`, `default_model` | the user's configuration changed (a provider added, removed or edited, a key stored, the default model moved): pickers take the new list. Loaded tabs use new providers at once, without a reload. |
 | `voice` | `voice`: VoiceStatus | voice settings changed or the providers' model lists were read again |
 | `say` | `id`, `text`, `reason` (`approval`, `agent`, `finished`, `failed`), `tab`, `agent`, `listener` | a sentence to read aloud, for the connection whose listener id it names; see [voice](#voice-and-shared-files) |
 | `say_cancelled` | `ids` | the user answered an approval or sent a prompt: stop these sentences at once if one is playing, and drop the rest from the queue |
@@ -294,7 +295,7 @@ All under a token except `GET /api/hello` and `POST /api/pair`. JSON in and out;
 | `GET /api/files?path=` | Every file below a directory for `@` pickers: `{root, files, truncated}`. `files` are paths relative to `root`, sorted, with hidden files and what `.gitignore` excludes left out (inside and outside repositories), at most 50,000 (`truncated` says when there were more). `path` and its limits are as for `/api/fs`. |
 | `GET /api/fs?path=&hidden=&files=` | A directory's contents for folder and file pickers: `{path, parent, root, markers, entries: [{name, path, kind, size?, markers}], truncated}`. Entries are its subdirectories (`kind: "directory"`) and, with `files=true`, its files (`kind: "file"`, `size` in bytes) after them. `markers` names what a directory holds among `.git`, `.malac`, `AGENTS.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`. `path` is absolute, `~/…` or relative to the root; only what is below `daemon.browse_root` (default: the home directory) is listed, at most 1000 entries. `hidden=true` includes dot entries. |
 | `GET /api/sessions?cwd=&limit=&subagents=` | Saved sessions, newest first: `{sessions: [{id, label, parent, cwd, model, created, title, updated}]}`. `cwd` keeps those started in that directory; `limit` defaults to 50; `subagents=true` includes subagent sessions. `title` is the first prompt's typed text. Clients use this rather than reading `~/.malac/sessions`, so it works with a daemon on another machine. |
-| `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | A transcript (`meta`, `history`, `usage`); deleting also removes it from its tabs |
+| `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | A transcript (`meta`, `history`, `usage`, `decisions`: `[{call_id, tool, summary, decision, by, at}]`, the approvals asked for and their answers); deleting also removes it from its tabs |
 | `GET /api/usage?days=` | Token and cost totals from the session transcripts, see [below](#usage). Read-only. |
 | `GET /api/state` | The original web UI's state: the active tab's `cwd`, `mode`, `models` and `servers`, every live agent, recent sessions, pending requests |
 | `/api/settings`, `/api/models`, `/api/tools`, `/api/memory`, `/api/update`, `/api/providers/{name}/key` | Settings, as before. They act on the active tab's runtime; `POST /api/settings/apply` reloads idle tabs. `GET /api/settings` includes `context`, a ContextReport. |

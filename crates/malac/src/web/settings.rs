@@ -13,7 +13,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use malac_core::config::{self, home_dir};
 use malac_core::memory::Scope;
-use malac_core::{Runtime, session};
+use malac_core::{Config, Runtime, session};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -206,11 +206,16 @@ async fn delete_key(State(state): Shared, Path(name): Path<String>) -> ApiResult
 
 async fn models(State(state): Shared) -> ApiResult {
     let runtime = state.hub.settings_runtime().await?;
-    let providers = malac_core::provider::discover_models(&runtime.config).await;
+    // The files as they are now: providers apply without a reload, so the
+    // runtime's own copy may be older.
+    let config = Config::load(&runtime.cwd, None)
+        .map(|loaded| loaded.config)
+        .unwrap_or_else(|_| runtime.config.clone());
+    let providers = malac_core::provider::discover_models(&config).await;
     Ok(Json(json!({
-        "default": runtime.config.model,
-        "small": runtime.config.small_model,
-        "vision": runtime.config.vision_model,
+        "default": config.model,
+        "small": config.small_model,
+        "vision": config.vision_model,
         "providers": providers,
     })))
 }

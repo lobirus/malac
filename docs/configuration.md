@@ -37,6 +37,8 @@ See [`examples/config.toml`](../examples/config.toml) for a complete example.
 
 Keys are looked up in `api_key_env` first, then in `~/.malac/credentials.toml` (written by `malac provider add --api-key-stdin`, mode 0600).
 
+Edits to `~/.malac/config.toml` and `credentials.toml` (by hand, `malac provider add`, a settings page) reach a running daemon within two seconds: new and changed providers work in every open tab without a reload, and the apps' model pickers update. `malac provider use <name> [--model <model>]` switches to a provider: its model becomes the default, and `small_model` and `vision_model` follow where it has models of the same name.
+
 ## `[models."provider/model"]`
 
 | Key | Default | Meaning |

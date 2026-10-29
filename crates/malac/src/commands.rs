@@ -73,6 +73,14 @@ pub enum ProviderAction {
     List,
     /// List the models a provider serves.
     Models { name: String },
+    /// Switch to a provider: its model becomes the default, and the small
+    /// and vision models move along where it has models of the same name.
+    Use {
+        name: String,
+        /// The model to use (default: the provider's first listed model).
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -359,6 +367,56 @@ pub async fn provider(action: ProviderAction) -> Result<()> {
             if let Some(model) = &config.model {
                 println!("default model: {model}");
             }
+        }
+        ProviderAction::Use { name, model } => {
+            let config = Config::load_user()?;
+            let provider = config.providers.get(&name).with_context(|| {
+                format!("unknown provider `{name}`; `malac provider list` shows them")
+            })?;
+            let model = model.or_else(|| provider.models.first().cloned()).with_context(|| {
+                format!("`{name}` lists no models; pass --model (`malac provider models {name}` shows what it serves)")
+            })?;
+            let model = model
+                .strip_prefix(&format!("{name}/"))
+                .unwrap_or(&model)
+                .to_owned();
+            // The same model on the new provider, for the other roles.
+            let moved = |spec: &Option<String>| {
+                let id = spec.as_deref()?.split_once('/')?.1;
+                provider
+                    .models
+                    .iter()
+                    .any(|m| m == id)
+                    .then(|| format!("{name}/{id}"))
+            };
+            let mut changes = vec![("model", format!("{name}/{model}"))];
+            for (key, spec) in [
+                ("small_model", &config.small_model),
+                ("vision_model", &config.vision_model),
+            ] {
+                if let Some(next) = moved(spec).filter(|next| spec.as_ref() != Some(next)) {
+                    changes.push((key, next));
+                }
+            }
+            let path = config::user_config_path();
+            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+            for (key, value) in &changes {
+                text = malac_core::tools::edit_config_text(
+                    &text,
+                    &[(*key).to_owned()],
+                    Some(serde_json::json!(value)),
+                )?;
+            }
+            config::validate_user_table(&text.parse()?)?;
+            std::fs::write(&path, text)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            for (key, value) in &changes {
+                println!("{} {value}", format!("{key:<12}").bold());
+            }
+            println!(
+                "{}",
+                "a running daemon takes it at once; new agents start on it".dark_grey()
+            );
         }
         ProviderAction::Models { name } => {
             let config = Config::load(&working_dir(None)?, None)?.config;

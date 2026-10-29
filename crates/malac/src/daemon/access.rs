@@ -315,6 +315,16 @@ impl Access {
         state.devices.iter().map(|d| d.view(current)).collect()
     }
 
+    /// A paired device's name.
+    pub fn device_name(&self, id: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.clone())
+    }
+
     pub fn device_count(&self) -> usize {
         self.state.lock().unwrap().devices.len()
     }

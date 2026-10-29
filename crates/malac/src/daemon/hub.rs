@@ -46,6 +46,8 @@ const DEFAULT_WORKSPACE: &str = "default";
 const ATTACHED_ID: &str = "terminal";
 /// Messages a slow client may fall behind before it is told to resync.
 const OUTBOX: usize = 8192;
+/// How often the user's configuration files are checked for changes.
+const CONFIG_POLL: Duration = Duration::from_secs(2);
 
 /// Settings fixed when the daemon starts.
 #[derive(Debug, Clone)]
@@ -77,6 +79,9 @@ pub struct Conn {
     pub version: Option<String>,
     /// Its listener id while it plays speech (`voice_listen`).
     pub listener: Option<u64>,
+    /// Who answers approvals on it, for the history: a paired device's
+    /// name, or "talk mode"; `None` is this computer.
+    pub by: Option<String>,
 }
 
 pub struct Hub {
@@ -229,6 +234,7 @@ impl Hub {
         self.voice_changed(&base, false);
         let hub = self.clone();
         tokio::spawn(async move { hub.refresh_voice().await });
+        self.watch_config();
         self.forward_jobs();
         self.forward_host_events();
         self.start_update_checks();
@@ -997,6 +1003,52 @@ impl Hub {
         Ok(runtime)
     }
 
+    /// Notices edits to the user's configuration and keys (a provider added
+    /// with `malac provider add` or in a settings page, a key stored) and
+    /// applies the providers and models without a reload.
+    fn watch_config(self: &Arc<Self>) {
+        let hub = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let stamp = |path: PathBuf| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            let stamps = || {
+                (
+                    stamp(config::user_config_path()),
+                    stamp(config::credentials_path()),
+                )
+            };
+            let mut seen = stamps();
+            let mut tick = tokio::time::interval(CONFIG_POLL);
+            loop {
+                tick.tick().await;
+                let now = stamps();
+                if now == seen {
+                    continue;
+                }
+                let keys_changed = now.1 != seen.1;
+                seen = now;
+                let Some(hub) = hub.upgrade() else { break };
+                hub.config_changed(keys_changed).await;
+            }
+        });
+    }
+
+    async fn config_changed(&self, keys_changed: bool) {
+        if let Err(err) = self.refresh_base() {
+            // A file caught halfway through an edit; the next change brings it in.
+            tracing::warn!("the changed configuration does not load yet: {err:#}");
+            return;
+        }
+        let base = self.base_config();
+        for runtime in self.loaded() {
+            runtime.update_providers(&base.providers, keys_changed);
+        }
+        self.publish(&ServerMessage::Models {
+            models: configured_models(&base),
+            default_model: base.model.clone(),
+        });
+        self.refresh_voice().await;
+    }
+
     /// Relays a runtime's events to clients, tagged with its tab.
     /// Relays a runtime's events to clients, tagged with its tab, and
     /// announces the workspace's running count when a turn starts or ends.
@@ -1303,7 +1355,11 @@ impl Hub {
                 request_id,
                 decision,
             } => {
-                if !self.approvals.resolve(&request_id, decision) {
+                let by = conn
+                    .by
+                    .clone()
+                    .unwrap_or_else(|| "this computer".to_owned());
+                if !self.approvals.resolve(&request_id, decision, by) {
                     bail!("no pending permission request {request_id}; it was already answered");
                 }
                 return Ok(None);
@@ -2183,6 +2239,8 @@ pub fn tab_name(cwd: &Path, prompt: Option<&str>) -> String {
 #[derive(Default)]
 pub struct Approvals {
     waiting: Mutex<HashMap<String, (PermissionRequest, oneshot::Sender<Decision>)>>,
+    /// Who answered each request, until its agent asks.
+    answered: Mutex<HashMap<String, String>>,
 }
 
 impl Approvals {
@@ -2199,11 +2257,12 @@ impl Approvals {
     }
 
     /// Answers a request; `false` when it is not (or no longer) pending.
-    pub fn resolve(&self, id: &str, decision: Decision) -> bool {
-        match self.waiting.lock().unwrap().remove(id) {
-            Some((_, tx)) => tx.send(decision).is_ok(),
-            None => false,
-        }
+    pub fn resolve(&self, id: &str, decision: Decision, by: String) -> bool {
+        let Some((_, tx)) = self.waiting.lock().unwrap().remove(id) else {
+            return false;
+        };
+        self.answered.lock().unwrap().insert(id.to_owned(), by);
+        tx.send(decision).is_ok()
     }
 }
 
@@ -2224,6 +2283,10 @@ impl Approver for Approvals {
         }
         let _forget = Forget(self, &request.id);
         rx.await.unwrap_or(Decision::Deny)
+    }
+
+    fn answered_by(&self, request_id: &str) -> Option<String> {
+        self.answered.lock().unwrap().remove(request_id)
     }
 }
 
@@ -2268,10 +2331,12 @@ mod tests {
             while approvals.pending().is_empty() {
                 tokio::task::yield_now().await;
             }
-            assert!(approvals.resolve("r1", Decision::Allow));
-            assert!(!approvals.resolve("r1", Decision::Deny));
+            assert!(approvals.resolve("r1", Decision::Allow, "Pixel 9".into()));
+            assert!(!approvals.resolve("r1", Decision::Deny, "this computer".into()));
             assert_eq!(waiting.await.unwrap(), Decision::Allow);
             assert!(approvals.pending().is_empty());
+            assert_eq!(approvals.answered_by("r1").as_deref(), Some("Pixel 9"));
+            assert_eq!(approvals.answered_by("r1"), None, "asked once");
         });
     }
 

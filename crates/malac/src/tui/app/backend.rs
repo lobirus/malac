@@ -902,11 +902,14 @@ impl App {
                 let saved = result.unwrap_or_default();
                 let history: Vec<malac_core::Message> =
                     serde_json::from_value(saved["history"].clone()).unwrap_or_default();
+                let decisions: Vec<malac_core::session::DecisionRecord> =
+                    serde_json::from_value(saved["decisions"].clone()).unwrap_or_default();
                 let usage = serde_json::from_value(saved["usage"].clone()).ok();
                 let tools = self.tools.clone();
-                self.agents.loaded(&agent, &history, usage, |name, input| {
-                    summarize(&tools, name, input)
-                });
+                self.agents
+                    .loaded(&agent, &history, &decisions, usage, |name, input| {
+                        summarize(&tools, name, input)
+                    });
             }
             (Rest::Sessions, Ok(value)) => {
                 self.sessions =

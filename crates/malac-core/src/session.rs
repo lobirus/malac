@@ -26,9 +26,30 @@ pub struct SessionMeta {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Record {
     Meta(SessionMeta),
-    Message { message: Message },
-    Compaction { summary: String },
-    Usage { usage: Usage },
+    Message {
+        message: Message,
+    },
+    Compaction {
+        summary: String,
+    },
+    Usage {
+        usage: Usage,
+    },
+    /// An approval the user was asked for, and their answer.
+    Decision(DecisionRecord),
+}
+
+/// A tool call that waited for approval: what was asked, and the answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    pub call_id: String,
+    pub tool: String,
+    pub summary: String,
+    pub decision: crate::permission::Decision,
+    /// Where it was answered, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    pub at: DateTime<Utc>,
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -55,7 +76,7 @@ impl SessionLog {
             .append(true)
             .open(&path)
             .with_context(|| format!("cannot create {}", path.display()))?;
-        let mut log = Self { file };
+        let log = Self { file };
         log.append(&Record::Meta(meta.clone()));
         Ok(log)
     }
@@ -70,10 +91,10 @@ impl SessionLog {
     }
 
     /// Persistence failures must not stop the agent, so they are only logged.
-    pub fn append(&mut self, record: &Record) {
+    pub fn append(&self, record: &Record) {
         let result = serde_json::to_string(record)
             .map_err(anyhow::Error::from)
-            .and_then(|line| Ok(writeln!(self.file, "{line}")?));
+            .and_then(|line| Ok(writeln!(&self.file, "{line}")?));
         if let Err(err) = result {
             tracing::warn!("failed to write session log: {err}");
         }
@@ -87,6 +108,8 @@ pub struct Transcript {
     /// Every message ever recorded, for display.
     pub history: Vec<Message>,
     pub usage: Usage,
+    /// The approvals asked for, in order.
+    pub decisions: Vec<DecisionRecord>,
 }
 
 pub fn load(id: &str) -> Result<Transcript> {
@@ -96,6 +119,7 @@ pub fn load(id: &str) -> Result<Transcript> {
     let mut messages = Vec::new();
     let mut history = Vec::new();
     let mut usage = Usage::default();
+    let mut decisions = Vec::new();
     for line in BufReader::new(file).lines() {
         let line = line?;
         let Ok(record) = serde_json::from_str::<Record>(&line) else {
@@ -109,6 +133,7 @@ pub fn load(id: &str) -> Result<Transcript> {
             }
             Record::Compaction { summary } => messages = vec![compaction_message(&summary)],
             Record::Usage { usage: u } => usage.add(&u),
+            Record::Decision(decision) => decisions.push(decision),
         }
     }
     Ok(Transcript {
@@ -116,6 +141,7 @@ pub fn load(id: &str) -> Result<Transcript> {
         messages,
         history,
         usage,
+        decisions,
     })
 }
 
