@@ -43,7 +43,22 @@ pub struct Subscription {
     pub p256dh: String,
     /// Its 16-byte authentication secret, base64url.
     pub auth: String,
+    #[serde(default)]
+    pub kind: Receiver,
     pub registered: DateTime<Utc>,
+}
+
+/// What receives a device's pushes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Receiver {
+    /// An app, which may take a push without showing anything.
+    #[default]
+    App,
+    /// A browser's service worker. Each push must show a notification, or
+    /// the browser (Safari above all) takes the permission back, so these
+    /// get no follow-ups for answered requests.
+    Browser,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -73,6 +88,9 @@ pub struct Push {
     requests: Mutex<Requests>,
     http: reqwest::Client,
     rng: SystemRandom,
+    /// Signed VAPID headers by push service origin, with when they expire:
+    /// reused, since Apple wants a token refreshed at most once an hour.
+    tokens: Mutex<BTreeMap<String, (String, i64)>>,
 }
 
 impl Push {
@@ -128,6 +146,7 @@ impl Push {
             vapid,
             subscriptions: Mutex::new(subscriptions),
             requests: Mutex::default(),
+            tokens: Mutex::default(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -150,7 +169,14 @@ impl Push {
     }
 
     /// Registers (or replaces) a device's endpoint and keys.
-    pub fn subscribe(&self, device: &str, endpoint: &str, p256dh: &str, auth: &str) -> Result<()> {
+    pub fn subscribe(
+        &self,
+        device: &str,
+        endpoint: &str,
+        p256dh: &str,
+        auth: &str,
+        kind: Receiver,
+    ) -> Result<()> {
         let url = Url::parse(endpoint).context("the endpoint is not a URL")?;
         ensure!(
             matches!(url.scheme(), "https" | "http") && url.host().is_some(),
@@ -173,6 +199,7 @@ impl Push {
                 endpoint: endpoint.to_owned(),
                 p256dh: p256dh.to_owned(),
                 auth: auth.to_owned(),
+                kind,
                 registered: Utc::now(),
             },
         );
@@ -234,11 +261,15 @@ impl Push {
         requests.pushed.remove(id)
     }
 
-    /// Sends `payload` to every registered device, in the background.
-    pub fn send(self: &Arc<Self>, payload: Value) {
+    /// Sends `payload` to every registered device, in the background; to
+    /// apps only unless it is meant to show (`visible`).
+    pub fn send(self: &Arc<Self>, payload: Value, visible: bool) {
         let subscriptions = self.subscriptions.lock().unwrap().clone();
         let body = payload.to_string();
         for (device, subscription) in subscriptions {
+            if !visible && subscription.kind == Receiver::Browser {
+                continue;
+            }
             let push = self.clone();
             let body = body.clone();
             tokio::spawn(async move {
@@ -352,13 +383,21 @@ impl Push {
 
     /// The `Authorization: vapid` header for a push to `endpoint`: an ES256
     /// token for the push service's origin, and this daemon's public key.
+    /// A token is reused until it has an hour left.
     pub(crate) fn authorization(&self, endpoint: &str) -> Result<String> {
         let url = Url::parse(endpoint)?;
         let audience = url.origin().ascii_serialization();
+        let now = Utc::now().timestamp();
+        if let Some((header, expires)) = self.tokens.lock().unwrap().get(&audience) {
+            if expires - now > 3600 {
+                return Ok(header.clone());
+            }
+        }
+        let expires = now + VAPID_LIFETIME_SECONDS;
         let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
         let claims = json!({
             "aud": audience,
-            "exp": Utc::now().timestamp() + VAPID_LIFETIME_SECONDS,
+            "exp": expires,
             "sub": VAPID_SUBJECT,
         });
         let claims = URL_SAFE_NO_PAD.encode(claims.to_string());
@@ -367,11 +406,16 @@ impl Push {
             .vapid
             .sign(&self.rng, signing_input.as_bytes())
             .map_err(|_| anyhow!("cannot sign the VAPID token"))?;
-        Ok(format!(
+        let header = format!(
             "vapid t={signing_input}.{}, k={}",
             URL_SAFE_NO_PAD.encode(signature.as_ref()),
             self.public_key()
-        ))
+        );
+        self.tokens
+            .lock()
+            .unwrap()
+            .insert(audience, (header.clone(), expires));
+        Ok(header)
     }
 }
 
@@ -446,6 +490,7 @@ mod tests {
             endpoint: "https://push.example.com/up/abc".into(),
             p256dh: URL_SAFE_NO_PAD.encode(public.as_ref()),
             auth: URL_SAFE_NO_PAD.encode(auth),
+            kind: Receiver::App,
             registered: Utc::now(),
         };
         (private, subscription)
@@ -530,22 +575,47 @@ mod tests {
     }
 
     #[test]
+    fn reuses_a_token_per_push_service() {
+        let push = Push::in_memory();
+        let apple = push
+            .authorization("https://web.push.apple.com/abc")
+            .unwrap();
+        assert_eq!(
+            push.authorization("https://web.push.apple.com/def")
+                .unwrap(),
+            apple,
+            "the same origin, the same token"
+        );
+        assert_ne!(
+            push.authorization("https://fcm.googleapis.com/fcm/send/x")
+                .unwrap(),
+            apple
+        );
+    }
+
+    #[test]
     fn checks_registrations() {
         let push = Push::in_memory();
         let (_, good) = device();
-        push.subscribe("d1", &good.endpoint, &good.p256dh, &good.auth)
-            .unwrap();
+        push.subscribe(
+            "d1",
+            &good.endpoint,
+            &good.p256dh,
+            &good.auth,
+            Receiver::App,
+        )
+        .unwrap();
         assert!(push.is_registered("d1"));
         assert!(
-            push.subscribe("d1", "ftp://x", &good.p256dh, &good.auth)
+            push.subscribe("d1", "ftp://x", &good.p256dh, &good.auth, Receiver::App)
                 .is_err()
         );
         assert!(
-            push.subscribe("d1", &good.endpoint, "AAAA", &good.auth)
+            push.subscribe("d1", &good.endpoint, "AAAA", &good.auth, Receiver::App)
                 .is_err()
         );
         assert!(
-            push.subscribe("d1", &good.endpoint, &good.p256dh, "AAAA")
+            push.subscribe("d1", &good.endpoint, &good.p256dh, "AAAA", Receiver::App)
                 .is_err()
         );
         assert!(push.unsubscribe("d1"));
@@ -564,6 +634,7 @@ mod tests {
                 &subscription.endpoint,
                 &subscription.p256dh,
                 &subscription.auth,
+                Receiver::Browser,
             )
             .unwrap();
             push.public_key()
@@ -571,6 +642,10 @@ mod tests {
         let again = Push::load(path);
         assert_eq!(again.public_key(), key);
         assert!(again.is_registered("d1"));
+        assert_eq!(
+            again.subscriptions.lock().unwrap()["d1"].kind,
+            Receiver::Browser
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

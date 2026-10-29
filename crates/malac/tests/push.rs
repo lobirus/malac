@@ -149,6 +149,8 @@ async fn waiting_approvals_reach_registered_phones() {
         answer("ran it"),
         tool_call("c2", "bash", json!({ "command": "echo two" })),
         answer("ran that too"),
+        tool_call("c3", "bash", json!({ "command": "echo three" })),
+        answer("and that"),
     ]);
     let daemon = start_daemon(script, false).await;
     let file = daemon.file().clone();
@@ -312,6 +314,55 @@ async fn waiting_approvals_reach_registered_phones() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    // A browser gets approvals, but no follow-ups: every push to it must
+    // show a notification, or the browser takes the permission back.
+    let (_, public, auth) = device_keys();
+    *push_status.lock().unwrap() = StatusCode::CREATED;
+    phone(http.put(format!("{base}/api/push")))
+        .json(&json!({
+            "endpoint": endpoint,
+            "p256dh": public,
+            "auth": URL_SAFE_NO_PAD.encode(&auth),
+            "kind": "browser",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let waiting = hub.pending_requests().pop().unwrap().id;
+    client
+        .request(Command::Approve {
+            request_id: waiting,
+            decision: Decision::Allow,
+        })
+        .await
+        .unwrap();
+    let agent = wait_for(&mut events, |m| match m {
+        ServerMessage::Event { envelope, .. } => match &envelope.event {
+            Event::TurnFinished { .. } => Some(envelope.agent.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), inbox.recv())
+            .await
+            .is_err(),
+        "no follow-up for a browser"
+    );
+    client
+        .request(Command::Prompt {
+            tab: None,
+            agent: Some(agent),
+            text: "once more".into(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+    assert!(next(&mut inbox).await.body.len() > 86, "but approvals");
 
     // Revoking a device forgets its endpoint too.
     let (_, public, auth) = device_keys();

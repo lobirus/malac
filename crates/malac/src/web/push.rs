@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::settings::ApiError;
 use crate::daemon::access::Caller;
+use crate::daemon::push::Receiver;
 
 type Shared = State<Arc<AppState>>;
 
@@ -30,6 +31,8 @@ async fn status(State(state): Shared, Extension(caller): Extension<Caller>) -> J
         "wait_seconds": config.wait_seconds,
         "vapid_key": push.public_key(),
         "registered": caller.device().is_some_and(|device| push.is_registered(device)),
+        // Only paired devices get pushes, not pages on the master token.
+        "device": caller.device().is_some(),
     }))
 }
 
@@ -38,6 +41,9 @@ struct Registration {
     endpoint: String,
     p256dh: String,
     auth: String,
+    /// `app` (the default) or `browser`, whose pushes must all show.
+    #[serde(default)]
+    kind: Receiver,
 }
 
 async fn register(
@@ -51,7 +57,7 @@ async fn register(
     state
         .hub
         .push()
-        .subscribe(device, &body.endpoint, &body.p256dh, &body.auth)?;
+        .subscribe(device, &body.endpoint, &body.p256dh, &body.auth, body.kind)?;
     tracing::info!("device {device} registered for push");
     Ok(Json(json!({ "registered": true })))
 }

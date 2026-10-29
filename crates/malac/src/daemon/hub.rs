@@ -684,10 +684,13 @@ impl Hub {
             }
             Event::PermissionResolved { request_id, .. } => {
                 if self.push.resolved(request_id) {
-                    self.push.send(serde_json::json!({
-                        "type": "resolved",
-                        "requests": [request_id],
-                    }));
+                    self.push.send(
+                        serde_json::json!({
+                            "type": "resolved",
+                            "requests": [request_id],
+                        }),
+                        false,
+                    );
                 }
             }
             _ => {}
@@ -724,7 +727,7 @@ impl Hub {
             })
             .collect::<Vec<_>>();
         if !entries.is_empty() {
-            self.push.send(push::approvals_message(entries));
+            self.push.send(push::approvals_message(entries), true);
         }
     }
 
