@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/malac-mcp", "crates/malac-control", "crates/malac-core", "crates/malac"]
 
 [workspace.package]
-version = "1.2.4"
+version = "1.2.5"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"

@@ -14,8 +14,8 @@ android {
         applicationId = "io.malac.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 10
-        versionName = "1.2.4"
+        versionCode = 11
+        versionName = "1.2.5"
     }
 
     // Release builds are signed when the environment names a keystore, as
