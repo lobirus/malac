@@ -28,6 +28,7 @@ import {
   currentTab,
   displayName,
   ensure,
+  invalidate,
   navigate,
   openAgent,
   renderKeyed,
@@ -379,8 +380,12 @@ async function saveDefaultModel(spec) {
   const user = { ...(settings.user ?? {}), model: spec };
   try {
     const result = await api("/api/settings", { method: "PUT", body: { user } });
-    if (result.applied) toast(`Default model is now ${spec}`, "success");
-    else toast(result.message ?? "Saved; apply the settings to use it", "warning");
+    // The daemon takes a new default by itself (a `models` broadcast follows), running agents or not.
+    if (result.applied || (result.saved && settings.reloadable !== false)) {
+      state.defaultModel = spec;
+      invalidate("home", "composer");
+      toast(`Default model is now ${spec}`, "success");
+    } else toast(result.message ?? "Saved; apply the settings to use it", "warning");
   } catch (error) {
     toast(error.message, "error");
   }

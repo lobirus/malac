@@ -334,6 +334,8 @@ function receive(message) {
     case "voice":
       state.voice = message.voice;
       return invalidate("voice", "settings");
+    case "models":
+      return modelsChanged(message);
     case "say":
     case "say_cancelled":
       return onSay(message);
@@ -495,6 +497,21 @@ function modeChanged({ mode, tab, workspace }) {
   }
   syncTabState();
   invalidate("mode", "header", "home");
+}
+
+/**
+ * The user's configuration changed (a provider added, a key stored, the
+ * default moved): pickers take the new list at once, without a reload. The
+ * providers' own lists (`/api/models`) are read again when a page uses them.
+ */
+function modelsChanged({ models, default_model }) {
+  state.models = Array.isArray(models) ? models : [];
+  state.defaultModel = default_model ?? null;
+  // `refreshed`: the providers' lists were read again after the change.
+  const changed = (refreshed) => document.dispatchEvent(new CustomEvent("malac:models", { detail: { refreshed } }));
+  if (resources.has("models")) refresh("models").then(() => changed(true));
+  changed(false);
+  invalidate("composer", "header", "home", "settings", "resources");
 }
 
 function onReloaded() {
@@ -825,6 +842,8 @@ function trackPermission(agent, envelope, tab) {
     const { request_id: id, call_id, tool, summary, input } = envelope;
     state.pending.set(id, { id, call_id, agent: agent.id, agent_label: agent.label, tool, summary, input, tab: tab ?? agent.tab });
   } else if (envelope.type === "permission_resolved") {
+    // The answer names only the request; views find the tool card by its call.
+    envelope.call_id ??= state.pending.get(envelope.request_id)?.call_id;
     state.pending.delete(envelope.request_id);
   } else {
     return;
@@ -854,7 +873,8 @@ export async function loadHistory(agent) {
   const generation = state.generation;
   const cutoff = state.received;
   const data = await api(`/api/sessions/${encodeURIComponent(agent.id)}`);
-  const saved = { messages: data.history ?? [], cutoff };
+  // `decisions`: the approvals asked for and their answers, shown on the tool cards.
+  const saved = { messages: data.history ?? [], decisions: data.decisions ?? [], cutoff };
   if (generation === state.generation) {
     applyMeta(agent, data.meta);
     if (!agent.title) {

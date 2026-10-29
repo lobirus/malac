@@ -4179,6 +4179,35 @@ dl.kv.paths dt {
   white-space: nowrap;
 }
 
+/* What the user answered and where: a quiet line under the head. */
+.tool-decision {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 12px 8px 34px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tool-decision[hidden] {
+  display: none;
+}
+
+.tool-decision > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-decision svg {
+  flex: none;
+}
+
+.tool-decision[data-decision="deny"] {
+  color: var(--red);
+}
+
 .tool-approval {
   display: flex;
   flex-wrap: wrap;

@@ -67,6 +67,38 @@ function resultImages(content) {
   return (content ?? []).filter((block) => block.type === "image");
 }
 
+// Approval answers: what the user decided when a call waited, and where.
+// Live from `permission_resolved` (`decision`, `by`), and for a saved
+// transcript from its `decisions`, matched to tool cards by `call_id`. Worded
+// as the terminal UI does.
+
+const DECISION_VERBS = { allow: "Allowed", allow_session: "Allowed for the session", deny: "Denied" };
+
+/** "Allowed · Pixel 9", "Allowed for the session · this computer", "Denied · talk mode". */
+export function decisionText(decision, by) {
+  const verb = DECISION_VERBS[decision] ?? decision;
+  const where = typeof by === "string" ? by.trim() : "";
+  return where ? `${verb} · ${where}` : verb;
+}
+
+/** The answer an event or a saved record carries; null when it has none (older daemons). */
+export function decisionOf(source) {
+  const decision = source?.decision;
+  if (typeof decision !== "string" || !Object.hasOwn(DECISION_VERBS, decision)) return null;
+  const by = typeof source.by === "string" && source.by.trim() ? source.by.trim() : null;
+  return { decision, by };
+}
+
+/** A saved session's `decisions` by the call they answered; a later answer to the same call wins. */
+export function decisionsByCall(records) {
+  const map = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    const info = decisionOf(record);
+    if (info && typeof record.call_id === "string" && record.call_id) map.set(record.call_id, info);
+  }
+  return map;
+}
+
 /** A `malac_configure` request to enable a plugin that runs unapproved code. */
 export function isPluginApproval(request) {
   return request?.tool === "malac_configure" && typeof request.input?.plugin === "string";
@@ -334,6 +366,11 @@ export class TranscriptView {
     if (!state.views.has(this)) return;
     if (saved.error) this.notice("error", `Could not load the saved transcript: ${saved.error}`);
     for (const message of saved.messages) this.message(message);
+    // What the user answered, kept with the session: on the cards of the calls that asked.
+    for (const [call, info] of decisionsByCall(saved.decisions)) {
+      const card = this.cards.get(call);
+      if (card instanceof ToolCard) card.decided(info);
+    }
     for (const { n, env } of agent.events) {
       if (n > saved.cutoff) this.apply(env);
     }
@@ -598,11 +635,17 @@ export class TranscriptView {
   }
 
   permissionResolved(env) {
-    const card = this.approvals.get(env.request_id);
+    // A request from before this view loaded is found by its call (the store adds `call_id`).
+    const byCall = env.call_id ? this.cards.get(env.call_id) : null;
+    const card = this.approvals.get(env.request_id) ?? (byCall instanceof ToolCard ? byCall : null);
     this.approvals.delete(env.request_id);
     if (!card) return;
-    if (env.allowed) card.approved();
-    else card.finish("Denied", true);
+    const info = decisionOf(env);
+    if (info) card.decided(info);
+    if (!card.done) {
+      if (env.allowed) card.approved();
+      else card.finish("Denied", true);
+    }
     invalidate("permissions");
   }
 
@@ -789,9 +832,20 @@ class ToolCard {
     );
     this.headButton.addEventListener("click", () => this.toggle());
     this.errorLine = h("div", { class: "tool-error-line", hidden: true });
+    // What the user answered when the call waited for approval, and where.
+    this.decisionLine = h("div", { class: "tool-decision", hidden: true });
+    this.decision = null;
     this.approvalRow = h("div", { class: "tool-approval", hidden: true });
     this.bodyHost = h("div", { class: "tool-body", hidden: true });
-    this.el = h("div", { class: "tool", "data-state": "pending", "data-tool": this.name }, this.headButton, this.errorLine, this.approvalRow, this.bodyHost);
+    this.el = h(
+      "div",
+      { class: "tool", "data-state": "pending", "data-tool": this.name },
+      this.headButton,
+      this.decisionLine,
+      this.errorLine,
+      this.approvalRow,
+      this.bodyHost,
+    );
     if (this.name === "edit") this.prepareEdit();
   }
 
@@ -969,6 +1023,22 @@ class ToolCard {
     this.paintBody();
   }
 
+  /** Shows the answer to its approval: "Allowed · Pixel 9", "Denied · this computer". */
+  decided(info) {
+    this.decision = info;
+    const text = decisionText(info.decision, info.by);
+    this.decisionLine.dataset.decision = info.decision;
+    this.decisionLine.title = text;
+    setChildren(this.decisionLine, icon("shield", 12), h("span", {}, text));
+    this.decisionLine.hidden = false;
+    this.paintError();
+  }
+
+  /** A denial says so on its own line; the tool's "denied" error would repeat it. */
+  paintError() {
+    this.errorLine.hidden = !(this.done && this.isError) || this.decision?.decision === "deny";
+  }
+
   finish(output, isError, millis) {
     this.done = true;
     this.isError = Boolean(isError);
@@ -981,10 +1051,8 @@ class ToolCard {
       setChildren(this.meta, this.metaText());
     }
     if (this.millis != null) this.meta.append(h("span", { class: "tool-time" }, formatDuration(this.millis)));
-    if (isError) {
-      this.errorLine.textContent = firstLine(output) || "Failed";
-      this.errorLine.hidden = false;
-    }
+    if (isError) this.errorLine.textContent = firstLine(output) || "Failed";
+    this.paintError();
     this.paintBody();
   }
 

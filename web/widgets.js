@@ -187,7 +187,14 @@ function openModelMenu(anchor, { value, allowUnset, unsetLabel, align, onPick })
     }
   });
 
-  const handle = popover(anchor, panel, { align, className: "model-popover" });
+  // A provider added or a key stored elsewhere: the open list takes the new models.
+  const onModels = () => (panel.isConnected ? render() : document.removeEventListener("malac:models", onModels));
+  document.addEventListener("malac:models", onModels);
+  const handle = popover(anchor, panel, {
+    align,
+    className: "model-popover",
+    onClose: () => document.removeEventListener("malac:models", onModels),
+  });
   const entry = ensure("models");
   render();
   entry.promise?.then(() => panel.isConnected && render());

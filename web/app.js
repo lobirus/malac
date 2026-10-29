@@ -1726,6 +1726,8 @@ function bindChrome() {
   });
   document.addEventListener("malac:theme", (event) => applyTheme(event.detail));
   document.addEventListener("malac:reloaded", () => ui.settings?.reloaded());
+  // The configuration changed (here, in another client or with `malac provider add`).
+  document.addEventListener("malac:models", (event) => !event.detail?.refreshed && state.route.name === "settings" && ui.settings?.reloaded());
   document.addEventListener("malac:markers", () => ui.home?.render());
   darkScheme.addEventListener("change", renderThemeButton);
   narrowScreen.addEventListener("change", (event) => setSidebar(event.matches ? false : !embedded && local.get("malac.sidebar") !== "closed"));

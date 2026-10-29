@@ -50,6 +50,9 @@ const PRESETS = [
   { label: "Custom", kind: "openai", base_url: "" },
 ];
 const BUILT_IN_PROVIDERS = new Set(["anthropic", "openai"]);
+// What the daemon applies by itself once config.toml is saved, even while
+// agents run: providers (with their keys and model lists) and the default model.
+const LIVE_KEYS = new Set(["providers", "model"]);
 const CONTROL_DEFAULTS = {
   computer: { enabled: true, max_screenshot_width: 1366 },
   browser: { enabled: true, headless: false, profiles: {} },
@@ -532,6 +535,7 @@ export class SettingsPage {
     }
     this.saving = true;
     this.renderSaveBar();
+    const live = this.liveOnly();
     let result = null;
     try {
       if (this.controlDirty()) {
@@ -540,7 +544,7 @@ export class SettingsPage {
       if (this.userDirty()) {
         result = await api("/api/settings", { method: "PUT", body: { user: tidy(this.draft) } });
       }
-      this.showResult(result);
+      this.showResult(result, { live });
       markAllStale();
       this.saving = false;
       await this.load();
@@ -555,11 +559,24 @@ export class SettingsPage {
     this.onDirtyChange?.(this.isDirty());
   }
 
-  showResult(result) {
+  /** Whether the unsaved changes are only ones the daemon applies by itself (LIVE_KEYS). */
+  liveOnly() {
+    if (this.controlDirty() || this.data?.reloadable === false) return false;
+    const before = tidy(this.data?.user ?? {});
+    const after = tidy(this.draft);
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    return [...keys].every((key) => LIVE_KEYS.has(key) || stable(before[key]) === stable(after[key]));
+  }
+
+  showResult(result, { live = false } = {}) {
     if (!result) return;
+    // Providers and the default model need no reload: open tabs use them at
+    // once, even while agents run, and pickers list them right away.
     this.banner = result.applied
       ? { kind: "success", title: "Saved and applied", message: "New sessions use these settings." }
-      : {
+      : live && result.saved
+        ? { kind: "success", title: "Saved and applied", message: "Providers and the default model take effect at once, in open tabs too." }
+        : {
           kind: "warning",
           title: "Saved, not applied yet",
           message: result.message ?? "The running sessions keep the previous settings.",
