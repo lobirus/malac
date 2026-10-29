@@ -67,6 +67,10 @@ fn main() -> ExitCode {
     if let Err(err) = owned {
         tracing::warn!("macOS will ask for permissions for the app that started this: {err:#}");
     }
+    // Once per update; a read-only install keeps the generic icon.
+    if let Err(err) = malac_control::permissions::show_icon() {
+        tracing::debug!("no custom icon: {err:#}");
+    }
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

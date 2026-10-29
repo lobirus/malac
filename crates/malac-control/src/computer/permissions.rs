@@ -50,18 +50,31 @@ pub fn own_permissions() -> anyhow::Result<()> {
     imp::own_permissions()
 }
 
+/// Gives the `malac-control` executable malac's icon on macOS, so System
+/// Settings shows it in the permission lists instead of a generic program
+/// icon. A file's custom icon lives in its extended attributes, which an
+/// update drops with the old file, so this sets it again whenever it is
+/// missing. The attributes do not touch the signature or the grants.
+/// Elsewhere it does nothing.
+pub fn show_icon() -> anyhow::Result<()> {
+    imp::show_icon()
+}
+
 #[cfg(target_os = "macos")]
 pub use imp::{accessibility_error, require_screen_recording};
 
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::{CStr, CString, c_char, c_void};
-    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::path::Path;
     use std::process::Command;
     use std::ptr;
 
-    use anyhow::{Context, Error, Result, anyhow};
+    use anyhow::{Context, Error, Result, anyhow, bail};
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSData, NSString};
 
     use super::{App, Report};
 
@@ -102,6 +115,14 @@ mod imp {
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn proc_pidpath(pid: i32, buffer: *mut c_void, size: u32) -> i32;
+        fn getxattr(
+            path: *const c_char,
+            name: *const c_char,
+            value: *mut c_void,
+            size: usize,
+            position: u32,
+            options: i32,
+        ) -> isize;
         fn posix_spawnattr_init(attr: *mut *mut c_void) -> i32;
         fn posix_spawnattr_setflags(attr: *mut *mut c_void, flags: i16) -> i32;
         fn posix_spawnattr_destroy(attr: *mut *mut c_void) -> i32;
@@ -123,6 +144,11 @@ mod imp {
     /// Set for the re-executed process, so a system that ignores the
     /// disclaimer cannot make it re-execute forever.
     const OWN_PERMISSIONS_ENV: &str = "MALAC_CONTROL_OWN_PERMISSIONS";
+    /// malac's pig on macOS's rounded icon tile, made from the iOS app icon
+    /// (`apps/ios/Malac/Resources/Assets.xcassets/AppIcon.appiconset`).
+    const ICON: &[u8] = include_bytes!("../../assets/malac-control.icns");
+    /// `kHasCustomIcon`, in the Finder flags at bytes 8 and 9 of `com.apple.FinderInfo`.
+    const HAS_CUSTOM_ICON: u16 = 0x0400;
 
     pub fn own_permissions() -> Result<()> {
         if std::env::var_os(OWN_PERMISSIONS_ENV).is_some()
@@ -175,6 +201,47 @@ mod imp {
             posix_spawnattr_destroy(&mut attr);
             result.context("cannot re-execute with its own permissions")
         }
+    }
+
+    pub fn show_icon() -> Result<()> {
+        // The real file, which is what System Settings lists, not a symlink to it.
+        let exe = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .context("cannot find this executable")?;
+        if has_custom_icon(&exe) {
+            return Ok(());
+        }
+        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(ICON))
+            .context("cannot read the icon")?;
+        let path = NSString::from_str(&exe.to_string_lossy());
+        let workspace = NSWorkspace::sharedWorkspace();
+        if !workspace.setIcon_forFile_options(
+            Some(&image),
+            &path,
+            NSWorkspaceIconCreationOptions::empty(),
+        ) {
+            bail!("cannot set the icon of {}", exe.display());
+        }
+        Ok(())
+    }
+
+    fn has_custom_icon(path: &Path) -> bool {
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        let mut info = [0u8; 32];
+        // SAFETY: both names are null-terminated and the buffer is as large as the size passed.
+        let len = unsafe {
+            getxattr(
+                path.as_ptr(),
+                c"com.apple.FinderInfo".as_ptr(),
+                info.as_mut_ptr().cast(),
+                info.len(),
+                0,
+                0,
+            )
+        };
+        len >= 10 && u16::from_be_bytes([info[8], info[9]]) & HAS_CUSTOM_ICON != 0
     }
 
     fn null_terminated(strings: &[CString]) -> Vec<*const c_char> {
@@ -415,6 +482,10 @@ mod imp {
     use super::Report;
 
     pub fn own_permissions() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub fn show_icon() -> anyhow::Result<()> {
         Ok(())
     }
 
