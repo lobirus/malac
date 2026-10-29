@@ -61,6 +61,13 @@ const VOICE_JS: &str = include_str!("../../../../web/voice.js");
 const VIEWER_JS: &str = include_str!("../../../../web/viewer.js");
 const STYLE_CSS: &str = include_str!("../../../../web/style.css");
 const FAVICON_SVG: &str = include_str!("../../../../web/favicon.svg");
+const PUSH_JS: &str = include_str!("../../../../web/push.js");
+const SERVICE_WORKER_JS: &str = include_str!("../../../../web/sw.js");
+const MANIFEST: &str = include_str!("../../../../web/manifest.webmanifest");
+const ICON_192_PNG: &[u8] = include_bytes!("../../../../web/icon-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("../../../../web/icon-512.png");
+const ICON_MASKABLE_PNG: &[u8] = include_bytes!("../../../../web/icon-maskable-512.png");
+const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../../../../web/apple-touch-icon.png");
 const GEIST_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/Geist-Variable.woff2");
 const GEIST_MONO_WOFF2: &[u8] = include_bytes!("../../../../web/fonts/GeistMono-Regular.woff2");
 
@@ -279,6 +286,38 @@ impl Server {
                 "/favicon.svg",
                 get(|| async { asset("favicon.svg", "image/svg+xml", FAVICON_SVG) }),
             )
+            .route("/push.js", get(|| async { script("push.js", PUSH_JS) }))
+            // At the root, so it may handle every page's notifications.
+            .route(
+                "/sw.js",
+                get(|| async { script("sw.js", SERVICE_WORKER_JS) }),
+            )
+            .route(
+                "/manifest.webmanifest",
+                get(|| async {
+                    asset(
+                        "manifest.webmanifest",
+                        "application/manifest+json",
+                        MANIFEST,
+                    )
+                }),
+            )
+            .route(
+                "/icon-192.png",
+                get(|| async { binary("icon-192.png", "image/png", ICON_192_PNG) }),
+            )
+            .route(
+                "/icon-512.png",
+                get(|| async { binary("icon-512.png", "image/png", ICON_512_PNG) }),
+            )
+            .route(
+                "/icon-maskable-512.png",
+                get(|| async { binary("icon-maskable-512.png", "image/png", ICON_MASKABLE_PNG) }),
+            )
+            .route(
+                "/apple-touch-icon.png",
+                get(|| async { binary("apple-touch-icon.png", "image/png", APPLE_TOUCH_ICON_PNG) }),
+            )
             .route(
                 "/fonts/Geist-Variable.woff2",
                 get(|| async { font("fonts/Geist-Variable.woff2", GEIST_WOFF2) }),
@@ -376,19 +415,23 @@ fn script(name: &str, embedded: &'static str) -> Response {
     asset(name, "text/javascript; charset=utf-8", embedded)
 }
 
-/// Binary counterpart of [`asset`] for the self-hosted fonts.
-fn font(name: &str, embedded: &'static [u8]) -> Response {
+/// Binary counterpart of [`asset`], for fonts and images.
+fn binary(name: &str, content_type: &'static str, embedded: &'static [u8]) -> Response {
     let body: std::borrow::Cow<'static, [u8]> = std::env::var_os("MALAC_WEB_DIR")
         .and_then(|dir| std::fs::read(PathBuf::from(dir).join(name)).ok())
         .map_or(embedded.into(), Into::into);
     (
         [
-            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "max-age=86400"),
         ],
         body,
     )
         .into_response()
+}
+
+fn font(name: &str, embedded: &'static [u8]) -> Response {
+    binary(name, "font/woff2", embedded)
 }
 
 /// Sorts requests into local and remote, refusing remote ones while

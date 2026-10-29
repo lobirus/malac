@@ -377,6 +377,7 @@ function applySnapshot(snapshot) {
   state.web = { remote: snapshot.daemon.remote, reloadable: !snapshot.daemon.attached };
   state.workspaces = snapshot.workspaces ?? [];
   state.pending = new Map((snapshot.pending ?? []).map((request) => [request.id, request]));
+  document.dispatchEvent(new CustomEvent("malac:pending"));
   state.jobs = new Map((snapshot.jobs ?? []).map((job) => [job.id, job]));
   state.update = snapshot.update ?? state.update;
   state.control = snapshot.control ?? null;
@@ -845,6 +846,7 @@ function trackPermission(agent, envelope, tab) {
     // The answer names only the request; views find the tool card by its call.
     envelope.call_id ??= state.pending.get(envelope.request_id)?.call_id;
     state.pending.delete(envelope.request_id);
+    document.dispatchEvent(new CustomEvent("malac:pending"));
   } else {
     return;
   }

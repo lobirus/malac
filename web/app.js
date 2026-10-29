@@ -24,6 +24,7 @@ import {
 } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
 import { jobsView } from "./jobs.js";
+import { startPush } from "./push.js";
 import { pairScreen, takePairCode } from "./remote.js";
 import { SettingsPage } from "./settings.js";
 import {
@@ -1811,6 +1812,7 @@ function init() {
   ensure("settings");
   api401Check();
   connect();
+  startPush();
 }
 
 // A wrong token shows up as a failed upgrade; check it once over HTTP.

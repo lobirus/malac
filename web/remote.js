@@ -5,6 +5,7 @@
 
 import { confirmDialog, copyButton, formatDuration, h, local, plural, setChildren, toast } from "./dom.js";
 import { icon, pigLogo } from "./icons.js";
+import { pushGroup } from "./push.js";
 import { api, send, state } from "./store.js";
 
 /** Where a paired browser keeps its device token across restarts. */
@@ -185,6 +186,7 @@ export function remoteSection(view) {
     ),
     pairGroup(view, remote),
     devicesGroup(view),
+    pushGroup(view),
     tunnelGroup(view, remote),
     awakeGroup(view),
     howGroup(remote, port),

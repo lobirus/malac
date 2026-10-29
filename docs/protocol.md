@@ -360,14 +360,16 @@ For paired devices; see [remote.md](remote.md#push-notifications).
 
 | Endpoint | |
 |---|---|
-| `GET /api/push` | `{enabled, wait_seconds, vapid_key, registered}`: whether the daemon pushes, how long a request waits first, its VAPID public key (uncompressed P-256, base64url, for the distributor) and whether the calling device is registered. |
-| `PUT /api/push` `{endpoint, p256dh, auth}` | Registers (or replaces) the calling device's Web Push endpoint, with its P-256 public key and 16-byte auth secret, both base64url. `400` for the master token: only paired devices get pushes. |
+| `GET /api/push` | `{enabled, wait_seconds, vapid_key, registered, device}`: whether the daemon pushes, how long a request waits first, its VAPID public key (uncompressed P-256, base64url, for `PushManager.subscribe` or the distributor), whether the calling device is registered, and whether the caller is a paired device at all. |
+| `PUT /api/push` `{endpoint, p256dh, auth, kind?}` | Registers (or replaces) the calling device's Web Push endpoint, with its P-256 public key and 16-byte auth secret, both base64url. `kind` is `app` (the default) or `browser`: a browser's service worker must show every push, so it gets no `resolved` ones. `400` for the master token: only paired devices get pushes. |
 | `DELETE /api/push` | `{registered: false, removed}` |
 
 Each push is a Web Push message (RFC 8030): `aes128gcm`-encrypted for the device (RFC 8291), with `Authorization: vapid t=<ES256 token>, k=<key>` (RFC 8292), `TTL: 3600`, `Urgency: high` and `Topic: malac`, so an offline device gets only the latest. Decrypted, it is JSON:
 
 - `{"type": "approvals", "requests": [...], "more": true?}`: requests that waited `wait_seconds` unanswered. Each is `{id, agent, agent_label, tool, summary, tab, place}` (summary cut to 160 characters, `place` the tab's and workspace's names), or `{id, agent}` once the details no longer fit in one push. `more` means some were left out: fetch the snapshot.
-- `{"type": "resolved", "requests": [id]}`: a request a push went out for was answered.
+- `{"type": "resolved", "requests": [id]}`: a request a push went out for was answered. Apps only.
+
+A VAPID token is reused for each push service until it has an hour left (Apple asks for at most one new token an hour).
 
 ### Voice and shared files
 

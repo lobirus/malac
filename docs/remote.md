@@ -99,17 +99,23 @@ A malac.io relay is planned as another provider: the daemon would connect out to
 
 ## Push notifications
 
-A paired phone can have approvals pushed to it, so a request reaches you while the app is closed. The daemon speaks Web Push, which needs no account with Apple or Google and no relay run by malac:
+A paired phone or browser can have approvals pushed to it, so a request reaches you while malac is closed. The daemon speaks Web Push, which needs no account with Apple or Google and no relay run by malac:
 
-1. The phone gets an endpoint from a push distributor. On Android that is a UnifiedPush app such as [ntfy](https://ntfy.sh); malac registers each saved daemon with it, passing the daemon's VAPID key (`GET /api/push`).
-2. The phone hands the endpoint, with its P-256 public key and auth secret, to the daemon (`PUT /api/push`). The daemon keeps them in `~/.malac/push.json`, with its VAPID key, readable only by you.
-3. When a request has waited `push.wait_seconds` (15 by default) unanswered, the daemon pushes every registered phone, so answering at the computer keeps them quiet. Requests that arrive together share one push. A request a push went out for, and that is then answered anywhere, sends another push, and the phone takes its notification down.
+1. The device gets an endpoint from a push service. The Android app gets it from a UnifiedPush app such as [ntfy](https://ntfy.sh); a browser from its own (Apple's, Google's, Mozilla's) when the web UI's **Settings → Remote access → Notifications** is turned on. Either passes the daemon's VAPID key (`GET /api/push`).
+2. The device hands the endpoint, with its P-256 public key and auth secret, to the daemon (`PUT /api/push`). The daemon keeps them in `~/.malac/push.json`, with its VAPID key, readable only by you.
+3. When a request has waited `push.wait_seconds` (15 by default) unanswered, the daemon pushes every registered device, so answering at the computer keeps them quiet. Requests that arrive together share one push. A request a push went out for, and that is then answered anywhere, sends the Android app another push, and it takes its notification down.
+
+**Browsers, and the iPhone.** The web UI's service worker (`sw.js`) shows each push as a notification, with Allow and Deny where the browser offers buttons (Chrome and Firefox; Safari opens malac on a tap). It answers with the page's device token, which it keeps in the Cache API. A browser must show every push, or Safari takes the permission back, so browsers get no follow-ups for answered requests; an open malac page closes those notifications instead. A browser needs:
+
+- a secure address: `https`, through a tunnel such as Tailscale Serve or Cloudflare, or the machine itself (`localhost`);
+- a device token: the master token's pages cannot register;
+- on iPhone and iPad, iOS 16.4 or later and malac added to the Home Screen (Share → Add to Home Screen), opened and paired from there; the Home Screen app keeps its own storage, apart from Safari's.
 
 **What the push service sees.** Nothing of the content. Each push is encrypted for the phone alone (RFC 8291) and signed with the daemon's key (RFC 8292). It carries what the notification shows (the tool, the first 160 characters of the request, the agent and the tab), so the phone shows the request with Allow and Deny even before it can reach the daemon, for example while its VPN starts. Answering goes over the phone's own connection, as always. The push service learns when a push goes out and to which endpoint.
 
 Endpoints the push service reports gone (`404`, `410`) are forgotten, and so are a device's when it is revoked. `push.enabled = false` turns pushing off.
 
-Without a distributor the Android app checks every saved daemon about every 15 minutes in the background, as before. iOS apps can only be woken through Apple's push service, which needs a paid developer account and a server holding the app's push key; the iPhone app shows approvals when it is open or woken by background refresh.
+Without a distributor the Android app checks every saved daemon about every 15 minutes in the background, as before. The native iPhone app could only be woken through Apple's app push service, which needs a paid developer account and a server holding the app's push key; on an iPhone, malac on the Home Screen gets the pushes instead.
 
 ## Keeping the machine awake
 
