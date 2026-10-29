@@ -2,7 +2,7 @@
   "name": "malac",
   "displayName": "malac",
   "description": "Multi-Agent Loop for Autonomous Coding: chat with malac agents, approve their tool calls and follow workspaces, jobs and sessions from VS Code",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "publisher": "lobirus",
   "license": "MIT",
   "icon": "icon.png",
