@@ -1639,6 +1639,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest",
+ "ring",
  "rustyline",
  "serde",
  "serde_json",

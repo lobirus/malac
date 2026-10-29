@@ -55,6 +55,7 @@ pub struct Config {
     pub context: ContextConfig,
     pub plugins: PluginsConfig,
     pub voice: VoiceConfig,
+    pub push: PushConfig,
     pub attribution: AttributionConfig,
 }
 
@@ -532,6 +533,25 @@ impl Default for VoiceConfig {
             talk: true,
             talk_model: None,
             talk_voice: None,
+        }
+    }
+}
+
+/// Push notifications to paired phones when an approval waits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PushConfig {
+    pub enabled: bool,
+    /// Seconds a request waits unanswered before phones are woken, so
+    /// answering at the computer keeps them quiet. 0 pushes at once.
+    pub wait_seconds: u64,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            wait_seconds: 15,
         }
     }
 }

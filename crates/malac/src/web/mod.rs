@@ -8,6 +8,7 @@
 //! is described in `docs/protocol.md`.
 
 mod fs;
+mod push;
 mod remote;
 mod settings;
 mod usage;
@@ -227,6 +228,7 @@ impl Server {
             .merge(settings::routes())
             .merge(remote::routes())
             .merge(voice::routes())
+            .merge(push::routes())
             .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
             .merge(remote::public_routes());
         let router = Router::new()

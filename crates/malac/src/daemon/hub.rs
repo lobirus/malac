@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 
 use super::access::Access;
 use super::awake::{self, Awake, Runner, SystemRunner, Work};
+use super::push::Push;
 use super::store::{Store, Tab, Workspace};
 use super::tunnel;
 use super::uploads;
@@ -117,6 +118,7 @@ pub struct Hub {
     voice: Arc<Voice>,
     /// `shell` commands still running, by their client's id, and what stops each.
     shells: Mutex<HashMap<String, Arc<Notify>>>,
+    push: Arc<Push>,
 }
 
 struct State {
@@ -135,6 +137,7 @@ impl Hub {
             .filter(|id| workspaces.iter().any(|w| &w.id == id));
         let base = base_config()?;
         let access = Access::load(config::home_dir().join("devices.json"));
+        let push = Push::load(config::home_dir().join("push.json"));
         let runner: Arc<dyn Runner> = Arc::new(SystemRunner::detect());
         let hub = Self::build(
             Host::new(),
@@ -142,7 +145,7 @@ impl Hub {
             options,
             base,
             (workspaces, last),
-            (access, runner),
+            (access, push, runner),
         );
         if let Err(err) = hub.host.jobs.restore() {
             tracing::warn!("cannot restore jobs: {err:#}");
@@ -180,7 +183,7 @@ impl Hub {
             options,
             runtime.config.clone(),
             (vec![workspace], Some(ATTACHED_ID.into())),
-            (Access::in_memory(), runner),
+            (Access::in_memory(), Push::in_memory(), runner),
         );
         let cell = Arc::new(OnceCell::new_with(Some(runtime.clone())));
         hub.runtimes
@@ -198,7 +201,7 @@ impl Hub {
         options: HubOptions,
         base: Config,
         (workspaces, last): (Vec<Workspace>, Option<WorkspaceId>),
-        (access, runner): (Access, Arc<dyn Runner>),
+        (access, push, runner): (Access, Push, Arc<dyn Runner>),
     ) -> Arc<Self> {
         let (out, _) = broadcast::channel(OUTBOX);
         let (stop, _) = watch::channel(None);
@@ -232,6 +235,7 @@ impl Hub {
             listen: Mutex::default(),
             voice: Arc::default(),
             shells: Mutex::default(),
+            push: Arc::new(push),
         })
     }
 
@@ -246,10 +250,15 @@ impl Hub {
         self.start_update_checks();
         self.start_control();
         self.watch_awake();
+        self.watch_revoked();
     }
 
     pub fn voice(&self) -> &Arc<Voice> {
         &self.voice
+    }
+
+    pub fn push(&self) -> &Arc<Push> {
+        &self.push
     }
 
     /// The daemon's configuration: the user's, without a project's.
@@ -631,6 +640,74 @@ impl Hub {
                 }
             }
         });
+    }
+
+    // Push notifications
+
+    /// A revoked device gets no more pushes.
+    fn watch_revoked(self: &Arc<Self>) {
+        let mut revoked = self.access.subscribe();
+        let push = self.push.clone();
+        tokio::spawn(async move {
+            loop {
+                match revoked.recv().await {
+                    Ok(device) => {
+                        push.unsubscribe(&device);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Wakes paired phones for an approval that waits `push.wait_seconds`,
+    /// and again once a request they were woken for is answered. Requests
+    /// that arrive together go out in one push.
+    fn push_observe(self: &Arc<Self>, event: &Event) {
+        if !self.push.has_subscriptions() {
+            return;
+        }
+        match event {
+            Event::PermissionRequested { request_id, .. } => {
+                let push = self.base.read().unwrap().push.clone();
+                if !push.enabled || !self.push.request(request_id) {
+                    return;
+                }
+                let hub = Arc::downgrade(self);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(push.wait_seconds)).await;
+                    if let Some(hub) = hub.upgrade() {
+                        hub.push_waiting();
+                    }
+                });
+            }
+            Event::PermissionResolved { request_id, .. } => {
+                if self.push.resolved(request_id) {
+                    self.push.send(serde_json::json!({
+                        "type": "resolved",
+                        "requests": [request_id],
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_waiting(&self) {
+        let waiting: std::collections::HashSet<String> = self
+            .approvals
+            .pending()
+            .into_iter()
+            .map(|request| request.id)
+            .collect();
+        let due = self.push.take_queue(|id| waiting.contains(id));
+        if !due.is_empty() {
+            self.push.send(serde_json::json!({
+                "type": "approvals",
+                "requests": due,
+            }));
+        }
     }
 
     // Snapshots and views
@@ -1132,6 +1209,7 @@ impl Hub {
                 hub.publish(&message);
                 if let Some(envelope) = envelope {
                     hub.voice_observe(&tab_id, &envelope);
+                    hub.push_observe(&envelope.event);
                 }
                 if turn {
                     hub.running_changed(&workspace);
