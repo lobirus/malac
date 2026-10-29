@@ -94,8 +94,22 @@ A malac.io relay is planned as another provider: the daemon would connect out to
 - **Tokens.** The master token works on local requests only. Device tokens work from anywhere remote access allows, can be revoked one by one and are stored hashed. Only `GET /api/hello` and `POST /api/pair` answer without a token. Tokens are compared in constant time.
 - **Browsers.** WebSocket upgrades from a browser must come from the page's own origin (`Origin` matching `Host`, or `X-Forwarded-Host` behind a proxy), or from VS Code webviews. Clients that are not browsers send no `Origin`. REST calls need the token in a header, which pages on other origins cannot send without a CORS grant the daemon never gives. The web UI sends its token in the WebSocket URL, as browsers cannot set headers there; the Rust client and apps send it in `Authorization`.
 - **Transport.** The daemon speaks plain HTTP. On a LAN anyone who can watch the traffic can take a device token, so prefer SSH, Tailscale or a TLS proxy outside networks you trust. Cloudflare and ngrok terminate TLS at their edge and can see the traffic; Tailscale and SSH are end to end.
-- **What a device can do.** A paired device controls the daemon fully, as you can: it runs prompts, answers approvals, changes settings, pairs and revokes devices and starts tunnels. Pair only devices you own and revoke the ones you lose.
+- **What a device can do.** A paired device controls the daemon fully, as you can: it runs prompts, answers approvals, changes settings, pairs and revokes devices and starts tunnels. It can also have the daemon send pushes to an endpoint it names. Pair only devices you own and revoke the ones you lose.
 - **Project files.** A repository's `.malac/config.toml` cannot set `web`, `daemon` or `remote`, so cloning one never opens remote access or starts a tunnel.
+
+## Push notifications
+
+A paired phone can have approvals pushed to it, so a request reaches you while the app is closed. The daemon speaks Web Push, which needs no account with Apple or Google and no relay run by malac:
+
+1. The phone gets an endpoint from a push distributor. On Android that is a UnifiedPush app such as [ntfy](https://ntfy.sh); malac registers each saved daemon with it, passing the daemon's VAPID key (`GET /api/push`).
+2. The phone hands the endpoint, with its P-256 public key and auth secret, to the daemon (`PUT /api/push`). The daemon keeps them in `~/.malac/push.json`, with its VAPID key, readable only by you.
+3. When a request has waited `push.wait_seconds` (15 by default) unanswered, the daemon pushes every registered phone, so answering at the computer keeps them quiet. Requests that arrive together share one push. A request a push went out for, and that is then answered anywhere, sends another push, and the phone takes its notification down.
+
+**What the push service sees.** Nothing of the content. Each push is encrypted for the phone alone (RFC 8291) and signed with the daemon's key (RFC 8292). It carries what the notification shows (the tool, the first 160 characters of the request, the agent and the tab), so the phone shows the request with Allow and Deny even before it can reach the daemon, for example while its VPN starts. Answering goes over the phone's own connection, as always. The push service learns when a push goes out and to which endpoint.
+
+Endpoints the push service reports gone (`404`, `410`) are forgotten, and so are a device's when it is revoked. `push.enabled = false` turns pushing off.
+
+Without a distributor the Android app checks every saved daemon about every 15 minutes in the background, as before. iOS apps can only be woken through Apple's push service, which needs a paid developer account and a server holding the app's push key; the iPhone app shows approvals when it is open or woken by background refresh.
 
 ## Keeping the machine awake
 

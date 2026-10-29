@@ -202,6 +202,15 @@ Dictation, speech and talk mode, described in [voice.md](voice.md). Each feature
 | `talk_model` | first found | A Realtime model, like `openai/gpt-realtime` |
 | `talk_voice` | `alloy` | The voice it speaks with |
 
+## `[push]`
+
+Push notifications to paired phones, described in [remote.md](remote.md#push-notifications).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Push approvals to devices that registered for it |
+| `wait_seconds` | `15` | How long a request waits unanswered before phones are woken, so answering at the computer keeps them quiet; `0` pushes at once |
+
 ## `[attribution]`
 
 How the commits and pull requests malac makes credit it, the way other coding agents do. GitHub shows the trailer's address as a co-author, with an avatar, once a GitHub account has that address verified.
