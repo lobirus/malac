@@ -259,11 +259,17 @@ async fn waiting_approvals_reach_registered_phones() {
     )
     .unwrap();
     assert_eq!(claims["aud"], push_base);
+    // It carries what the notification shows, for a phone that cannot
+    // reach the daemon yet.
     let message = decrypt(private, &public, &auth, &push.body);
-    assert_eq!(
-        message,
-        json!({ "type": "approvals", "requests": [request] })
-    );
+    assert_eq!(message["type"], "approvals");
+    let sent = &message["requests"][0];
+    assert_eq!(sent["id"], request.as_str());
+    assert_eq!(sent["tool"], "bash");
+    assert_eq!(sent["summary"], "echo one");
+    assert_eq!(sent["agent_label"], "main");
+    assert!(sent["agent"].is_string() && sent["tab"].is_string());
+    assert!(!sent["place"].as_str().unwrap().is_empty());
 
     // Answering it takes the notification down.
     client

@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 
 use super::access::Access;
 use super::awake::{self, Awake, Runner, SystemRunner, Work};
-use super::push::Push;
+use super::push::{self, Push};
 use super::store::{Store, Tab, Workspace};
 use super::tunnel;
 use super::uploads;
@@ -694,20 +694,54 @@ impl Hub {
         }
     }
 
+    /// Pushes the queued requests that still wait. The message is encrypted
+    /// for the phone alone, so it carries what the notification shows: a
+    /// phone that cannot reach the daemon yet (asleep, its VPN starting)
+    /// still offers Allow and Deny. To stay within one push, requests past
+    /// the byte budget go as ids, and past that as `more`, for the phone to
+    /// fetch.
     fn push_waiting(&self) {
-        let waiting: std::collections::HashSet<String> = self
-            .approvals
-            .pending()
-            .into_iter()
-            .map(|request| request.id)
-            .collect();
-        let due = self.push.take_queue(|id| waiting.contains(id));
-        if !due.is_empty() {
-            self.push.send(serde_json::json!({
-                "type": "approvals",
-                "requests": due,
-            }));
+        let pending = self.pending();
+        let due = self
+            .push
+            .take_queue(|id| pending.iter().any(|p| p.request.id == id));
+        let entries = due
+            .iter()
+            .filter_map(|id| pending.iter().find(|p| &p.request.id == id))
+            .map(|approval| {
+                let request = &approval.request;
+                let detailed = serde_json::json!({
+                    "id": request.id,
+                    "agent": request.agent,
+                    "agent_label": truncate_chars(&request.agent_label, 40),
+                    "tool": truncate_chars(&request.tool, 60),
+                    "summary": truncate_chars(&request.summary, 160),
+                    "tab": approval.tab,
+                    "place": truncate_chars(&self.place(approval.tab.as_deref()), 60),
+                });
+                let brief = serde_json::json!({ "id": request.id, "agent": request.agent });
+                (detailed, brief)
+            })
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            self.push.send(push::approvals_message(entries));
         }
+    }
+
+    /// A tab's name and its workspace's, as the apps show where a request is from.
+    fn place(&self, tab: Option<&str>) -> String {
+        let Some((workspace, tab)) = tab.and_then(|tab| self.find_tab(tab)) else {
+            return String::new();
+        };
+        let workspace = self
+            .workspace(&workspace)
+            .map(|w| w.name)
+            .unwrap_or_default();
+        [tab.name, workspace]
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     // Snapshots and views

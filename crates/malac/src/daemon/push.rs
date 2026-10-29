@@ -375,6 +375,40 @@ impl Push {
     }
 }
 
+/// Of the 3993 bytes one push carries, what the request list may take.
+const BUDGET: usize = 3600;
+
+/// The push for waiting requests, each given as its details and a brief
+/// form (ids only). Requests get their details while they fit in one push,
+/// then the brief form; past that the message says `more`, and the phone
+/// fetches the rest.
+pub fn approvals_message(entries: impl IntoIterator<Item = (Value, Value)>) -> Value {
+    let mut requests = Vec::new();
+    let mut used = r#"{"type":"approvals","requests":[],"more":true}"#.len();
+    let mut more = false;
+    for (detailed, brief) in entries {
+        let fitting = [detailed, brief]
+            .into_iter()
+            .map(|entry| {
+                let len = entry.to_string().len() + 1;
+                (entry, len)
+            })
+            .find(|(_, len)| used + len <= BUDGET);
+        match fitting {
+            Some((entry, len)) => {
+                used += len;
+                requests.push(entry);
+            }
+            None => more = true,
+        }
+    }
+    let mut message = json!({ "type": "approvals", "requests": requests });
+    if more {
+        message["more"] = true.into();
+    }
+    message
+}
+
 /// The push service no longer knows the endpoint.
 struct Gone;
 
@@ -538,6 +572,42 @@ mod tests {
         assert_eq!(again.public_key(), key);
         assert!(again.is_registered("d1"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn many_requests_still_fit_one_push() {
+        let id = |n: usize| format!("019a3b4c-5d6e-7f80-91a2-b3c4d5e6{n:04}");
+        let entries = (0..40).map(|n| {
+            let detailed = json!({
+                "id": id(n),
+                "agent": id(9999),
+                "agent_label": "é".repeat(40),
+                "tool": "m".repeat(60),
+                "summary": "ő".repeat(160),
+                "tab": id(9998),
+                "place": "ű".repeat(60),
+            });
+            (detailed, json!({ "id": id(n), "agent": id(9999) }))
+        });
+        let message = approvals_message(entries);
+        let requests = message["requests"].as_array().unwrap();
+        assert!(requests[0]["summary"].is_string(), "the first ones in full");
+        assert!(
+            requests.last().unwrap().get("summary").is_none(),
+            "then ids"
+        );
+        assert_eq!(message["more"], true, "and the rest left to fetch");
+        let (_, subscription) = device();
+        Push::in_memory()
+            .encrypt(&subscription, message.to_string().as_bytes())
+            .expect("fits one push");
+
+        let one =
+            approvals_message([(json!({ "id": "r1", "tool": "bash" }), json!({ "id": "r1" }))]);
+        assert_eq!(
+            one,
+            json!({ "type": "approvals", "requests": [{ "id": "r1", "tool": "bash" }] })
+        );
     }
 
     #[test]
