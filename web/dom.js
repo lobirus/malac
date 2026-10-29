@@ -277,25 +277,47 @@ export function closePopover() {
 }
 
 /**
- * Shows `content` anchored below `anchor`. Clicking outside, Escape or a
- * second call closes it. Returns a handle with `close()`.
+ * Shows `content` anchored below `anchor`, or above it when it fits only
+ * there. It stays inside the window: placed again whenever its size changes
+ * (content that loads later) and shortened to the room it has, so a long one
+ * scrolls. Clicking outside, Escape or a second call closes it. Returns a
+ * handle with `close()`.
  */
 export function popover(anchor, content, { align = "start", className = "", onClose } = {}) {
   closePopover();
   const panel = h("div", { class: `popover ${className}`.trim(), role: "dialog" }, content);
   document.body.append(panel);
+  const margin = 8;
+  const gap = 6;
   const place = () => {
     const rect = anchor.getBoundingClientRect();
+    panel.style.maxHeight = "";
     const width = panel.offsetWidth;
     const height = panel.offsetHeight;
     let left = align === "end" ? rect.right - width : rect.left;
-    left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
-    let top = rect.bottom + 6;
-    if (top + height > window.innerHeight - 8 && rect.top - height - 6 > 8) top = rect.top - height - 6;
+    left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+    const below = window.innerHeight - rect.bottom - gap - margin;
+    const above = rect.top - gap - margin;
+    // Below if it fits there, else above if it fits there, else the roomier side, shortened.
+    const up = height > below && (height <= above || above > below);
+    let room = up ? above : below;
+    let top = up ? rect.top - gap - Math.min(height, room) : rect.bottom + gap;
+    if (room < 160) {
+      // Too little room either side (a very short window): use the whole height.
+      room = window.innerHeight - 2 * margin;
+      top = margin;
+    }
+    if (height > room) panel.style.maxHeight = `${room}px`;
     panel.style.left = `${left}px`;
-    panel.style.top = `${Math.max(8, top)}px`;
+    panel.style.top = `${Math.max(margin, top)}px`;
   };
   place();
+  let frame = 0;
+  const resized = new ResizeObserver(() => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(place);
+  });
+  resized.observe(panel);
   const onPointer = (event) => {
     if (!panel.contains(event.target) && !anchor.contains(event.target)) handle.close();
   };
@@ -318,6 +340,8 @@ export function popover(anchor, content, { align = "start", className = "", onCl
     close() {
       if (openPopover !== handle) return;
       openPopover = null;
+      resized.disconnect();
+      cancelAnimationFrame(frame);
       panel.remove();
       document.removeEventListener("pointerdown", onPointer, true);
       document.removeEventListener("keydown", onKey, true);

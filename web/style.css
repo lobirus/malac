@@ -1536,6 +1536,8 @@ button.chip:hover {
   z-index: 60;
   min-width: 220px;
   max-width: min(440px, calc(100vw - 16px));
+  /* popover() shortens it to the room it has; the rest scrolls. */
+  overflow-y: auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
@@ -6130,14 +6132,31 @@ dl.kv.paths dt {
 
 /* Attachments */
 
+/* In a short window the file list gives up height first, so the path field
+   and its Attach button stay in view. */
+.attach-popover {
+  display: flex;
+  flex-direction: column;
+}
+
 .attach-menu {
+  display: flex;
+  flex-direction: column;
   width: min(420px, calc(100vw - 16px));
+  min-height: 0;
 }
 
 .attach-body {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  min-height: 0;
   padding: 8px 14px 14px;
+}
+
+.attach-body .fs-list {
+  flex: 0 1 auto;
+  min-height: 96px;
 }
 
 .path-chip {
