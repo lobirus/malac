@@ -181,6 +181,12 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "malac.answerApprovals",
+        "title": "Answer Approvals",
+        "category": "malac",
+        "icon": "$(shield)"
+      },
+      {
         "command": "malac.reconnect",
         "title": "Reconnect to Daemon",
         "category": "malac",
@@ -613,6 +619,11 @@
         "command": "malac.dictate",
         "key": "ctrl+alt+shift+d",
         "mac": "cmd+alt+shift+d"
+      },
+      {
+        "command": "malac.answerApprovals",
+        "key": "ctrl+alt+shift+a",
+        "mac": "cmd+alt+shift+a"
       }
     ],
     "configuration": {
@@ -666,7 +677,7 @@
         "malac.approvalNotifications": {
           "type": "boolean",
           "default": true,
-          "description": "Show approval requests as notifications (Allow / Always / Deny) when the chat cannot show them."
+          "markdownDescription": "Show a notification while an approval request waits and no visible chat shows it. It says which agent wants what and closes once the request is answered anywhere; answer in the chat or with **malac: Answer Approvals**."
         },
         "malac.chat.includeCurrentFile": {
           "type": "boolean",

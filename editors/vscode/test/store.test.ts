@@ -99,3 +99,38 @@ test("voice status comes with the snapshot and voice broadcasts; say passes thro
   store.setVoice({ ...voice, talk: feature(false, null) });
   assert.equal(store.voice?.talk.enabled, false);
 });
+
+test("an answered request names its call and who answered, for the tool card", () => {
+  const { store, changes } = start();
+  const ev = (type: string, fields: Record<string, unknown>) => store.apply({ type: "event", tab: "t1", envelope: { agent: "a1", seq: 0, at: "", type, ...fields } });
+  ev("permission_requested", { request_id: "r1", call_id: "c1", tool: "bash", summary: "cargo publish", input: {} });
+  ev("permission_resolved", { request_id: "r1", allowed: true, decision: "allow", by: "Pixel 9" });
+  const resolved = store.agents.get("a1")!.events.at(-1)!.env;
+  assert.equal(resolved.call_id, "c1", "the store adds the call the request was for");
+  assert.equal(resolved.by, "Pixel 9");
+  assert.ok(changes.at(-1)!.pending);
+  assert.equal(store.pending.size, 0);
+  ev("permission_resolved", { request_id: "r9", allowed: false });
+  assert.equal(store.agents.get("a1")!.events.at(-1)!.env.call_id, undefined, "an unknown request names no call");
+});
+
+test("a request that waited before the transcript loaded still finds its card", () => {
+  // Opened from a notification: the request is in snapshot.pending, its
+  // permission_requested event came before this connection, and the saved
+  // history has no decision yet. The answer must still reach the card.
+  const store = new DaemonStore();
+  store.apply({
+    type: "snapshot",
+    daemon: { version: "1.2.1", pid: 1, started: "", version_mismatch: false, clients: 1, attached: false, remote: false },
+    workspaces: [],
+    workspace: null,
+    pending: [{ id: "r7", call_id: "call_7", agent: "a1", agent_label: "main", tool: "bash", summary: "cargo publish", input: {}, tab: "t1" }],
+    jobs: [],
+    models: [],
+    default_model: null,
+  } as ServerMessage);
+  store.apply({ type: "event", tab: "t1", envelope: { agent: "a1", seq: 9, at: "", type: "permission_resolved", request_id: "r7", allowed: true, decision: "allow", by: "Pixel 9" } });
+  const env = store.agents.get("a1")!.events.at(-1)!.env;
+  assert.deepEqual([env.call_id, env.decision, env.by], ["call_7", "allow", "Pixel 9"]);
+  assert.equal(store.pending.size, 0);
+});

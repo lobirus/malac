@@ -14,6 +14,8 @@ export interface MenuItem {
   separator?: boolean;
   /** A non-interactive heading above the item. */
   heading?: string;
+  /** The item's full name, for its tooltip and screen readers (a model under its provider's heading). */
+  title?: string;
   onPick: () => void;
 }
 
@@ -39,6 +41,8 @@ export function showMenu(anchor: HTMLElement, items: MenuItem[], { label, placem
         "aria-checked": item.checked === undefined ? null : String(item.checked),
         disabled: item.disabled,
         tabindex: "-1",
+        title: item.title ?? null,
+        "aria-label": item.title ?? null,
       },
       h("span", { class: "menu-check", "aria-hidden": "true" }, item.checked ? icon("check", 14) : null),
       item.icon ? icon(item.icon, 14) : null,

@@ -297,7 +297,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
       render();
       break;
     case "transcript":
-      transcript.reset(message.agent, message.history, message.events, message.error);
+      transcript.reset(message.agent, message.history, message.events, message.error, message.decisions);
       transcriptReady = true;
       if (state) {
         refreshAgents(state.agents);

@@ -104,6 +104,21 @@ export interface PendingApproval {
   tab: string | null;
 }
 
+/**
+ * An approval and its answer, kept with the session (`decisions` in
+ * `GET /api/sessions/{id}`). `by` is where it was answered: a paired
+ * device's name, "this computer", "talk mode"; absent when nobody answered
+ * (a cancelled turn denies what was waiting).
+ */
+export interface DecisionRecord {
+  call_id: string;
+  tool: string;
+  summary: string;
+  decision: Decision;
+  by?: string | null;
+  at: string;
+}
+
 export interface JobView {
   id: string;
   command: string;

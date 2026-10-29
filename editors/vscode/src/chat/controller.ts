@@ -11,9 +11,10 @@ import { ContextChip, chipFor, contextPayload, EditorSnapshot, withContext } fro
 import { Disposable, Emitter } from "../model/emitter";
 import type { FileHit } from "../model/files";
 import { formatCost, formatTokens } from "../model/format";
+import { groupModels } from "../model/models";
 import { builtinAction, slashCommands } from "../model/slash";
 import { AgentState, Change, DaemonStore, displayName } from "../model/store";
-import { type AttachmentReport, type Envelope, type ImageInput, type Message, type Mode, totalTokens } from "../protocol";
+import { type AttachmentReport, type DecisionRecord, type Envelope, type ImageInput, type Message, type Mode, totalTokens } from "../protocol";
 import type { DictationManager } from "../voice/dictation";
 import type { AgentSummary, Banner, ChatState, FromWebview, MediaFile, ToWebview, VoiceOffer } from "./messages";
 import { RecordedFilter, replayEvents } from "./replay";
@@ -561,10 +562,12 @@ export class ChatController implements Disposable {
     this.loading = true;
     const cutoff = this.store.received;
     let history: Message[] = [];
+    let decisions: DecisionRecord[] = [];
     let error: string | undefined;
     try {
-      const data = await this.client.get<{ history?: Message[] }>(`/api/sessions/${encodeURIComponent(agent)}`);
+      const data = await this.client.get<{ history?: Message[]; decisions?: DecisionRecord[] }>(`/api/sessions/${encodeURIComponent(agent)}`);
       history = data.history ?? [];
+      decisions = Array.isArray(data.decisions) ? data.decisions : [];
     } catch (failure) {
       // A brand-new agent has no transcript file until its first message.
       const state = this.store.agents.get(agent);
@@ -576,7 +579,7 @@ export class ChatController implements Disposable {
     const events = state ? replayEvents(state.events, cutoff, history) : [];
     this.loading = false;
     this.recorded = new RecordedFilter(history.slice(-4));
-    this.host.post({ type: "transcript", agent, history, events, error });
+    this.host.post({ type: "transcript", agent, history, events, error, decisions });
   }
 
   private scheduleState(): void {
@@ -600,6 +603,8 @@ export class ChatController implements Disposable {
     const agents = entry ? store.agentsOfTab(entry.tab).map((a) => this.summary(a)) : [];
     const current = agentId ? store.agents.get(agentId) : undefined;
     const tabAgents = new Set(agents.map((a) => a.id));
+    // The model the composer shows, listed even when the configuration no longer has it.
+    const inUse = current ? current.model : (this.newModel ?? entry?.tab.options.model ?? store.defaultModel);
     const pending = [...store.pending.values()]
       .filter((r) => (entry && r.tab === entry.tab.id) || tabAgents.has(r.agent))
       .map((r) => ({ id: r.id, callId: r.call_id, agent: r.agent, agentLabel: r.agent_label, tool: r.tool, summary: r.summary, input: r.input, ...describeApproval(r.tool, r.summary, r.input) }));
@@ -619,6 +624,7 @@ export class ChatController implements Disposable {
           }
         : null,
       models: store.models,
+      modelGroups: groupModels([...store.models, ...(inUse ? [inUse] : [])]),
       defaultModel: store.defaultModel,
       newModel: this.newModel ?? entry?.tab.options.model ?? null,
       pending,

@@ -8,11 +8,11 @@ import { Emitter } from "../src/model/emitter";
 import { DaemonStore } from "../src/model/store";
 import type { Dictation, DictationResult } from "../src/voice/cli";
 import { DictationManager } from "../src/voice/dictation";
-import type { ProjectSummary, ServerMessage } from "../src/protocol";
+import type { DecisionRecord, ProjectSummary, ServerMessage } from "../src/protocol";
 
 const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost: 0 };
 
-function setup({ project, address, files, voice }: { project?: ProjectSummary; address?: { url: string; token: string; source: string }; files?: FileAccess; voice?: ChatVoice } = {}) {
+function setup({ project, address, files, voice, decisions }: { project?: ProjectSummary; address?: { url: string; token: string; source: string }; files?: FileAccess; voice?: ChatVoice; decisions?: DecisionRecord[] } = {}) {
   const store = new DaemonStore();
   const sent: Record<string, unknown>[] = [];
   const replies: ((command: Record<string, unknown>) => ServerMessage)[] = [];
@@ -32,7 +32,7 @@ function setup({ project, address, files, voice }: { project?: ProjectSummary; a
       return reply ? reply(command) : { type: "ack" };
     },
     async get(path: string) {
-      if (path.startsWith("/api/sessions/")) return { history: [{ role: "user", content: [{ type: "text", text: "earlier" }] }] };
+      if (path.startsWith("/api/sessions/")) return { history: [{ role: "user", content: [{ type: "text", text: "earlier" }] }], ...(decisions ? { decisions } : {}) };
       return { sessions: [] };
     },
     async download(path: string) {
@@ -398,4 +398,40 @@ test("dictation explains what stands in the way", async () => {
   chat.receive({ type: "dictation", action: "toggle" });
   await tick();
   assert.deepEqual(posted.filter((m) => m.type === "dictation").at(-1), { type: "dictation", state: "done", error: "This malac has no voice commands." });
+});
+
+test("a transcript carries its saved decisions, for the tool cards", async () => {
+  const decisions: DecisionRecord[] = [{ call_id: "c1", tool: "bash", summary: "cargo publish", decision: "allow_session", by: "Pixel 9", at: "2026-10-29T10:00:00Z" }];
+  const { chat, posted } = setup({ decisions });
+  chat.receive({ type: "ready" });
+  await tick();
+  const transcript = posted.find((m) => m.type === "transcript");
+  assert.ok(transcript && transcript.type === "transcript");
+  assert.deepEqual(transcript.decisions, decisions);
+  const { chat: older, posted: olderPosted } = setup();
+  older.receive({ type: "ready" });
+  await tick();
+  const plain = olderPosted.find((m) => m.type === "transcript");
+  assert.ok(plain && plain.type === "transcript" && Array.isArray(plain.decisions) && plain.decisions.length === 0, "an older daemon sends none");
+});
+
+test("the model menu groups by provider and follows models broadcasts", async () => {
+  const { chat, posted, store } = setup();
+  chat.receive({ type: "ready" });
+  await tick();
+  const last = () => {
+    const message = [...posted].reverse().find((m) => m.type === "state");
+    assert.ok(message && message.type === "state");
+    return message.state;
+  };
+  assert.deepEqual(last().modelGroups, [{ provider: "lora", models: [{ spec: "lora/fast", name: "fast" }, { spec: "lora/smart", name: "smart" }] }]);
+  // A provider added in another client's settings: no reload needed.
+  store.apply({ type: "models", models: ["lora/fast", "lora/smart", "openrouter/anthropic/claude-sonnet"], default_model: "openrouter/anthropic/claude-sonnet" });
+  await tick();
+  assert.deepEqual(last().modelGroups.map((g) => [g.provider, g.models.map((m) => m.name)]), [["lora", ["fast", "smart"]], ["openrouter", ["anthropic/claude-sonnet"]]]);
+  assert.equal(last().defaultModel, "openrouter/anthropic/claude-sonnet");
+  // The model in use stays listed when the configuration drops it.
+  store.apply({ type: "models", models: ["openrouter/x"], default_model: "openrouter/x" });
+  await tick();
+  assert.deepEqual(last().modelGroups.map((g) => [g.provider, g.models.map((m) => m.spec)]), [["openrouter", ["openrouter/x"]], ["lora", ["lora/fast"]]]);
 });

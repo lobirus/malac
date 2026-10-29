@@ -80,3 +80,12 @@ test("usage bars are relative to the week and the busiest model", () => {
   assert.match(html, /aria-valuenow="25"/);
   assert.match(usageHtml(null, { nonce: "n", message: "Not connected" }), /Not connected/);
 });
+
+test("while approvals wait, a click on the status bar answers them", () => {
+  const busy = statusSummary(store(), online, "1.0.0");
+  assert.equal(busy.click, "approvals");
+  assert.match(busy.tooltip.at(-1)!, /Click to answer it/);
+  const s = new DaemonStore();
+  s.apply({ type: "snapshot", daemon: { version: "1.1.1", pid: 1, started: "", version_mismatch: false, clients: 1, attached: false, remote: false }, workspaces: [], workspace: null, pending: [], jobs: [], models: [], default_model: null } as ServerMessage);
+  assert.equal(statusSummary(s, online, "1.1.1").click, "open");
+});

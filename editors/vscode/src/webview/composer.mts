@@ -200,7 +200,8 @@ export class Composer {
               : "Send a follow-up"
             : "Send a message to continue this session";
     const model = agent ? agent.model : (state.newModel ?? state.defaultModel ?? "");
-    const [provider, name] = model.includes("/") ? [model.slice(0, model.indexOf("/")), model.slice(model.indexOf("/") + 1)] : ["", model];
+    const slash = model.indexOf("/");
+    const [provider, name] = slash < 0 ? ["", model] : [model.slice(0, slash), model.slice(slash + 1)];
     setChildren(this.modelButton, h("span", { class: "model-name" }, name || "Model"), provider ? h("span", { class: "model-provider" }, provider) : null, icon("chevronDown", 12));
     this.modelButton.title = model ? `Model: ${model}` : "Model";
     this.modelButton.setAttribute("aria-label", this.modelButton.title);
@@ -293,13 +294,19 @@ export class Composer {
     const state = this.host.state();
     if (!state) return [];
     const current = state.agent ? state.agent.model : (state.newModel ?? state.defaultModel);
-    const models = [...new Set([...(state.models ?? []), ...(current ? [current] : [])])];
-    return models.map((model) => ({
-      label: model,
-      detail: model === state.defaultModel ? "default" : undefined,
-      checked: model === current,
-      onPick: () => this.host.post({ type: "setModel", model }),
-    }));
+    // Under a heading per provider, so switching gateway is one glance.
+    const groups = state.modelGroups ?? [{ provider: "", models: (state.models ?? []).map((spec) => ({ spec, name: spec })) }];
+    return groups.flatMap((group, g) =>
+      group.models.map(({ spec, name }, i) => ({
+        label: group.provider ? name : spec,
+        title: spec === state.defaultModel ? `${spec} (default)` : spec,
+        detail: spec === state.defaultModel ? "default" : undefined,
+        checked: spec === current,
+        heading: i === 0 && group.provider ? group.provider : undefined,
+        separator: i === 0 && g > 0,
+        onPick: () => this.host.post({ type: "setModel", model: spec }),
+      })),
+    );
   }
 
   private modeItems(): MenuItem[] {

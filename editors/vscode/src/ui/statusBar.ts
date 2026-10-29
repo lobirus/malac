@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import type { DaemonClient } from "../connection/client";
 import { statusSummary } from "../model/status";
 import type { DaemonStore } from "../model/store";
+import { ANSWER_COMMAND } from "./approvals";
 
 export class StatusBar implements vscode.Disposable {
   // On the right, like Claude Code's "✻ Claude Code" and Copilot's items.
@@ -23,6 +24,8 @@ export class StatusBar implements vscode.Disposable {
   update(): void {
     const summary = statusSummary(this.store, this.client.connection, this.version());
     this.item.text = summary.text;
+    // While approvals wait, a click answers them (the warning background says so).
+    this.item.command = summary.click === "approvals" ? ANSWER_COMMAND : "malac.open";
     const tooltip = new vscode.MarkdownString(summary.tooltip.map((line) => line.replace(/[\\`*_{}[\]()#+\-.!|]/g, "\\$&")).join("  \n"));
     if (this.store.daemon?.version_mismatch) tooltip.appendMarkdown("\n\n[Restart daemon](command:malac.restartDaemon)");
     tooltip.isTrusted = { enabledCommands: ["malac.restartDaemon"] };

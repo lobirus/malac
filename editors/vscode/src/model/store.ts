@@ -70,6 +70,8 @@ export interface Change {
   finished?: { agent: string; status: string }[];
   /** The voice settings or the models that can do them changed. */
   voice?: boolean;
+  /** The configured models or the default model changed (`models` broadcast). */
+  models?: boolean;
   /** A sentence to read aloud (for whichever connection's listener it names). */
   say?: SayMessage;
   /** `say_cancelled`: sentences to stop and drop. */
@@ -222,6 +224,11 @@ export class DaemonStore {
       case "voice":
         this.voice = (message.voice as VoiceStatus) ?? null;
         return { voice: true };
+      case "models":
+        // The user's configuration changed: a provider added, a key stored, the default moved.
+        this.models = Array.isArray(message.models) ? message.models.map(String) : [];
+        this.defaultModel = typeof message.default_model === "string" ? message.default_model : null;
+        return { models: true };
       case "say":
         return { say: message as unknown as SayMessage };
       case "say_cancelled":
@@ -252,7 +259,7 @@ export class DaemonStore {
     if (snapshot.workspace) this.setView(snapshot.workspace);
     this.loaded = true;
     this.generation += 1;
-    return { snapshot: true, workspaces: true, tabs: true, pending: true, jobs: true, voice: true };
+    return { snapshot: true, workspaces: true, tabs: true, pending: true, jobs: true, voice: true, models: true };
   }
 
   private setView(view: WorkspaceView): void {
@@ -328,6 +335,11 @@ export class DaemonStore {
     const agent = this.ensureAgent(env.agent);
     if (tab) agent.tab = tab;
     const change: Change = { agents: new Set([agent.id]), events: new Map([[agent.id, [env]]]) };
+    // The answer names only the request; the chat finds the tool card by its call.
+    if (env.type === "permission_resolved" && !env.call_id) {
+      const call = this.pending.get(String(env.request_id))?.call_id;
+      if (call) env.call_id = call;
+    }
     this.record(agent, env);
     this.track(agent, env, change);
     if (env.type === "permission_requested") {

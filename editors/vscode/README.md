@@ -5,15 +5,15 @@ Work with [malac](https://github.com/lobirus/malac) agents without leaving the e
 - **The right-hand panel.** The chat is a **malac** tab next to *Chat* in the secondary side bar. On VS Code before 1.106, which has no room there for extensions, it is the first view of malac's activity-bar container instead (never both).
 - **Editor tabs.** **malac: Open in New Tab** opens a chat in an editor tab. Each tab follows its own agent, is titled after it, and comes back after a reload.
 - **The editor title bar.** The pig button next to the editor tabs opens malac; Alt+click opens it in a new tab (`malac.editorTitleButton` hides it).
-- **The status bar**, on the right next to Claude Code's: the pig and "malac" when idle, the number of running agents and waiting approvals otherwise. Click it to open malac.
+- **The status bar**, on the right next to Claude Code's: the pig and "malac" when idle, the number of running agents and waiting approvals otherwise. Click it to open malac, or, while approvals wait (it turns amber), to answer them.
 
 The activity bar keeps malac's container (the pig) with the daemon's workspaces, jobs and sessions, and a usage view. Everything looks like the rest of VS Code in light, dark and high-contrast themes.
 
 ## Chat
 
 - **Streaming transcript.** Answers stream in as Markdown; thinking folds away; every tool call is a card with its command, diff or output; subagents get a card that follows them live and opens their own transcript.
-- **Approvals inline.** A tool call that needs permission shows **Allow**, **Always** (for the rest of the session) and **Deny** on its card. Requests from subagents, and requests to enable a plugin that runs code, appear above the composer; **Show details** lists what the plugin would run (hooks, MCP servers, scripts) or the full input.
-- **Composer.** Enter sends, Shift+Enter starts a new line, ↑ recalls earlier prompts, Esc stops a running agent. The model picker sets the model of the agent (or of the next new agent), the mode button switches the tab between *Ask*, *Edits* and *Autopilot* (Shift+Tab cycles), and **Stop** cancels the turn.
+- **Approvals inline.** A tool call that needs permission shows **Allow**, **Always** (for the rest of the session) and **Deny** on its card. Requests from subagents, and requests to enable a plugin that runs code, appear above the composer; **Show details** lists what the plugin would run (hooks, MCP servers, scripts) or the full input. Once answered, anywhere, the card keeps a quiet line with the answer and where it was given: "Allowed · Pixel 9", "Allowed for the session · this computer", "Denied · talk mode". Reopened sessions show it too.
+- **Composer.** Enter sends, Shift+Enter starts a new line, ↑ recalls earlier prompts, Esc stops a running agent. The model picker sets the model of the agent (or of the next new agent), with the models under their provider's name and new providers listed as soon as they are configured, the mode button switches the tab between *Ask*, *Edits* and *Autopilot* (Shift+Tab cycles), and **Stop** cancels the turn.
 - **Current file.** A chip shows the active editor's file, `README.md`, or with a selection `README.md:12-30`. A saved file goes with the next message as an attachment; selected lines (or a file with unsaved changes) go inline with their path and line numbers. Click the chip to leave the file out; it stays off until you turn it on again.
 - **Slash commands.** Type `/` for a list: the chat's own `/model`, `/mode`, `/compact`, `/clear` and `/cost`, then `/context` and the tab's custom commands (from `.malac/commands`, `.claude/commands`, plugins and skills, as the daemon reports them). Custom commands go to the agent as typed and the daemon expands them.
 - **Files malac sends you.** Ask for a screenshot or a file ("send me a screenshot of the settings page") and malac's `send_to_user` tool puts it in the chat: images inline, other files as a card with **Open** (a copy opens in VS Code) and **Save as…**, with the agent's caption above them. The extension fetches them from the daemon, so they work with a daemon on another machine too.
@@ -31,7 +31,11 @@ The activity bar keeps malac's container (the pig) with the daemon's workspaces,
 - **Sessions**: saved sessions by day, for this folder or all folders. Click to load one into a tab and continue it.
 - **Usage**: tokens and cost today, over the last seven days and per model, from the daemon's session transcripts (`GET /api/usage`).
 
-The status bar shows how many agents are running and approvals waiting, and warns when the daemon runs another malac version than the one installed. Click it to open malac. When no visible chat shows a request's tab, approval requests also appear as notifications with Allow / Always / Deny, and **Open**, which shows the agent in the chat.
+The status bar shows how many agents are running and approvals waiting, and warns when the daemon runs another malac version than the one installed. Click it to open malac.
+
+## Approvals outside the chat
+
+When no visible chat shows a request's tab, a notification says which agent wants what ("main in api wants to use bash: cargo publish"). It closes by itself the moment the request is answered anywhere: in a chat, on another device, in talk mode. VS Code lets extensions close only progress notifications, which take no buttons, so the answer comes from the chat or from **malac: Answer Approvals** (⌥⇧⌘A / Ctrl+Alt+Shift+A, or the status bar item while it shows waiting approvals): pick the request when several wait, then **Allow**, **Always**, **Deny**, **Show details** (the whole command, input or plugin contents, with the same three answers) or **Open in chat**. The picker closes if the request is answered elsewhere meanwhile. `malac.approvalNotifications` turns the notifications off.
 
 ## Commands
 
@@ -47,6 +51,7 @@ The status bar shows how many agents are running and approvals waiting, and warn
 | **malac: New Tab for This Folder** | Opens a tab for the folder, the repository root, or another folder. |
 | **malac: Stop Agent** | Stops the chat's agent, or picks a running one. |
 | **malac: Open Full UI** | The whole web UI in an editor panel. |
+| **malac: Answer Approvals** (⌥⇧⌘A / Ctrl+Alt+Shift+A) | The waiting approval requests, then Allow, Always, Deny, Show details or Open in chat. The status bar item runs it while approvals wait. |
 | **malac: Restart Daemon** | `malac daemon restart`, e.g. after updating malac. Asks first when agents or jobs run. |
 | **malac: Dictate** (⌥⇧⌘D / Ctrl+Alt+Shift+D) | Starts dictating into the chat in use; again stops and inserts the text. |
 | **malac: Talk** | Talk mode in a terminal, through the chat's agent. |
@@ -71,7 +76,7 @@ When the workspace folder has no tab, the chat offers to open one. If the folder
 | `malac.home` | | The malac home; empty means `$MALAC_HOME`, else `~/.malac`. |
 | `malac.startDaemonOnStartup` | `false` | Start the daemon when VS Code starts instead of on first use. |
 | `malac.folderTab` | `ask` | `ask`, `folder`, `repositoryRoot` or `never`: what to do when the folder has no tab. |
-| `malac.approvalNotifications` | `true` | Approval notifications when the chat cannot show them. |
+| `malac.approvalNotifications` | `true` | A notification for each approval request no visible chat shows; it closes once the request is answered. |
 | `malac.chat.includeCurrentFile` | `true` | Whether the current-file chip starts out on. |
 | `malac.editorTitleButton` | `true` | The malac button in the editor title bar. |
 | `malac.speakOnThisDevice` | `true` | Play malac's speech on this computer when speech is on. Not synced between machines. |
@@ -120,4 +125,4 @@ MALAC_HOME=/tmp/malac-home MALAC_BIN=malac HARNESS_CWD=/path/to/project npm run 
 
 `HARNESS_FALLBACK_WS=1` uses the extension's built-in WebSocket client (what older VS Code versions get) instead of Node's. `HARNESS_VOICE_BIN` points the microphone button at a malac with the voice commands (or a stand-in that prints `{"text": …}`).
 
-`npm run smoke` activates the compiled extension with a stand-in `vscode` module against the daemon in `MALAC_HOME` and checks that every command and view is registered, where the chat goes for `VSCODE_VERSION` (default 1.139.1; try 1.99.3 for the activity-bar fallback), the status bar, editor tabs and their restore. `SMOKE_PROMPT=1` adds one real prompt from an editor tab. `SMOKE_VOICE=1` (with `MALAC_BIN` a malac that has the voice commands) checks dictation, talk mode and Voice Settings; `SMOKE_SAY_PROMPT` adds a prompt whose approval must be spoken.
+`npm run smoke` activates the compiled extension with a stand-in `vscode` module against the daemon in `MALAC_HOME` and checks that every command and view is registered, where the chat goes for `VSCODE_VERSION` (default 1.139.1; try 1.99.3 for the activity-bar fallback), the status bar, editor tabs and their restore. `SMOKE_PROMPT=1` adds one real prompt from an editor tab. `SMOKE_VOICE=1` (with `MALAC_BIN` a malac that has the voice commands) checks dictation, talk mode and Voice Settings; `SMOKE_SAY_PROMPT` adds a prompt whose approval must be spoken. `SMOKE_APPROVALS`, a prompt that makes the agent ask for approval, runs it in a tab the chat does not show and checks the approval notification: it opens, closes when the request is answered elsewhere, and **Answer Approvals** answers the next one.

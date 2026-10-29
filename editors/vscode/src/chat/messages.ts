@@ -3,8 +3,9 @@
 
 import type { ConnectionState } from "../connection/client";
 import type { ContextChip } from "../model/context";
+import type { ModelGroup } from "../model/models";
 import type { DisplayStatus } from "../model/store";
-import type { Envelope, ImageInput, Message, Mode, Usage } from "../protocol";
+import type { DecisionRecord, Envelope, ImageInput, Message, Mode, Usage } from "../protocol";
 
 export interface AgentSummary {
   id: string;
@@ -84,6 +85,8 @@ export interface ChatState {
       })
     | null;
   models: string[];
+  /** `models` (plus the one in use) by provider, for the model menu's headings. */
+  modelGroups: ModelGroup[];
   defaultModel: string | null;
   /** The model a new agent would use. */
   newModel: string | null;
@@ -108,6 +111,8 @@ export type ToWebview =
       history: Message[];
       events: Envelope[];
       error?: string;
+      /** The approvals asked for and their answers, shown on the tool cards. */
+      decisions?: DecisionRecord[];
     }
   | { type: "events"; agent: string; events: Envelope[] }
   | { type: "files"; id: number; files: { path: string; relative: string }[] }

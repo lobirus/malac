@@ -19,7 +19,7 @@ import { Change, DaemonStore } from "./model/store";
 import { chatViewId, supportsSecondarySidebar } from "./model/surfaces";
 import type { NodeRef } from "./model/tree";
 import type { WorkspaceView } from "./protocol";
-import { ApprovalNotifier } from "./ui/approvals";
+import { ANSWER_COMMAND, ApprovalNotifier } from "./ui/approvals";
 import { FolderTabs } from "./ui/folderTab";
 import { MalacPanel } from "./ui/fullUi";
 import { JOB_SCHEME, JobLogProvider, jobUri } from "./ui/jobLog";
@@ -128,8 +128,8 @@ export function activate(context: vscode.ExtensionContext): void {
       void folders?.onSnapshot();
     }
     if (change.tabs || change.agents || change.pending || change.jobs || change.workspaces || change.snapshot) refreshTrees();
-    if (change.requested) notifier.notify(change.requested);
-    if (change.pending) notifier.notify([]);
+    // Opens notifications for new requests and closes those settled anywhere.
+    notifier.notify(change.requested ?? []);
     if (change.finished) {
       sessionsTree.refresh(1500);
       usageView.refresh(3000);
@@ -158,6 +158,7 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionsView,
     usageView,
     statusBar,
+    notifier,
     jobLogs,
     vscode.window.registerWebviewViewProvider(chatView.id, chatView, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.window.registerWebviewPanelSerializer(CHAT_PANEL_TYPE, surfaces),
@@ -192,6 +193,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (["malac.connection", "malac.home", "malac.path"].some((key) => event.affectsConfiguration(key))) client.reconnect({ allowStart: true });
       if (event.affectsConfiguration("malac.folderTab")) void folders?.onSnapshot();
+      if (event.affectsConfiguration("malac.approvalNotifications")) notifier.settle();
     }),
   );
 
@@ -364,6 +366,8 @@ export function activate(context: vscode.ExtensionContext): void {
     await whenOnline();
     await voice.settings();
   });
+
+  register(ANSWER_COMMAND, () => notifier.answer());
 
   register("malac.reconnect", () => client.reconnect({ allowStart: true }));
   register("malac.showLog", () => output.show());

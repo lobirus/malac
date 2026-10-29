@@ -1117,6 +1117,36 @@ button {
   white-space: nowrap;
 }
 
+/* What the user answered and where: a quiet line under the head. */
+.tool-decision {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 4px 21px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tool-decision > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-decision svg {
+  flex: none;
+  opacity: 0.8;
+}
+
+.tool-decision[data-decision="deny"] {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-decision[hidden] {
+  display: none;
+}
+
 .tool-approval {
   display: flex;
   flex-wrap: wrap;

@@ -12,6 +12,7 @@ import type { VoiceOffer } from "../chat/messages";
 import type { DaemonClient } from "../connection/client";
 import { isRemoteEndpoint } from "../model/attachments";
 import { Disposable, Emitter } from "../model/emitter";
+import { groupModels } from "../model/models";
 import type { DaemonStore } from "../model/store";
 import { featureReady, type SayMessage, type VoiceFeature, type VoiceFeatureName, type VoiceSettings, type VoiceStatus } from "../protocol";
 import { Dictation, play as playFile, VoiceSupport, VoiceTarget, voiceArgs } from "../voice/cli";
@@ -275,8 +276,18 @@ export class VoiceFeatures implements ChatVoice, vscode.Disposable {
       void vscode.window.showInformationMessage(`No provider offers ${needs}. Add an OpenAI-style provider that has one, then read the model lists again.`);
       return;
     }
-    const automatic = { label: "Automatic", description: feature.models[0] ? `the first that can: ${feature.models[0]}` : undefined, value: null as string | null, picked: !feature.configured };
-    const options = feature.models.map((model) => ({ label: model, description: model === "system" ? "this computer's own voice" : undefined, value: model as string | null, picked: model === feature.configured }));
+    type Option = vscode.QuickPickItem & { value?: string | null };
+    const automatic: Option = { label: "Automatic", description: feature.models[0] ? `the first that can: ${feature.models[0]}` : undefined, value: null, picked: !feature.configured };
+    // A separator per provider, so models of different gateways read apart.
+    const options: Option[] = groupModels(feature.models).flatMap((group) => [
+      ...(group.provider ? [{ label: group.provider, kind: vscode.QuickPickItemKind.Separator }] : []),
+      ...group.models.map(({ spec, name }) => ({
+        label: group.provider ? name : spec,
+        description: spec === "system" ? "this computer's own voice" : undefined,
+        value: spec,
+        picked: spec === feature.configured,
+      })),
+    ]);
     const picked = await vscode.window.showQuickPick([automatic, ...options], { title: `${FEATURE_TITLES[name]} model` });
     if (picked) await this.put({ [`${name}_model`]: picked.value });
   }

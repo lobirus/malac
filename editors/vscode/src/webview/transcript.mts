@@ -3,6 +3,7 @@
 
 import type { AgentSummary, FromWebview, MediaFile, PendingView } from "../chat/messages.js";
 import type { Block, Envelope, ImageInput, Message, Usage } from "../protocol.js";
+import { type DecisionInfo, decisionOf, decisionsByCall, decisionText } from "./decision.mjs";
 import { baseName, clockTime, firstLine, formatCost, formatDuration, formatTokens, h, icon, plural, relativeTo, setChildren, toolIcon, truncate } from "./dom.mjs";
 import { renderMarkdown } from "./markdown.mjs";
 import { SharedCard } from "./shared.mjs";
@@ -228,6 +229,9 @@ class ToolCard implements Card {
   private approvalRow: HTMLElement;
   private body: HTMLElement;
   private errorLine: HTMLElement;
+  /** What the user answered when the call waited for approval, and where. */
+  private decisionLine: HTMLElement;
+  private decision: DecisionInfo | null = null;
   private painted = false;
   private ops: { op: " " | "+" | "-"; text: string }[] | null = null;
 
@@ -255,9 +259,10 @@ class ToolCard implements Card {
     );
     this.head.addEventListener("click", () => this.toggle());
     this.errorLine = h("div", { class: "tool-error-line", hidden: true });
+    this.decisionLine = h("div", { class: "tool-decision", hidden: true });
     this.approvalRow = h("div", { class: "tool-approval", hidden: true });
     this.body = h("div", { class: "tool-body", id: bodyId, hidden: true });
-    this.el = h("div", { class: "tool", dataset: { state: "pending", tool: this.name } }, this.head, this.errorLine, this.approvalRow, this.body);
+    this.el = h("div", { class: "tool", dataset: { state: "pending", tool: this.name } }, this.head, this.decisionLine, this.errorLine, this.approvalRow, this.body);
     if (this.name === "edit") {
       this.ops = diffLines(String(this.input.old_string ?? ""), String(this.input.new_string ?? ""));
       const added = this.ops.filter((o) => o.op === "+").length;
@@ -395,6 +400,22 @@ class ToolCard implements Card {
     this.repaint();
   }
 
+  /** Shows the answer to its approval: "Allowed · Pixel 9", "Denied · this computer". */
+  decided(info: DecisionInfo): void {
+    this.decision = info;
+    const text = decisionText(info.decision, info.by);
+    this.decisionLine.dataset.decision = info.decision;
+    this.decisionLine.title = text;
+    setChildren(this.decisionLine, icon("shield", 12), h("span", {}, text));
+    this.decisionLine.hidden = false;
+    this.paintError();
+  }
+
+  /** A denial says so on its own line; the tool's "denied" error would repeat it. */
+  private paintError(): void {
+    this.errorLine.hidden = !(this.done && this.isError) || this.decision?.decision === "deny";
+  }
+
   finish(output: string, isError: boolean, millis?: number): void {
     this.done = true;
     this.isError = Boolean(isError);
@@ -411,10 +432,8 @@ class ToolCard implements Card {
       this.meta.querySelector(".tool-time")?.remove();
       this.meta.append(h("span", { class: "tool-time" }, formatDuration(this.millis)));
     }
-    if (isError) {
-      this.errorLine.textContent = firstLine(output) || "Failed";
-      this.errorLine.hidden = false;
-    }
+    if (isError) this.errorLine.textContent = firstLine(output) || "Failed";
+    this.paintError();
     this.repaint();
   }
 
@@ -555,6 +574,14 @@ export class Transcript {
   agent: string | null = null;
   private cards = new Map<string, Card>();
   private approvals = new Map<string, ToolCard>();
+  /**
+   * Requests already answered. The chat state can lag behind the events (it
+   * is sent a moment later), so its `pending` may still list one; it must
+   * not ask again on a card that ran meanwhile.
+   */
+  private settled = new Set<string>();
+  /** Requests this transcript saw asked; only their own answer settles them, not a lagging state. */
+  private announced = new Set<string>();
   private spawns: SpawnCard[] = [];
   private lastTodo: TodoCard | null = null;
   private draft: Draft | null = null;
@@ -581,10 +608,11 @@ export class Transcript {
     );
   }
 
-  reset(agent: string | null, history: Message[], events: Envelope[], error?: string): void {
+  reset(agent: string | null, history: Message[], events: Envelope[], error?: string, decisions?: unknown): void {
     this.agent = agent;
     this.cards.clear();
     this.approvals.clear();
+    this.announced.clear();
     this.spawns = [];
     this.lastTodo = null;
     if (this.draft) clearTimeout(this.draft.timer);
@@ -593,6 +621,11 @@ export class Transcript {
     setChildren(this.root);
     if (error) this.notice("error", `Could not load the saved transcript: ${error}`);
     for (const message of history) this.message(message);
+    // What the user answered, kept with the session: on the cards of the calls that asked.
+    for (const [call, info] of decisionsByCall(decisions)) {
+      const card = this.cards.get(call);
+      if (card instanceof ToolCard) card.decided(info);
+    }
     for (const env of events) this.apply(env);
     this.linkChildren(this.context.agents());
     this.pinned = true;
@@ -646,10 +679,11 @@ export class Transcript {
         this.cards.get(String(env.call_id))?.finish(String(env.output ?? ""), Boolean(env.is_error), Number(env.millis));
         break;
       case "permission_requested":
+        this.announced.add(String(env.request_id));
         this.permissionRequested({ id: String(env.request_id), callId: String(env.call_id ?? ""), tool: String(env.tool ?? ""), input: env.input, summary: String(env.summary ?? "") });
         break;
       case "permission_resolved":
-        this.permissionResolved(String(env.request_id), Boolean(env.allowed));
+        this.permissionResolved(env);
         break;
       case "usage":
         if (this.turn) {
@@ -886,21 +920,30 @@ export class Transcript {
   }
 
   private permissionRequested(request: { id: string; callId: string; tool: string; input: unknown; summary: string }): void {
-    if (this.approvals.has(request.id)) return;
+    if (this.approvals.has(request.id) || this.settled.has(request.id)) return;
     let card = this.cards.get(request.callId);
     if (!(card instanceof ToolCard)) card = this.matchCard(request.tool, request.input);
-    if (!(card instanceof ToolCard)) return;
+    if (!(card instanceof ToolCard) || card.done) return;
     this.approvals.set(request.id, card);
     card.awaitApproval(request);
     if (!card.el.classList.contains("open")) card.toggle(true);
     this.follow();
   }
 
-  private permissionResolved(id: string, allowed: boolean): void {
-    const card = this.approvals.get(id);
+  private permissionResolved(env: Envelope): void {
+    const id = String(env.request_id);
+    this.announced.delete(id);
+    this.settled.add(id);
+    if (this.settled.size > 500) this.settled.delete(this.settled.values().next().value!);
+    // A request from before this view loaded is found by its call (the store adds `call_id`).
+    const byCall = env.call_id ? this.cards.get(String(env.call_id)) : undefined;
+    const card = this.approvals.get(id) ?? (byCall instanceof ToolCard ? byCall : undefined);
     this.approvals.delete(id);
     if (!card) return;
-    if (allowed) card.approved();
+    const info = decisionOf(env);
+    if (info) card.decided(info);
+    if (card.done) return;
+    if (env.allowed) card.approved();
     else card.finish("Denied", true);
   }
 
@@ -917,7 +960,7 @@ export class Transcript {
   claimPending(pending: PendingView[]): void {
     const open = new Set(pending.map((p) => p.id));
     for (const [id, card] of this.approvals) {
-      if (!open.has(id)) {
+      if (!open.has(id) && !this.announced.has(id)) {
         this.approvals.delete(id);
         card.approved();
       }

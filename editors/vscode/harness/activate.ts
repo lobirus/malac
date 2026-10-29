@@ -12,9 +12,14 @@
 // mode and the voice settings (MALAC_BIN must have the voice commands, or be
 // a stand-in for them); SMOKE_SAY_PROMPT, a prompt that makes the agent ask
 // for approval, checks that the approval is spoken here (and then denies it).
+// SMOKE_APPROVALS, a prompt that makes the agent ask for approval, runs it in
+// a tab the chat does not show and checks the approval notification: it
+// opens, closes when the request is answered elsewhere, and malac: Answer
+// Approvals (the status bar while it waits) answers the next one.
 
 import * as fs from "node:fs";
 import Module from "node:module";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const ROOT = path.resolve(__dirname, "..", "..");
@@ -42,6 +47,36 @@ const statusItems: Record<string, unknown>[] = [];
 const terminals: Record<string, unknown>[] = [];
 const statusMessages: string[] = [];
 const quickPicks: { items: { label: string; description?: string }[]; title?: string }[] = [];
+/** Progress notifications: open until their task ends. */
+const progress: { title: string; open: boolean }[] = [];
+type Listener0 = () => void;
+class MockQuickPick {
+  title = "";
+  placeholder = "";
+  items: { label: string; kind?: number }[] = [];
+  activeItems: unknown[] = [];
+  selectedItems: unknown[] = [];
+  visible = false;
+  private accepted: Listener0[] = [];
+  private hidden: Listener0[] = [];
+  onDidAccept = (fn: Listener0) => (this.accepted.push(fn), { dispose() {} });
+  onDidHide = (fn: Listener0) => (this.hidden.push(fn), { dispose() {} });
+  show() {
+    this.visible = true;
+    livePicks.push(this);
+  }
+  hide() {
+    if (!this.visible) return;
+    this.visible = false;
+    this.hidden.forEach((fn) => fn());
+  }
+  dispose() {}
+  accept(text: string) {
+    this.selectedItems = this.items.filter((i) => i.label.includes(text)).slice(0, 1);
+    this.accepted.forEach((fn) => fn());
+  }
+}
+const livePicks: MockQuickPick[] = [];
 const serializers = new Map<string, { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> }>();
 const panels: MockPanel[] = [];
 const VERSION = process.env.VSCODE_VERSION ?? "1.139.1";
@@ -218,7 +253,16 @@ const vscode = {
       quickPicks.push({ items: await items, title: options?.title });
       return undefined;
     },
-    withProgress: async (_: unknown, task: () => Promise<unknown>) => task(),
+    withProgress: async (options: { title?: string }, task: (p: unknown) => Promise<unknown>) => {
+      const entry = { title: options.title ?? "", open: true };
+      progress.push(entry);
+      try {
+        return await task({ report() {} });
+      } finally {
+        entry.open = false;
+      }
+    },
+    createQuickPick: () => new MockQuickPick(),
     createTerminal: (options: Record<string, unknown>) => {
       terminals.push(options);
       return { exitStatus: undefined, show() {}, dispose() {} };
@@ -370,12 +414,60 @@ async function main(): Promise<void> {
   await commands.get("malac.focusChat")!();
   check("Focus Chat goes to the side chat", executed.includes(`${chatId}.focus`), executed.join(", "));
   if (process.env.SMOKE_VOICE) await voiceChecks(webview.posted, webview.receive, chatId);
+  if (process.env.SMOKE_APPROVALS) await approvalChecks(process.env.SMOKE_APPROVALS, status);
   check("no error notifications", !messages.some((m) => m.startsWith("[error]")), messages.filter((m) => m.startsWith("[error]")).join(" | "));
   for (const m of messages.filter((m) => !m.startsWith("[log]"))) console.log(`     ${m}`);
 
   for (const d of context.subscriptions) d.dispose();
   extension.deactivate();
   setTimeout(() => process.exit(), 200);
+}
+
+/** Approval notifications for a tab the chat does not show, answered elsewhere and through Answer Approvals. */
+async function approvalChecks(prompt: string, status: Record<string, unknown>): Promise<void> {
+  const home = process.env.MALAC_HOME ?? path.join(process.env.HOME ?? "", ".malac");
+  const { url, token } = JSON.parse(fs.readFileSync(path.join(home, "daemon.json"), "utf8")) as { url: string; token: string };
+  // Another client: the daemon's REST API with the master token ("this computer").
+  const command = async (body: Record<string, unknown>) => {
+    const response = await fetch(`${url}/api/command`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return (await response.json()) as Record<string, unknown>;
+  };
+  const until = async (ok: () => boolean, ms = 30_000) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !ok()) await new Promise((r) => setTimeout(r, 100));
+    return ok();
+  };
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "malac-smoke-approvals-"));
+  const created = await command({ type: "tab_create", cwd: dir, name: "smoke approvals" });
+  const tab = String(created.tab);
+  const ask = async () => {
+    const before = progress.length;
+    await command({ type: "prompt", tab, text: prompt });
+    await until(() => progress.length > before);
+    return progress[before];
+  };
+  const first = await ask();
+  check("a request no visible chat shows gets a notification naming the agent and the call", Boolean(first?.open && /wants to use/.test(first.title)), first?.title);
+  await until(() => status.command === "malac.answerApprovals");
+  check("while it waits, the status bar answers approvals, in warning colours", status.command === "malac.answerApprovals" && (status.backgroundColor as { id?: string })?.id === "statusBarItem.warningBackground", String(status.command));
+  const pending = async () => ((await (await fetch(`${url}/api/snapshot`, { headers: { Authorization: `Bearer ${token}` } })).json()) as { pending: { id: string; tab: string }[] }).pending.filter((p) => p.tab === tab);
+  for (const request of await pending()) await command({ type: "approve", request_id: request.id, decision: "allow" });
+  check("answered elsewhere, the notification closes by itself", await until(() => !first.open, 10_000));
+  await until(() => status.command === "malac.open");
+  // Let the first turn end before the next prompt.
+  await new Promise((r) => setTimeout(r, 1500));
+  const second = await ask();
+  check("the next request gets its own notification", Boolean(second?.open));
+  const picks = livePicks.length;
+  void commands.get("malac.answerApprovals")!();
+  await until(() => livePicks.length > picks);
+  const pick = livePicks.at(-1)!;
+  check("Answer Approvals offers Allow, Always, Deny and Open in chat", ["Allow", "Always", "Deny", "Open in chat"].every((l) => pick.items.some((i) => i.label.includes(l))), pick.items.map((i) => i.label).join(" | "));
+  pick.accept("Deny");
+  check("answering there closes the notification", await until(() => !second.open, 10_000));
+  check("and the status bar opens malac again", await until(() => status.command === "malac.open", 10_000), String(status.command));
+  await command({ type: "tab_close", tab, force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 /** Dictation, talk mode and the voice settings against the daemon's voice status. */
