@@ -12,8 +12,8 @@ export interface SpeakerHost {
   request(command: Record<string, unknown>): Promise<ServerMessage>;
   /** `GET /api/voice/say/{id}`. */
   download(id: string): Promise<{ data: Buffer; type: string }>;
-  /** Plays the audio; resolves when it finished. */
-  play(audio: { id: string; data: Buffer; type: string }): Promise<void>;
+  /** Plays the audio; resolves when it finished or `signal` stopped it. */
+  play(audio: { id: string; data: Buffer; type: string }, signal: AbortSignal): Promise<void>;
   /** Shows the sentence while it plays. */
   show(text: string, playing: Promise<void>): void;
   /** A sentence could not be played. */
@@ -29,6 +29,9 @@ export class Speaker {
   private queue: Promise<void> = Promise.resolve();
   /** Bumped on every connection, so replies for an old one are dropped. */
   private connection = 0;
+  /** Sentences the daemon called off; queued ones are skipped. */
+  private cancelled = new Set<string>();
+  private playing: { id: string; stop: AbortController } | null = null;
 
   constructor(private readonly host: SpeakerHost) {}
 
@@ -79,14 +82,26 @@ export class Speaker {
       }
       try {
         const { data, type } = await audio;
-        const playing = this.host.play({ id: say.id, data, type });
+        if (this.cancelled.has(say.id)) return;
+        const stop = new AbortController();
+        this.playing = { id: say.id, stop };
+        const playing = this.host.play({ id: say.id, data, type }, stop.signal);
         this.host.show(say.text, playing);
         await playing;
       } catch (error) {
         this.host.failed(error instanceof Error ? error : new Error(String(error)), say);
+      } finally {
+        this.playing = null;
+        this.cancelled.delete(say.id);
       }
     });
     return true;
+  }
+
+  /** `say_cancelled`: the user answered an approval or prompted; these sentences stop now. */
+  cancel(ids: string[]): void {
+    for (const id of ids) this.cancelled.add(id);
+    if (this.playing && ids.includes(this.playing.id)) this.playing.stop.abort();
   }
 
   /** Resolves once everything queued has played (for tests). */

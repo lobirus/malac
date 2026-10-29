@@ -92,12 +92,12 @@ export function failure(command: string, args: string[], code: number | null, st
   return new Error(last ? last.charAt(0).toUpperCase() + last.slice(1) : `${command} ${args.join(" ")} exited with code ${code}`);
 }
 
-/** Plays a WAV or MP3 file through `malac voice play`; resolves when it is done. */
-export function play(target: VoiceTarget, file: string): Promise<void> {
+/** Plays a WAV or MP3 file through `malac voice play`; resolves when it is done or `signal` stopped it. */
+export function play(target: VoiceTarget, file: string, signal?: AbortSignal): Promise<void> {
   const args = voiceArgs(target, ["play", file]);
   return new Promise((resolve, reject) => {
-    execFile(target.command, args, { timeout: PLAY_TIMEOUT_MS, env: voiceEnv(target) }, (error, _stdout, stderr) => {
-      if (!error) resolve();
+    execFile(target.command, args, { timeout: PLAY_TIMEOUT_MS, env: voiceEnv(target), signal }, (error, _stdout, stderr) => {
+      if (!error || signal?.aborted) resolve();
       else if ((error as NodeJS.ErrnoException).code === "ENOENT") reject(new MissingBinaryError(target.command));
       else reject(failure(target.command, args, typeof error.code === "number" ? error.code : null, String(stderr)));
     });

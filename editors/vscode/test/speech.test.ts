@@ -19,13 +19,18 @@ function setup() {
       if (id === "missing") throw new Error("404 not found");
       return { data: Buffer.from(`audio ${id}`), type: "audio/mpeg" };
     },
-    play({ id }) {
+    play({ id }, signal) {
       played.push(`start ${id}`);
       return new Promise<void>((resolve) => {
         release = () => {
           played.push(`end ${id}`);
           resolve();
         };
+        signal.addEventListener("abort", () => {
+          played.push(`stopped ${id}`);
+          release = null;
+          resolve();
+        });
       });
     },
     show: (text) => void shown.push(text),
@@ -78,4 +83,15 @@ test("only sentences for this listener play, one after another", async () => {
   assert.deepEqual(played, ["start one", "end one", "start two", "end two"]);
   assert.deepEqual(shown, ["sentence one", "sentence two"]);
   assert.deepEqual(failures, ["404 not found"], "a sentence that cannot be fetched is skipped");
+});
+
+test("cancelled sentences stop at once and queued ones never play", async () => {
+  const { speaker, played } = setup();
+  await speaker.connected(true);
+  const listener = speaker.listener ?? -1;
+  for (const id of ["a", "b", "c"]) speaker.hear(say(id, listener));
+  for (let i = 0; i < 40 && !played.includes("start a"); i += 1) await new Promise((r) => setTimeout(r, 5));
+  speaker.cancel(["a", "b"]);
+  for (let i = 0; i < 40 && !played.includes("start c"); i += 1) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(played, ["start a", "stopped a", "start c"]);
 });

@@ -163,6 +163,8 @@ async fn voice_features_work_through_the_daemon() {
             json!({ "files": ["notes.txt"], "message": "the notes" }),
         ),
         answer("sent"),
+        tool_call("b1", "bash", json!({ "command": "echo hi" })),
+        answer("ran it"),
         answer("hi there"),
     ]);
     let daemon = start_daemon(script.clone(), false).await;
@@ -294,6 +296,42 @@ async fn voice_features_work_through_the_daemon() {
             .status()
             .is_client_error()
     );
+
+    eprintln!("step: approvals");
+    // An approval is read aloud; answering it stops that speech everywhere.
+    ask(
+        &laptop,
+        Command::Prompt {
+            tab: Some(tab.clone()),
+            agent: None,
+            text: "run it".into(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            model: None,
+        },
+    )
+    .await;
+    let said = wait_for(&mut events, |m| match m {
+        ServerMessage::Say { id, reason, .. } if reason == "approval" => Some(id.clone()),
+        _ => None,
+    })
+    .await;
+    let request = hub.pending_requests()[0].id.clone();
+    ask(
+        &phone,
+        Command::Approve {
+            request_id: request,
+            decision: malac_core::permission::Decision::Allow,
+        },
+    )
+    .await;
+    let stopped = wait_for(&mut events, |m| match m {
+        ServerMessage::SayCancelled { ids } => Some(ids.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(stopped.contains(&said), "{stopped:?} stops {said}");
+    assert_eq!(finished(&mut events).await, "ran it");
 
     eprintln!("step: talk");
     // Talk mode: audio in, the voice model asks malac, malac's report goes back.

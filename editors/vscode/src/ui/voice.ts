@@ -56,7 +56,7 @@ export class VoiceFeatures implements ChatVoice, vscode.Disposable {
     this.speaker = new Speaker({
       request: (command) => client.request(command),
       download: (id) => client.download(`/api/voice/say/${encodeURIComponent(id)}`),
-      play: (audio) => this.play(audio),
+      play: (audio, signal) => this.play(audio, signal),
       show: (text, playing) => this.said(text, playing),
       failed: (error, say) => this.playFailed(error, say),
       log: (line) => options.log(line),
@@ -66,6 +66,7 @@ export class VoiceFeatures implements ChatVoice, vscode.Disposable {
         // Every snapshot (one per connection) carries the voice status too.
         if (change.voice) void this.speaker.want(this.wantSpeech());
         if (change.say) this.speaker.hear(change.say);
+        if (change.sayCancelled) this.speaker.cancel(change.sayCancelled);
       }),
       client.onStatus.event((status) => {
         // A new connection has no listener yet; it listens again with what the last one knew.
@@ -143,13 +144,13 @@ export class VoiceFeatures implements ChatVoice, vscode.Disposable {
     return on && featureReady(this.store.voice?.speech) && Boolean(support?.ok) && this.blocked() === null;
   }
 
-  private async play(audio: { id: string; data: Buffer; type: string }): Promise<void> {
+  private async play(audio: { id: string; data: Buffer; type: string }, signal: AbortSignal): Promise<void> {
     const dir = path.join(this.context.globalStorageUri.fsPath, "voice");
     await fsp.mkdir(dir, { recursive: true });
     const file = path.join(dir, `${audio.id.replace(/[^\w-]+/g, "_")}.${/wav/.test(audio.type) ? "wav" : "mp3"}`);
     await fsp.writeFile(file, audio.data);
     try {
-      await playFile(this.target(), file);
+      await playFile(this.target(), file, signal);
       this.warnedPlay = false;
     } finally {
       await fsp.rm(file, { force: true });

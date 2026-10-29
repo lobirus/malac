@@ -72,6 +72,8 @@ export interface Change {
   voice?: boolean;
   /** A sentence to read aloud (for whichever connection's listener it names). */
   say?: SayMessage;
+  /** `say_cancelled`: sentences to stop and drop. */
+  sayCancelled?: string[];
 }
 
 export type DisplayStatus = "waiting" | "running" | "failed" | "completed" | "cancelled" | "idle" | "saved";
@@ -222,6 +224,8 @@ export class DaemonStore {
         return { voice: true };
       case "say":
         return { say: message as unknown as SayMessage };
+      case "say_cancelled":
+        return { sayCancelled: Array.isArray(message.ids) ? message.ids.map(String) : [] };
       case "shutdown":
         return { shutdown: String(message.reason ?? "stopped") };
       default:

@@ -6,7 +6,7 @@
 //! sentence, when it is announced, and kept a few minutes for clients that
 //! fetch it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,14 @@ const CLIP_KEEP: Duration = Duration::from_secs(10 * 60);
 const LONG_TURN: Duration = Duration::from_secs(30);
 /// Longest spoken summary of a reply.
 const SUMMARY_CHARS: usize = 160;
+/// Sentences this old have finished playing; stopping them is moot.
+const STILL_PLAYING: Duration = Duration::from_secs(2 * 60);
+/// After the user answers an approval or prompts, they are at a screen:
+/// approvals that come up meanwhile are not read aloud.
+const PRESENT: Duration = Duration::from_secs(20);
+/// An announced approval nobody answered in this long no longer holds
+/// back the next one.
+const ASKING_KEEP: Duration = Duration::from_secs(10 * 60);
 
 type Audio = std::result::Result<(Arc<Vec<u8>>, &'static str), String>;
 
@@ -50,6 +58,17 @@ struct Turn {
     said: bool,
 }
 
+/// When to stay quiet: what was said lately, and whether the user is there.
+#[derive(Default)]
+struct Quiet {
+    /// Sentences announced lately, oldest first.
+    said: VecDeque<(String, Instant)>,
+    /// Approval requests read aloud and not answered yet.
+    asking: HashMap<String, Instant>,
+    /// When the user last answered an approval or sent a prompt.
+    present: Option<Instant>,
+}
+
 #[derive(Default)]
 pub struct Voice {
     status: Mutex<VoiceStatus>,
@@ -60,6 +79,7 @@ pub struct Voice {
     turns: Mutex<HashMap<String, Turn>>,
     /// Talk mode sessions under way; their voice model speaks for malac.
     talking: std::sync::atomic::AtomicUsize,
+    quiet: Mutex<Quiet>,
 }
 
 impl Voice {
@@ -197,6 +217,58 @@ impl Voice {
         id
     }
 
+    /// Whether the event is the user acting, so speech should stop:
+    /// `Some(true)` for answering an approval, which also shows they are at a
+    /// screen, `Some(false)` for prompting a top-level agent (subagents are
+    /// prompted by their parent).
+    fn user_acted(&self, agent: &str, event: &Event) -> Option<bool> {
+        match event {
+            Event::PermissionResolved { request_id, .. } => {
+                self.quiet.lock().unwrap().asking.remove(request_id);
+                Some(true)
+            }
+            Event::UserMessage { .. } => {
+                let turns = self.turns.lock().unwrap();
+                turns
+                    .get(agent)
+                    .is_none_or(|t| t.top_level)
+                    .then_some(false)
+            }
+            _ => None,
+        }
+    }
+
+    /// The user acted: the sentences still playing are to stop at once.
+    fn hush(&self, present: bool) -> Vec<String> {
+        let mut quiet = self.quiet.lock().unwrap();
+        if present {
+            quiet.present = Some(Instant::now());
+        }
+        quiet
+            .said
+            .drain(..)
+            .filter(|(_, at)| at.elapsed() < STILL_PLAYING)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Whether to leave an approval unannounced: the user just acted, or an
+    /// approval read aloud earlier is still waiting for them.
+    fn holding_back(&self) -> bool {
+        let mut quiet = self.quiet.lock().unwrap();
+        quiet.asking.retain(|_, at| at.elapsed() < ASKING_KEEP);
+        !quiet.asking.is_empty() || quiet.present.is_some_and(|at| at.elapsed() < PRESENT)
+    }
+
+    fn announced(&self, id: &str, approval: Option<&str>) {
+        let mut quiet = self.quiet.lock().unwrap();
+        quiet.said.retain(|(_, at)| at.elapsed() < STILL_PLAYING);
+        quiet.said.push_back((id.to_owned(), Instant::now()));
+        if let Some(request) = approval {
+            quiet.asking.insert(request.to_owned(), Instant::now());
+        }
+    }
+
     /// What to read aloud for an agent event, if anything.
     fn line_for(&self, agent: &str, event: &Event) -> Option<(String, &'static str)> {
         let mut turns = self.turns.lock().unwrap();
@@ -326,9 +398,22 @@ impl Hub {
 
     /// Reads an agent event aloud when speech is on and a device listens.
     pub fn voice_observe(&self, tab: &str, envelope: &Envelope) {
+        if let Some(present) = self.voice().user_acted(&envelope.agent, &envelope.event) {
+            let ids = self.voice().hush(present);
+            if !ids.is_empty() {
+                self.publish(&ServerMessage::SayCancelled { ids });
+            }
+        }
         let Some((text, reason)) = self.voice().line_for(&envelope.agent, &envelope.event) else {
             return;
         };
+        let approval = match &envelope.event {
+            Event::PermissionRequested { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        };
+        if approval.is_some() && self.voice().holding_back() {
+            return;
+        }
         let talking = self
             .voice()
             .talking
@@ -342,6 +427,7 @@ impl Hub {
             return;
         };
         let id = self.voice().add_clip(&text);
+        self.voice().announced(&id, approval);
         // Start making the audio now; the client's fetch waits for it.
         let config = self.base_config();
         let voice = self.voice().clone();
@@ -479,6 +565,58 @@ mod tests {
             "agent"
         );
         assert!(voice.line_for(agent, &finished).is_none());
+    }
+
+    #[test]
+    fn answering_stops_speech_and_holds_back_approvals() {
+        let voice = Voice::default();
+        let resolved = |id: &str| Event::PermissionResolved {
+            request_id: id.into(),
+            allowed: true,
+        };
+        assert!(!voice.holding_back());
+        voice.announced("clip1", Some("r1"));
+        voice.announced("clip2", None);
+        // A second approval waits while the first is unanswered.
+        assert!(voice.holding_back());
+        assert_eq!(voice.user_acted("a1", &resolved("r1")), Some(true));
+        assert_eq!(voice.hush(true), ["clip1", "clip2"]);
+        assert!(voice.hush(true).is_empty(), "stopped once");
+        // The user is at a screen for a while after answering.
+        assert!(voice.holding_back());
+        voice.quiet.lock().unwrap().present = Some(Instant::now() - PRESENT);
+        assert!(!voice.holding_back());
+        // A subagent's brief is not the user prompting.
+        voice.line_for(
+            "sub",
+            &Event::AgentStarted {
+                label: "tests".into(),
+                parent: Some("a1".into()),
+                model: "m".into(),
+                cwd: "/".into(),
+            },
+        );
+        assert_eq!(
+            voice.user_acted(
+                "sub",
+                &Event::UserMessage {
+                    text: "brief".into()
+                }
+            ),
+            None
+        );
+        // Prompting stops speech but does not hold back the next approval.
+        assert_eq!(
+            voice.user_acted(
+                "a1",
+                &Event::UserMessage {
+                    text: "next".into()
+                }
+            ),
+            Some(false)
+        );
+        voice.hush(false);
+        assert!(!voice.holding_back());
     }
 
     #[test]

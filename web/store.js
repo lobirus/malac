@@ -335,6 +335,7 @@ function receive(message) {
       state.voice = message.voice;
       return invalidate("voice", "settings");
     case "say":
+    case "say_cancelled":
       return onSay(message);
     case "notice":
       return toast(message.message, message.level === "error" ? "error" : message.level === "warning" ? "warning" : "info");
@@ -361,7 +362,7 @@ export function setResyncHandler(fn) {
 
 let onSay = () => {};
 
-/** Called with every `say` broadcast; the page plays those for its own listener id. */
+/** Called with every `say` and `say_cancelled` broadcast; the page plays the sentences for its own listener id. */
 export function setSayHandler(fn) {
   onSay = fn;
 }

@@ -195,6 +195,7 @@ Approvals: `permission_requested` reaches every client; any of them may answer w
 | `notice` | `level` (`info`, `warning`, `error`), `message`, `tab`? | e.g. a configuration warning or an unavailable MCP server while a tab loads |
 | `voice` | `voice`: VoiceStatus | voice settings changed or the providers' model lists were read again |
 | `say` | `id`, `text`, `reason` (`approval`, `agent`, `finished`, `failed`), `tab`, `agent`, `listener` | a sentence to read aloud, for the connection whose listener id it names; see [voice](#voice-and-shared-files) |
+| `say_cancelled` | `ids` | the user answered an approval or sent a prompt: stop these sentences at once if one is playing, and drop the rest from the queue |
 | `reloaded` | | settings were applied; idle tabs reload on next use |
 | `shutdown` | `reason` | the daemon is stopping (`signal`, `idle`, `stopped by a client`, …) |
 
@@ -364,6 +365,8 @@ A code is ten characters of Crockford base32, shown as `XXXXX-XXXXX`; case, dash
 **Models.** Only OpenAI-style providers have audio APIs. Dictation uses a transcription model (`/audio/transcriptions`, like `whisper-1` or `gpt-4o-mini-transcribe`), else a chat model that takes audio (`input_audio`, like `gpt-4o-audio-preview`). Speech uses a speech model (`/audio/speech`, like `gpt-4o-mini-tts` or `tts-1`), else `system`: the machine's own voice (`say` on macOS, `espeak-ng` on Linux). Talk mode needs a Realtime model (`gpt-realtime`). Models are recognised by name; `[models."provider/model"] audio = "transcription" | "input" | "speech" | "realtime"` declares one whose name does not say.
 
 **Speech.** With `voice.speech` on, the daemon reads aloud what needs the user: every approval request ("malac needs your approval to run cargo publish."), what an agent says with its `say` tool, a failed turn, and the first sentence of a top-level agent's reply after a turn of 30 seconds or more in which it said nothing. Only connections that sent `voice_listen {on: true}` play speech, and each sentence goes to one of them: the one that sent a command most recently, which is where the user is. A `say` broadcast reaches every client; the one whose `listener` matches fetches `/api/voice/say/{id}` and plays it. Clients offer a "speak on this device" switch and send `voice_listen` again after reconnecting. While a talk mode session runs, its voice model speaks for malac and no `say` is sent.
+
+**Quiet when the user acts.** Answering an approval (on any device) or prompting a top-level agent broadcasts `say_cancelled` with the sentences sent in the last two minutes: a client stops the one playing and drops the queued ones at once. While an approval read aloud is unanswered, and for 20 seconds after the user answers one, further approvals are not read aloud: the user is at a screen, or already knows malac is waiting.
 
 **Shared files.** `send_to_user` copies files (or the newest images the agent's tools returned, such as a screenshot) to `~/.malac/shared/<id>/` for 30 days. Its tool result names each one in a tag, after an optional `<caption>…</caption>` (captions never contain `<` or `>`, names never `<`, `>` or `"`):
 

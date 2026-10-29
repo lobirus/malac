@@ -1905,6 +1905,11 @@ async fn speech_plays_the_sentences_meant_for_this_terminal() {
     // What the agent says with `say` already shows as the tool call.
     app.on_message(say("s3", "agent", 7));
     assert_eq!(voice_calls(&app), ["say s3"]);
+    // Answering an approval anywhere stops what is playing here.
+    app.on_message(ServerMessage::SayCancelled {
+        ids: vec!["s1".into(), "s3".into()],
+    });
+    assert_eq!(voice_calls(&app), ["cancel s1,s3"]);
 
     // `/speak off` stops listening; reconnecting listens again when on.
     type_text(&mut app, "/speak off");

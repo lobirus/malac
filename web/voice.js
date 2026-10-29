@@ -459,7 +459,7 @@ function renderDictation() {
 const SPEAK_KEY = "malac.speak";
 const QUEUE_MAX = 5;
 
-const speech = { on: false, socket: null, listener: null, busy: false, queue: [], playing: false, context: null, source: null, prompted: 0 };
+const speech = { on: false, socket: null, listener: null, busy: false, queue: [], playing: false, context: null, source: null, current: null, prompted: 0 };
 
 /** "Speak on this device", remembered in this browser; on by default. */
 export function speakHere() {
@@ -499,11 +499,12 @@ function speechContext() {
 }
 
 function onSay(message) {
+  if (message.type === "say_cancelled") return cancelSpeech(message.ids ?? []);
   if (speech.listener == null || message.listener !== speech.listener || !speakHere() || talk.socket) return;
   // The daemon makes the audio while the page fetches it.
   const audio = apiBlob(`/api/voice/say/${encodeURIComponent(message.id)}`);
   audio.catch(() => {});
-  speech.queue.push({ text: message.text, audio });
+  speech.queue.push({ id: message.id, text: message.text, audio });
   if (speech.queue.length > QUEUE_MAX) speech.queue.splice(0, speech.queue.length - QUEUE_MAX);
   playQueue();
 }
@@ -526,9 +527,12 @@ async function playQueue() {
         return;
       }
       const item = speech.queue.shift();
+      speech.current = item.id;
       toast(item.text, "info", { duration: Math.min(12_000, 3000 + item.text.length * 60) });
       try {
         const buffer = await context.decodeAudioData(await (await item.audio).arrayBuffer());
+        // Cancelled while its audio was still on the way.
+        if (speech.current !== item.id) continue;
         await new Promise((resolve) => {
           const source = context.createBufferSource();
           source.buffer = buffer;
@@ -541,6 +545,7 @@ async function playQueue() {
         console.warn("speech", error);
       } finally {
         speech.source = null;
+        speech.current = null;
       }
     }
   } finally {
@@ -565,6 +570,20 @@ function askForSound() {
 
 function stopSpeech() {
   speech.queue = [];
+  speech.current = null;
+  stopSource();
+}
+
+// The user answered an approval or sent a prompt: those sentences stop now.
+function cancelSpeech(ids) {
+  speech.queue = speech.queue.filter((item) => !ids.includes(item.id));
+  if (speech.current && ids.includes(speech.current)) {
+    speech.current = null;
+    stopSource();
+  }
+}
+
+function stopSource() {
   try {
     speech.source?.stop();
   } catch {

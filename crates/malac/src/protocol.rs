@@ -415,6 +415,11 @@ pub enum ServerMessage {
         agent: Option<AgentId>,
         listener: u64,
     },
+    /// Stop these `say` sentences at once and drop them from the queue: the
+    /// user answered an approval or sent a prompt.
+    SayCancelled {
+        ids: Vec<String>,
+    },
     /// The reply to `voice_listen`: this connection's listener id, or null.
     VoiceListening {
         #[serde(default)]

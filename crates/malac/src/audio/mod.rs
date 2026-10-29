@@ -239,9 +239,11 @@ pub async fn play_file(path: &Path) -> Result<()> {
         return Ok(());
     }
     let (program, mut command) = system::file_player(path, kind)?;
+    // A sentence called off mid-way drops this future, which ends the player.
     let status = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
         .status()
         .await
         .with_context(|| format!("cannot run {program}"))?;

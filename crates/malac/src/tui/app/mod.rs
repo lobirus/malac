@@ -1035,6 +1035,7 @@ impl App {
                 listener,
                 ..
             } => self.on_say(&id, &text, &reason, agent.as_deref(), listener),
+            ServerMessage::SayCancelled { ids } => self.backend.cancel_speech(&ids),
             ServerMessage::Reloaded => self.flash_ok("settings applied"),
             ServerMessage::Lagged { skipped } => {
                 self.flash(format!("missed {skipped} updates; catching up"));

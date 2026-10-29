@@ -46,6 +46,8 @@ talk_voice = "marin"
 
 Speech plays on one device: of those with "Speak on this device" on, the one you used last. Answer an approval on your phone and the next sentence plays there; go back to the laptop and it follows you. When speech is on, malac's agents also get a `say` tool, which they use sparingly: when they need you, when a long task is done, or when something is worth knowing. Approval requests are announced for them. After a turn of 30 seconds or more in which the agent said nothing, you hear "Done." and the first sentence of its reply.
 
+Speech stops the moment you act. Answer an approval on any device, or send a prompt, and whatever is playing stops at once and the queued sentences are dropped. While an approval that was read aloud waits for you, and for 20 seconds after you answer one, further approvals are not read aloud: you are at a screen, or you already know malac is waiting.
+
 ## Talk mode
 
 Start talk mode with the headset button (or `/talk` in the terminal) and speak. The voice model knows the project you are in, passes what you ask to malac, says what it asked, and when malac finishes tells you the outcome in a sentence or two. Ask how it is going, and answer approvals out loud ("yes, run it"). Your requests show in the conversation like typed ones, so you can read the details later. Talking over the voice stops it. While talk mode runs, the voice model speaks for malac, so the separate speech above pauses. An approval you answer out loud is passed on by the voice model, so say no when in doubt and check the request on screen.

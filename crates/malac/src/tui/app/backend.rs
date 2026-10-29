@@ -63,6 +63,14 @@ pub enum Reply {
     Listen,
 }
 
+/// The sentences the daemon called off, and the one playing now.
+#[derive(Default)]
+struct SpeechStop {
+    cancelled: std::sync::Mutex<std::collections::HashSet<String>>,
+    playing: std::sync::Mutex<Option<String>>,
+    now: tokio::sync::Notify,
+}
+
 /// What a REST answer is for.
 #[derive(Debug, Clone)]
 pub enum Rest {
@@ -109,6 +117,7 @@ pub struct Backend {
     speech: std::sync::OnceLock<mpsc::UnboundedSender<(DaemonFile, String, u64)>>,
     /// Sentences queued before this was raised are skipped.
     speech_generation: Arc<std::sync::atomic::AtomicU64>,
+    speech_stop: Arc<SpeechStop>,
 }
 
 impl Backend {
@@ -131,6 +140,7 @@ impl Backend {
             voice: Arc::default(),
             speech: Default::default(),
             speech_generation: Arc::default(),
+            speech_stop: Arc::default(),
         }
     }
 
@@ -149,6 +159,7 @@ impl Backend {
             voice: Arc::default(),
             speech: Default::default(),
             speech_generation: Arc::default(),
+            speech_stop: Arc::default(),
         };
         (backend, received)
     }
@@ -315,21 +326,33 @@ impl Backend {
             return;
         };
         let generation = self.speech_generation.clone();
+        let stop = self.speech_stop.clone();
         let updates = self.updates.clone();
         let queue = self.speech.get_or_init(|| {
             let (tx, mut queue) = mpsc::unbounded_channel::<(DaemonFile, String, u64)>();
             tokio::spawn(async move {
                 use std::sync::atomic::Ordering;
                 while let Some((file, id, asked)) = queue.recv().await {
-                    if generation.load(Ordering::Relaxed) != asked {
+                    if generation.load(Ordering::Relaxed) != asked
+                        || stop.cancelled.lock().unwrap().remove(&id)
+                    {
                         continue;
                     }
-                    let played = async {
-                        let (audio, media_type) =
-                            client::download(&file, &format!("/api/voice/say/{id}")).await?;
-                        crate::audio::play_bytes(&audio, &media_type).await
-                    }
-                    .await;
+                    // Listening before it starts, so a cancel cannot slip in between.
+                    let stopped = stop.now.notified();
+                    tokio::pin!(stopped);
+                    stopped.as_mut().enable();
+                    *stop.playing.lock().unwrap() = Some(id.clone());
+                    let played = tokio::select! {
+                        played = async {
+                            let (audio, media_type) =
+                                client::download(&file, &format!("/api/voice/say/{id}")).await?;
+                            crate::audio::play_bytes(&audio, &media_type).await
+                        } => played,
+                        // Dropping the player ends it.
+                        _ = &mut stopped => Ok(()),
+                    };
+                    *stop.playing.lock().unwrap() = None;
                     if let Err(err) = played {
                         let _ = updates.send(Update::Speech(format!("{err:#}")));
                     }
@@ -341,6 +364,26 @@ impl Backend {
             .speech_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         let _ = queue.send((file, id.to_owned(), current));
+    }
+
+    /// `say_cancelled`: stops the sentence playing if it is one of `ids`,
+    /// and skips the others when their turn comes.
+    pub fn cancel_speech(&self, ids: &[String]) {
+        #[cfg(test)]
+        self.voice
+            .lock()
+            .unwrap()
+            .push(format!("cancel {}", ids.join(",")));
+        let stop = &self.speech_stop;
+        let playing = stop.playing.lock().unwrap().clone();
+        stop.cancelled.lock().unwrap().extend(
+            ids.iter()
+                .filter(|id| playing.as_ref() != Some(*id))
+                .cloned(),
+        );
+        if playing.is_some_and(|id| ids.contains(&id)) {
+            stop.now.notify_waiters();
+        }
     }
 
     /// Skips the sentences waiting to be spoken.
