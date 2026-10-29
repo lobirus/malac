@@ -6,9 +6,8 @@ import io.malac.app.data.DaemonRepository
 import io.malac.app.data.LedgerStore
 import io.malac.app.data.SavedDaemon
 import io.malac.app.data.TokenVault
-import io.malac.app.notify.NoPushRegistrar
 import io.malac.app.notify.Notifier
-import io.malac.app.notify.PushRegistrar
+import io.malac.app.notify.UnifiedPushRegistrar
 import io.malac.app.voice.Speech
 import io.malac.app.voice.VoicePrefs
 import io.malac.core.net.DaemonApi
@@ -41,8 +40,8 @@ class AppGraph(context: Context, val crashes: CrashLog) {
     val ledgers = LedgerStore(context)
     val notifier = Notifier(context)
     val pairing: PairingService = HttpPairingService(http)
-    val push: PushRegistrar = NoPushRegistrar
     val connections = ConnectionManager(context, http, daemons, ledgers, notifier, scope)
+    val push = UnifiedPushRegistrar(context, http, daemons, ledgers, notifier, connections, scope)
     val voicePrefs = VoicePrefs(context)
     val speech = Speech(context, connections, voicePrefs, scope)
 

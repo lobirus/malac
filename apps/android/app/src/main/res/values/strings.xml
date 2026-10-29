@@ -223,6 +223,16 @@
     <string name="notification_turn_done">%1$s is done</string>
     <string name="notification_turn_failed">%1$s failed</string>
     <string name="notification_turn_stopped">%1$s stopped</string>
+    <string name="push_title">Instant approvals</string>
+    <string name="push_on">On, through %1$s</string>
+    <string name="push_on_detail">A request that waits unanswered wakes this phone, and its notification goes away once it is answered anywhere.</string>
+    <string name="push_off">Off</string>
+    <string name="push_off_detail">Turn this on to get approvals the moment they wait. Until then malac checks every 15 minutes.</string>
+    <string name="push_unavailable">Needs a push app</string>
+    <string name="push_unavailable_detail">Install ntfy, or another UnifiedPush app, to get approvals the moment they wait, without Google services. Until then malac checks every 15 minutes.</string>
+    <string name="push_turn_on">Turn on</string>
+    <string name="push_turn_off">Turn off</string>
+    <string name="push_get_ntfy">Get ntfy</string>
 
     <plurals name="tabs">
         <item quantity="one">%d tab</item>

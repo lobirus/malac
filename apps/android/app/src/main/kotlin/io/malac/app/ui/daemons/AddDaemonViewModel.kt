@@ -49,7 +49,8 @@ class AddDaemonViewModel(private val graph: AppGraph, defaultDeviceName: String)
                 val label = name.trim().ifEmpty { base.host }
                 if (PairingCode.isValid(code)) {
                     val paired = graph.pairing.pair(base, PairingCode.format(code), deviceName.trim().ifEmpty { "Android" })
-                    graph.daemons.add(label, base, paired.token, paired.device?.id)
+                    val daemon = graph.daemons.add(label, base, paired.token, paired.device?.id)
+                    graph.scope.launch { graph.push.register(daemon) }
                 } else {
                     // A token from `?token=` is checked before it is saved.
                     DaemonApi(graph.http, Endpoint(base, token.trim())).snapshot()

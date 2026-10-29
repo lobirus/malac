@@ -81,6 +81,8 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.play.services.code.scanner)
+    // Push without Google services: a distributor app such as ntfy wakes malac.
+    implementation(libs.unifiedpush.connector)
     // The scanner brings Fragment 1.1, which loses activity results such as
     // the notification permission's; 1.3 and later deliver them.
     implementation(libs.androidx.fragment)

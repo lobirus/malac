@@ -13,6 +13,8 @@ data class CheckResult(
     val approvals: List<PendingApproval>,
     /** Top-level agents that were running at the last check and are not now. */
     val finished: List<AgentView>,
+    /** Requests notified earlier that no longer wait: answered elsewhere, or gone with their agent. */
+    val resolved: Set<String>,
     val ledger: Ledger,
 )
 
@@ -28,5 +30,5 @@ fun check(snapshot: ServerMessage.Snapshot, ledger: Ledger): CheckResult {
     val approvals = snapshot.pending.filter { it.id !in ledger.requests }
     // Only open requests are remembered, so the ledger stays small.
     val open = snapshot.pending.map { it.id }.toSet()
-    return CheckResult(approvals, finished, Ledger(requests = open, running = running))
+    return CheckResult(approvals, finished, ledger.requests - open, Ledger(requests = open, running = running))
 }

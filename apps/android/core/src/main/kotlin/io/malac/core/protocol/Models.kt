@@ -242,6 +242,15 @@ data class DeviceView(
 @Serializable
 data class DeviceList(val devices: List<DeviceView> = emptyList())
 
+/** `GET /api/push`: whether the daemon pushes, its VAPID key, and whether this device is registered. */
+@Serializable
+data class PushStatus(
+    val enabled: Boolean = false,
+    @SerialName("wait_seconds") val waitSeconds: Int = 0,
+    @SerialName("vapid_key") val vapidKey: String = "",
+    val registered: Boolean = false,
+)
+
 /** `GET /api/hello`, which answers without a token. */
 @Serializable
 data class Hello(

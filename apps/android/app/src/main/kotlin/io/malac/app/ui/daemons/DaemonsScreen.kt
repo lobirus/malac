@@ -81,6 +81,7 @@ fun DaemonsScreen(
             state.voice?.let { voice ->
                 item(key = "voice") { VoiceSettings(active, voice, graph.voicePrefs, commands) }
             }
+            item(key = "push") { PushSettings(graph.push) }
             items(daemons, key = { it.id }) { daemon ->
                 val current = daemon.id == active.daemon.id
                 DaemonRow(

@@ -7,6 +7,7 @@ import io.malac.core.protocol.DeviceList
 import io.malac.core.protocol.DeviceView
 import io.malac.core.protocol.Hello
 import io.malac.core.protocol.MalacJson
+import io.malac.core.protocol.PushStatus
 import io.malac.core.protocol.ServerMessage
 import io.malac.core.protocol.SessionList
 import io.malac.core.protocol.SessionSummary
@@ -91,6 +92,22 @@ class DaemonApi(private val client: OkHttpClient, private val endpoint: Endpoint
         val request = authorized("api/command").post(command.encode().toRequestBody(JSON)).build()
         return client.fetch(request, ServerMessage.serializer())
     }
+
+    /** The daemon's VAPID key, which a push distributor needs, and whether this device gets pushes. */
+    suspend fun push(): PushStatus = get("api/push", PushStatus.serializer())
+
+    /** Registers the Web Push endpoint a distributor gave this device, and the keys that encrypt to it. */
+    suspend fun registerPush(endpoint: String, p256dh: String, auth: String) {
+        val body = MalacJson.encodeToString(PushRegistration.serializer(), PushRegistration(endpoint, p256dh, auth))
+        client.fetch(authorized("api/push").put(body.toRequestBody(JSON)).build(), JsonObject.serializer())
+    }
+
+    suspend fun unregisterPush() {
+        client.fetch(authorized("api/push").delete().build(), JsonObject.serializer())
+    }
+
+    @Serializable
+    private data class PushRegistration(val endpoint: String, val p256dh: String, val auth: String)
 
     /** What dictation, speech and talk mode offer; [refresh] reads the providers' model lists again first. */
     suspend fun voice(refresh: Boolean = false): VoiceStatus =

@@ -37,6 +37,15 @@
             android:name=".notify.ApprovalActionReceiver"
             android:exported="false" />
 
+        <!-- Pushes and endpoints from the UnifiedPush distributor (ntfy, for one). -->
+        <service
+            android:name=".notify.MalacPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Hands files malac sent, and transcript images, to the apps that open or share them. -->
         <provider
             android:name="androidx.core.content.FileProvider"
