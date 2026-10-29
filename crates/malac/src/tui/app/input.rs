@@ -76,7 +76,7 @@ impl App {
     }
 
     fn ctrl_c(&mut self) -> Option<Action> {
-        if self.busy() {
+        if self.busy() || !self.tab().shells.is_empty() {
             return Some(Action::Stop);
         }
         if !self.editor.is_empty() {
@@ -211,24 +211,35 @@ impl App {
         if !completions.is_empty() {
             let len = completions.len();
             let selected = self.completion.min(len - 1);
+            let chosen = &completions[selected];
             match key.code {
                 KeyCode::Up => {
                     self.completion = (selected + len - 1) % len;
+                    self.completion_moved = true;
                     return None;
                 }
                 KeyCode::Down => {
                     self.completion = (selected + 1) % len;
+                    self.completion_moved = true;
                     return None;
                 }
                 KeyCode::Tab => {
-                    let chosen = &completions[selected];
                     let space = if chosen.args.is_empty() { "" } else { " " };
                     self.editor.set_text(&format!("/{}{space}", chosen.name));
+                    self.completion = 0;
+                    self.completion_moved = false;
+                    self.list_cd_folder();
                     return None;
                 }
-                KeyCode::Enter if !more_input && !shift && !alt => {
-                    self.editor
-                        .set_text(&format!("/{}", completions[selected].name));
+                // A folder opens as typed, like in a shell, unless one was
+                // picked with the arrow keys.
+                KeyCode::Enter
+                    if !more_input
+                        && !shift
+                        && !alt
+                        && (chosen.folder.is_none() || self.completion_moved) =>
+                {
+                    self.editor.set_text(&format!("/{}", chosen.name));
                     return self.submit();
                 }
                 KeyCode::Esc => {
@@ -293,7 +304,9 @@ impl App {
         if self.editor.text().len() != before {
             self.completion = 0;
             self.completion_dismissed = false;
+            self.completion_moved = false;
             self.file_choice = 0;
+            self.list_cd_folder();
         }
         if self.file_query().is_some() {
             self.index_files();
@@ -351,7 +364,7 @@ impl App {
         if !self.tab().view.is_empty() {
             return Some(Action::Back);
         }
-        if self.busy() {
+        if self.busy() || !self.tab().shells.is_empty() {
             return Some(Action::Stop);
         }
         if self.focus == Focus::Transcript {
@@ -372,6 +385,13 @@ impl App {
     pub(super) fn submit(&mut self) -> Option<Action> {
         let text = self.editor.text().trim_end().to_owned();
         if text.trim().is_empty() && self.attachments.is_empty() {
+            return None;
+        }
+        // `!command` is `/bash command`; attached files wait for the next prompt.
+        if let Some(command) = text.strip_prefix('!') {
+            self.editor.submit();
+            editor::append_history(&self.history_path, &text);
+            self.run_shell(command);
             return None;
         }
         if let Some(command) = text.strip_prefix('/') {
@@ -424,6 +444,14 @@ impl App {
                     _ => self.tab_cwd().join(arg),
                 };
                 Some(Action::OpenFolder(path))
+            }
+            "bash" => {
+                self.run_shell(arg);
+                None
+            }
+            "malac" => {
+                self.run_malac(arg);
+                None
             }
             "jobs" => Some(Action::Jobs),
             "root" => match self

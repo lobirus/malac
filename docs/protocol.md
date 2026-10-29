@@ -125,13 +125,15 @@ Without `session`, `continue_last` or `prompt`, it resumes the workspace's activ
 
 `agent` is the agent the prompt went to, the attached session, or the tab's active agent (possibly `null` for a fresh tab).
 
-#### Jobs and the control service
+#### Jobs, shell commands and the control service
 
 | `type` | Fields | Reply |
 |---|---|---|
 | `job_list` | | `jobs` |
 | `job_output` | `job`; `tail`? (lines, default 100, max 2000) | `job_output` |
 | `job_kill` | `job` | `ack`. SIGTERM to its process group, SIGKILL after 3 s; `job_finished` follows. |
+| `shell` | `tab`, `id` (the client's, unique while it runs), `command`; `timeout`? (seconds, default 120, max 1800) | `shell_output` once the command ends. It runs in the tab's folder on the daemon's machine, like the agent's `bash` tool: a fresh shell, stdin closed, stderr joined to stdout, the daemon's own folder first on `PATH` so `malac` is this daemon's. Over the WebSocket the connection's other commands go on meanwhile. The terminal UI's `/bash`, `!` and `/malac` use it. Any client with a token can run commands this way, as it could already approve the agent's. |
+| `shell_cancel` | `id` | `ack`. Stops that `shell` command's process group; its `shell_output` says `cancelled`. |
 | `control_permissions` | `request`? | `control`; also broadcast. With `request`, macOS shows its Screen Recording and Accessibility prompts and System Settings opens at the missing ones. |
 | `voice_listen` | `on` | `voice_listening` with this connection's `listener` id (null after `on: false`). A connection that plays speech says so; see [voice](#voice-and-shared-files). |
 | `keep_awake` | `mode`: `busy`, `always` or `off` | `ack`; broadcasts `awake` when it changes. Lasts until the daemon restarts; `daemon.keep_awake` is the default. |
@@ -214,6 +216,7 @@ Agent status changes arrive as events, not as `tab_updated`; a client keeps agen
 | `workspace_opened` | `client_ref`, `workspace`: WorkspaceView |
 | `jobs` | `client_ref`, `jobs`: [JobView] |
 | `job_output` | `client_ref`, `output`: `{job: JobInfo, text, size, truncated}` |
+| `shell_output` | `client_ref`, `id`, `output` (cut from the middle past 40,000 characters), `exit_code`? (absent when stopped or ended by a signal), `timed_out`, `cancelled`. Only the client that sent the `shell` gets it. |
 | `control` | `client_ref`, `control`: ControlStatus |
 | `voice_listening` | `client_ref`, `listener`: number or null |
 | `snapshot` | `client_ref` plus the snapshot fields |

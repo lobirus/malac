@@ -21,7 +21,7 @@ use malac_core::mcp::CONTROL_SERVER;
 use malac_core::message::Usage;
 use malac_core::permission::{Approver, Decision, Mode, PermissionRequest};
 use malac_core::provider::Provider;
-use malac_core::tools::truncate_chars;
+use malac_core::tools::{MAX_OUTPUT_CHARS, Outcome, truncate_chars, truncate_middle};
 use malac_core::{
     AgentHandle, AgentSnapshot, AgentSpec, AgentStatus, Block, Envelope, Host, Runtime, session,
     update,
@@ -48,6 +48,9 @@ const ATTACHED_ID: &str = "terminal";
 const OUTBOX: usize = 8192;
 /// How often the user's configuration files are checked for changes.
 const CONFIG_POLL: Duration = Duration::from_secs(2);
+/// Seconds a `shell` command may run, by default and at most, as for the `bash` tool.
+const SHELL_TIMEOUT: u64 = 120;
+const SHELL_MAX_TIMEOUT: u64 = 1800;
 
 /// Settings fixed when the daemon starts.
 #[derive(Debug, Clone)]
@@ -112,6 +115,8 @@ pub struct Hub {
     tunnel_status: Mutex<Option<TunnelStatus>>,
     listen: Mutex<Listen>,
     voice: Arc<Voice>,
+    /// `shell` commands still running, by their client's id, and what stops each.
+    shells: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 struct State {
@@ -226,6 +231,7 @@ impl Hub {
             tunnel_status: Mutex::new(None),
             listen: Mutex::default(),
             voice: Arc::default(),
+            shells: Mutex::default(),
         })
     }
 
@@ -862,6 +868,52 @@ impl Hub {
         self.find_tab(tab).with_context(|| format!("no tab {tab}"))
     }
 
+    /// Runs `command` in the tab's folder the way the `bash` tool does, with
+    /// this daemon's own folder first on `PATH`, so `malac` is this one.
+    async fn shell(
+        &self,
+        tab: &str,
+        id: String,
+        command: &str,
+        timeout: Option<u64>,
+    ) -> Result<ServerMessage> {
+        let cwd = self.tab(tab)?.1.cwd;
+        let timeout = timeout.unwrap_or(SHELL_TIMEOUT).clamp(1, SHELL_MAX_TIMEOUT);
+        let mut script = malac_core::tools::script_command(command, &cwd);
+        if let Some(bin) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let path =
+                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))?;
+            script.env("PATH", path);
+        }
+        let stop = Arc::new(Notify::new());
+        {
+            let mut shells = self.shells.lock().unwrap();
+            if shells.contains_key(&id) {
+                bail!("a shell command with id {id} is already running");
+            }
+            shells.insert(id.clone(), stop.clone());
+        }
+        let run = malac_core::tools::run_script(script, timeout, stop.notified()).await;
+        self.shells.lock().unwrap().remove(&id);
+        let run = run?;
+        let exit_code = match run.outcome {
+            Outcome::Exited(code) => code,
+            Outcome::TimedOut | Outcome::Cancelled => None,
+        };
+        Ok(ServerMessage::ShellOutput {
+            client_ref: None,
+            id,
+            output: truncate_middle(&run.output, MAX_OUTPUT_CHARS),
+            exit_code,
+            timed_out: run.outcome == Outcome::TimedOut,
+            cancelled: run.outcome == Outcome::Cancelled,
+        })
+    }
+
     /// Resolves an id, a unique id prefix or a name.
     fn resolve_workspace(&self, selector: &str) -> Result<WorkspaceId> {
         let state = self.state.lock().unwrap();
@@ -1455,6 +1507,18 @@ impl Hub {
             },
             Command::JobKill { job } => {
                 self.host.jobs.kill(&job)?;
+                self.ack(None, None)
+            }
+            Command::Shell {
+                tab,
+                id,
+                command,
+                timeout,
+            } => self.shell(&tab, id, &command, timeout).await?,
+            Command::ShellCancel { id } => {
+                if let Some(stop) = self.shells.lock().unwrap().get(&id) {
+                    stop.notify_one();
+                }
                 self.ack(None, None)
             }
             Command::ControlPermissions { request } => {

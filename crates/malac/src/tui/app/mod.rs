@@ -56,14 +56,26 @@ mod actions;
 mod backend;
 mod input;
 mod mouse;
+mod shell;
 mod voice;
 
 pub use actions::Action;
 pub use backend::{Backend, Connection, Reply, Rest};
+pub use shell::ShellResult;
 
 /// Commands only the full-screen interface has, completed with the rest.
 pub const TUI_COMMANDS: &[(&str, &str, &str)] = &[
     ("cd", "[dir]", "work in another folder, in a new tab"),
+    (
+        "bash",
+        "<command>",
+        "run a shell command in this tab's folder (also !command)",
+    ),
+    (
+        "malac",
+        "<command>",
+        "run one of malac's own commands, e.g. /malac models",
+    ),
     ("jobs", "", "background processes the agents started"),
     (
         "root",
@@ -183,6 +195,11 @@ pub struct Tab {
     pub creating: bool,
     /// The folder's layout and custom commands, once the daemon loaded it.
     pub project: Option<Summary>,
+    /// A view of this terminal's `/bash` runs, shown while the tab has no
+    /// agent; never a target for commands.
+    pub shell_view: Option<AgentId>,
+    /// This terminal's `/bash` runs in the tab that have not ended.
+    pub shells: Vec<String>,
 }
 
 /// A prompt on its way: what was typed and what was attached.
@@ -228,6 +245,8 @@ impl Tab {
             sending: false,
             creating: false,
             project: None,
+            shell_view: None,
+            shells: Vec::new(),
         }
     }
 
@@ -302,6 +321,12 @@ pub enum Update {
         root: PathBuf,
         list: Vec<String>,
     },
+    /// A folder's subfolders, for `/cd` completion.
+    Folders {
+        dir: String,
+        hidden: bool,
+        names: Result<Vec<(String, bool)>, String>,
+    },
     /// The clipboard's image, saved to a file.
     Pasted(Result<Attachment, String>),
     /// Reconnecting gave up, with why.
@@ -371,6 +396,18 @@ pub struct FileIndex {
     pub loading: bool,
 }
 
+/// The subfolders `/cd` completes from: one folder's, as last listed.
+#[derive(Debug, Default)]
+pub struct FolderList {
+    /// The folder as asked for: a path on the daemon's machine, `~/…` for a
+    /// daemon elsewhere.
+    pub dir: String,
+    /// Whether folders whose names start with a dot were asked for.
+    pub hidden: bool,
+    /// Names and whether each holds a repository; `None` while listing.
+    pub names: Option<Vec<(String, bool)>>,
+}
+
 /// Which agents view F3 opens: the last one used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentsView {
@@ -430,6 +467,10 @@ pub struct App {
     pub focus: Focus,
     pub completion: usize,
     pub completion_dismissed: bool,
+    /// The highlight was moved with the arrow keys since the last edit, so
+    /// Enter takes the highlighted folder instead of the typed path.
+    pub completion_moved: bool,
+    pub folders: FolderList,
     pub approvals: VecDeque<Approval>,
     pub approvals_hidden: bool,
     pub overlay: Option<Overlay>,
@@ -544,6 +585,8 @@ impl App {
             focus: Focus::Input,
             completion: 0,
             completion_dismissed: false,
+            completion_moved: false,
+            folders: FolderList::default(),
             approvals: VecDeque::new(),
             approvals_hidden: false,
             overlay: None,
@@ -840,12 +883,49 @@ impl App {
     }
 
     /// Slash commands matching what is typed, while the command name is
-    /// typed: the built-in ones, then the tab's own.
+    /// typed: the built-in ones, then the tab's own. After `/cd `, the
+    /// folders matching the path typed so far.
     pub fn completions(&self) -> Vec<Completion> {
         if self.completion_dismissed || self.focus != Focus::Input {
             return Vec::new();
         }
-        completions(self.editor.text(), self.tab().commands())
+        let text = self.editor.text();
+        if let Some(path) = cd_path(text) {
+            let (parent, prefix) = split_path(path);
+            let folders = &self.folders;
+            if folders.dir != self.cd_folder(parent) || folders.hidden != prefix.starts_with('.') {
+                return Vec::new();
+            }
+            return folder_completions(
+                parent,
+                prefix,
+                folders.names.as_deref().unwrap_or_default(),
+            );
+        }
+        if let Some(line) = text.strip_prefix("/malac ") {
+            return malac_completions(line);
+        }
+        completions(text, self.tab().commands())
+    }
+
+    /// Where the folder part of a `/cd` path is, for listing it: `~` and
+    /// relative paths resolved here, except `~` for a daemon elsewhere,
+    /// which resolves it to its own home.
+    pub fn cd_folder(&self, parent: &str) -> String {
+        let parent = match parent.trim_end_matches('/') {
+            "" if parent.starts_with('/') => "/",
+            trimmed => trimmed,
+        };
+        let path = match (parent.strip_prefix('~'), dirs_home()) {
+            (Some(_), _) if self.connection_name().is_some() => PathBuf::from(parent),
+            (Some(rest), Some(home)) => match rest.trim_start_matches('/') {
+                "" => PathBuf::from(home),
+                rest => Path::new(&home).join(rest),
+            },
+            _ if parent.is_empty() => self.tab_cwd(),
+            _ => self.tab_cwd().join(parent),
+        };
+        path.display().to_string()
     }
 
     /// The `@` being typed before the cursor and the query after it.
@@ -1431,6 +1511,7 @@ impl App {
                     self.files.loading = false;
                 }
             }
+            Update::Folders { dir, hidden, names } => self.listed_folders(dir, hidden, names),
             Update::Pasted(Ok(image)) => {
                 self.attachments.push(image);
                 self.flash_ok("attached the clipboard image");
@@ -1679,6 +1760,9 @@ pub struct Completion {
     /// Where a custom command comes from (`project`, `user`, `plugin <id>`,
     /// `skill`); `None` for the built-in ones.
     pub source: Option<String>,
+    /// For a folder `/cd` completes, its name: the row shows it instead of
+    /// `/name`, and Enter keeps the typed path unless this one was picked.
+    pub folder: Option<String>,
 }
 
 impl Completion {
@@ -1692,6 +1776,7 @@ impl Completion {
                 args: (*args).to_owned(),
                 help: (*help).to_owned(),
                 source: None,
+                folder: None,
             })
             .collect();
         for command in custom {
@@ -1701,12 +1786,102 @@ impl Completion {
                     args: command.argument_hint.clone().unwrap_or_default(),
                     help: command.description.clone(),
                     source: Some(command.source.clone()),
+                    folder: None,
                 });
             }
         }
         all
     }
 }
+
+/// malac's commands matching what follows `/malac `: their names, then
+/// the subcommands of the one typed.
+pub fn malac_completions(line: &str) -> Vec<Completion> {
+    let line = line.trim_start();
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    let prefix = match line.ends_with(char::is_whitespace) {
+        true => "",
+        false => words.pop().unwrap_or_default(),
+    };
+    let parent = match words.as_slice() {
+        [] => None,
+        [command] => Some(*command),
+        _ => return Vec::new(),
+    };
+    crate::cli::command_help()
+        .iter()
+        .filter(|c| match (parent, c.path.split_once(' ')) {
+            (None, None) => c.path.starts_with(prefix),
+            (Some(parent), Some((command, sub))) => command == parent && sub.starts_with(prefix),
+            _ => false,
+        })
+        .map(|c| Completion {
+            name: format!("malac {}", c.path),
+            args: c.args.clone(),
+            help: c.about.clone(),
+            source: None,
+            folder: None,
+        })
+        .collect()
+}
+
+/// The path typed after `/cd `.
+pub fn cd_path(input: &str) -> Option<&str> {
+    input.strip_prefix("/cd ").map(str::trim_start)
+}
+
+/// A typed path's folder part, up to and with its last `/`, and the start
+/// of the name after it.
+pub fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(slash) => path.split_at(slash + 1),
+        None => ("", path),
+    }
+}
+
+/// The folders of `names` (subfolders of `parent`) whose names start with
+/// `prefix`, ignoring case, as `/cd` completions of `parent` plus the name.
+pub fn folder_completions(parent: &str, prefix: &str, names: &[(String, bool)]) -> Vec<Completion> {
+    let prefix = prefix.to_lowercase();
+    names
+        .iter()
+        .filter(|(name, _)| name.to_lowercase().starts_with(&prefix))
+        .map(|(name, repository)| Completion {
+            name: format!("cd {parent}{name}/"),
+            args: String::new(),
+            help: if *repository {
+                "repository".into()
+            } else {
+                String::new()
+            },
+            source: None,
+            folder: Some(format!("{name}/")),
+        })
+        .collect()
+}
+
+/// A folder's subfolders on this machine, for `/cd` completion: names, and
+/// whether each holds a repository, in name order. Names starting with a
+/// dot only with `hidden`.
+pub fn list_folders(dir: &Path, hidden: bool) -> Result<Vec<(String, bool)>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut names: Vec<(String, bool)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            // Symbolic links count as what they point to.
+            let folder = (hidden || !name.starts_with('.')) && path.is_dir();
+            folder.then(|| (name, path.join(".git").exists()))
+        })
+        .take(MAX_FOLDERS)
+        .collect();
+    names.sort_by_key(|(name, _)| name.to_lowercase());
+    Ok(names)
+}
+
+/// The most subfolders `/cd` completes from, as the daemon's listing allows.
+const MAX_FOLDERS: usize = 1000;
 
 pub fn completions(input: &str, custom: &[CommandInfo]) -> Vec<Completion> {
     let Some(prefix) = input.strip_prefix('/') else {

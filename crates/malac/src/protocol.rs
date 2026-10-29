@@ -152,6 +152,22 @@ pub enum Command {
         job: String,
     },
 
+    /// Runs a shell command in a tab's folder on the daemon's machine, as
+    /// `/bash` does in the terminal UI, and answers with `shell_output` once
+    /// it ends. `id` is the client's, for `shell_cancel`.
+    Shell {
+        tab: TabId,
+        id: String,
+        command: String,
+        /// Seconds before it is stopped; default 120, at most 1800.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
+    },
+    /// Stops a `shell` command that is still running.
+    ShellCancel {
+        id: String,
+    },
+
     /// Reports the control service's permissions; with `request`, asks
     /// macOS for missing ones.
     ControlPermissions {
@@ -366,6 +382,21 @@ pub enum ServerMessage {
         client_ref: Option<String>,
         output: Box<JobOutput>,
     },
+    /// How a `shell` command ended; only its sender gets it.
+    ShellOutput {
+        #[serde(default)]
+        client_ref: Option<String>,
+        id: String,
+        /// Stdout and stderr together, cut from the middle past 40,000 characters.
+        output: String,
+        /// `None` when it did not exit on its own, or a signal ended it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        timed_out: bool,
+        #[serde(default)]
+        cancelled: bool,
+    },
     Control {
         #[serde(default)]
         client_ref: Option<String>,
@@ -457,6 +488,7 @@ impl ServerMessage {
             | ServerMessage::WorkspaceOpened { client_ref, .. }
             | ServerMessage::Jobs { client_ref, .. }
             | ServerMessage::JobOutput { client_ref, .. }
+            | ServerMessage::ShellOutput { client_ref, .. }
             | ServerMessage::Control { client_ref, .. }
             | ServerMessage::VoiceListening { client_ref, .. } => client_ref.as_deref(),
             _ => None,
@@ -475,6 +507,7 @@ impl ServerMessage {
             | ServerMessage::WorkspaceOpened { client_ref, .. }
             | ServerMessage::Jobs { client_ref, .. }
             | ServerMessage::JobOutput { client_ref, .. }
+            | ServerMessage::ShellOutput { client_ref, .. }
             | ServerMessage::Control { client_ref, .. }
             | ServerMessage::VoiceListening { client_ref, .. } => *client_ref = reference,
             _ => {}

@@ -110,16 +110,74 @@ async fn run_foreground(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> 
         .as_u64()
         .unwrap_or(DEFAULT_TIMEOUT)
         .clamp(1, MAX_TIMEOUT);
-
-    let mut child = shell_command(
-        &format!("exec 2>&1\n{}{script}", ctx.env.exports()),
-        &ctx.cwd,
+    let script = format!("{}{script}", ctx.env.exports());
+    let run = run_script(
+        script_command(&script, &ctx.cwd),
+        timeout,
+        ctx.cancel.cancelled(),
     )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .kill_on_drop(true)
-    .spawn()
-    .context("failed to start shell")?;
+    .await?;
+    let mut output = ToolOutput::text(run.report(timeout));
+    output.is_error = run.outcome != Outcome::Exited(Some(0));
+    Ok(output)
+}
+
+/// What a script printed, stdout and stderr together and at most
+/// `MAX_CAPTURE` bytes of it, and how it ended.
+pub struct ScriptRun {
+    pub output: String,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// With the exit code; `None` when a signal ended it.
+    Exited(Option<i32>),
+    TimedOut,
+    Cancelled,
+}
+
+impl ScriptRun {
+    /// The output as the `bash` tool reports it: how it ended on a last line
+    /// unless it succeeded, and "(no output)" for none.
+    pub fn report(&self, timeout: u64) -> String {
+        let mut text = self.output.clone();
+        match self.outcome {
+            Outcome::Exited(Some(0)) => {}
+            Outcome::Exited(code) => {
+                let code = code.map_or("signal".to_owned(), |c| c.to_string());
+                text.push_str(&format!("\n[exit code {code}]"));
+            }
+            Outcome::TimedOut => text.push_str(&format!("\n[killed after {timeout}s timeout]")),
+            Outcome::Cancelled => text.push_str("\n[cancelled]"),
+        }
+        if text.trim().is_empty() {
+            text = "(no output)".into();
+        }
+        text
+    }
+}
+
+/// A shell running `script` in `cwd` for [`run_script`], with its stderr
+/// sent to stdout so the output reads in order.
+pub fn script_command(script: &str, cwd: &std::path::Path) -> Command {
+    shell_command(&format!("exec 2>&1\n{script}"), cwd)
+}
+
+/// Runs a shell from [`script_command`] the way the `bash` tool does,
+/// killing its whole process group after `timeout` seconds or once
+/// `cancelled` completes.
+pub async fn run_script(
+    mut command: Command,
+    timeout: u64,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> Result<ScriptRun> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to start shell")?;
     let pid = child.id();
 
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -141,7 +199,7 @@ async fn run_foreground(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> 
     let outcome = tokio::select! {
         status = child.wait() => Outcome::Exited(status?.code()),
         _ = tokio::time::sleep(Duration::from_secs(timeout)) => Outcome::TimedOut,
-        _ = ctx.cancel.cancelled() => Outcome::Cancelled,
+        _ = cancelled => Outcome::Cancelled,
     };
     if !matches!(outcome, Outcome::Exited(_)) {
         kill_group(pid);
@@ -152,35 +210,10 @@ async fn run_foreground(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> 
     }
 
     let bytes = std::mem::take(&mut *captured.lock().unwrap());
-    let mut text = String::from_utf8_lossy(&bytes).trim_end().to_owned();
-    let is_error = match outcome {
-        Outcome::Exited(Some(0)) => false,
-        Outcome::Exited(code) => {
-            let code = code.map_or("signal".to_owned(), |c| c.to_string());
-            text.push_str(&format!("\n[exit code {code}]"));
-            true
-        }
-        Outcome::TimedOut => {
-            text.push_str(&format!("\n[killed after {timeout}s timeout]"));
-            true
-        }
-        Outcome::Cancelled => {
-            text.push_str("\n[cancelled]");
-            true
-        }
-    };
-    if text.trim().is_empty() {
-        text = "(no output)".into();
-    }
-    let mut output = ToolOutput::text(text);
-    output.is_error = is_error;
-    Ok(output)
-}
-
-enum Outcome {
-    Exited(Option<i32>),
-    TimedOut,
-    Cancelled,
+    Ok(ScriptRun {
+        output: String::from_utf8_lossy(&bytes).trim_end().to_owned(),
+        outcome,
+    })
 }
 
 async fn run_background(input: &Value, ctx: &ToolContext) -> Result<ToolOutput> {

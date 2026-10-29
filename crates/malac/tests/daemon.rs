@@ -811,3 +811,98 @@ async fn a_new_provider_needs_no_reload() {
     hub.request_stop("done");
     server.await.unwrap().unwrap();
 }
+
+/// `/bash` in the terminal UI: a shell command runs in the tab's folder and
+/// answers once it ends, without holding up the connection's other commands.
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_commands_run_in_the_tab_folder() {
+    let _guard = exclusive().await;
+    let daemon = start_daemon(Scripted::new(Vec::new()), false).await;
+    let file = daemon.file().clone();
+    let hub = daemon.hub().clone();
+    let server = tokio::spawn(daemon.run());
+    let (client, _events, _) = Client::connect(&file).await.unwrap();
+    let client = std::sync::Arc::new(client);
+    let project = project(&[("notes.txt", "hello from the tab\n")]);
+    let launched = client
+        .launch(malac::protocol::Launch {
+            workspace: malac::protocol::WorkspaceChoice::New,
+            cwd: project.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let tab = launched.tab.unwrap();
+
+    let shell = |id: &str, command: &str| Command::Shell {
+        tab: tab.clone(),
+        id: id.into(),
+        command: command.into(),
+        timeout: None,
+    };
+    // Stderr reads in order with stdout; the exit code comes along.
+    let reply = client
+        .request(shell("s1", "cat notes.txt; echo oops >&2; exit 3"))
+        .await
+        .unwrap();
+    let ServerMessage::ShellOutput {
+        id,
+        output,
+        exit_code,
+        timed_out,
+        cancelled,
+        ..
+    } = reply
+    else {
+        panic!("shell_output expected, got {reply:?}");
+    };
+    assert_eq!(id, "s1");
+    assert_eq!(output, "hello from the tab\noops");
+    assert_eq!(exit_code, Some(3));
+    assert!(!timed_out && !cancelled);
+
+    // A long command leaves the connection free, and stops when asked.
+    let running = {
+        let (client, command) = (client.clone(), shell("s2", "sleep 30"));
+        tokio::spawn(async move { client.request(command).await })
+    };
+    let started = std::time::Instant::now();
+    client.request(Command::Ping).await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the connection answers while the command runs"
+    );
+    let reply = loop {
+        client
+            .request(Command::ShellCancel { id: "s2".into() })
+            .await
+            .unwrap();
+        if running.is_finished() {
+            break running.await.unwrap().unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert!(
+        matches!(
+            reply,
+            ServerMessage::ShellOutput {
+                cancelled: true,
+                exit_code: None,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+
+    let unknown = Command::Shell {
+        tab: "no-such-tab".into(),
+        id: "s3".into(),
+        command: "true".into(),
+        timeout: None,
+    };
+    assert!(client.request(unknown).await.is_err());
+
+    hub.request_stop("done");
+    server.await.unwrap().unwrap();
+}

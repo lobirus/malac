@@ -715,6 +715,300 @@ async fn a_refused_prompt_comes_back_to_the_editor() {
     assert!(render(&mut app, 90, 24).contains("cannot attach missing.txt"));
 }
 
+/// What the completion popup lists, as typed into it.
+fn completion_names(app: &App) -> Vec<String> {
+    app.completions().into_iter().map(|c| c.name).collect()
+}
+
+/// Answers the `/cd` listing the interface asked for with these folders.
+fn list_folders_for(app: &mut App, names: &[(&str, bool)]) {
+    let names = names
+        .iter()
+        .map(|(n, git)| ((*n).to_owned(), *git))
+        .collect();
+    let (dir, hidden) = (app.folders.dir.clone(), app.folders.hidden);
+    app.on_update(Update::Folders {
+        dir,
+        hidden,
+        names: Ok(names),
+    });
+}
+
+#[tokio::test]
+async fn cd_completes_folders() {
+    let mut app = app();
+    let cwd = app.tab_cwd();
+    type_text(&mut app, "/cd ");
+    assert_eq!(app.folders.dir, cwd.display().to_string());
+    assert!(
+        app.completions().is_empty(),
+        "nothing until the folder is listed"
+    );
+    list_folders_for(&mut app, &[("api", true), ("app", false), ("docs", false)]);
+    assert_eq!(completion_names(&app), ["cd api/", "cd app/", "cd docs/"]);
+    let frame = render(&mut app, 90, 24);
+    assert!(
+        frame.contains("api/") && frame.contains("repository"),
+        "{frame}"
+    );
+
+    // Typing narrows the list, ignoring case; Tab fills in the folder and lists it.
+    type_text(&mut app, "A");
+    assert_eq!(completion_names(&app), ["cd api/", "cd app/"]);
+    key(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.editor.text(), "/cd api/");
+    assert_eq!(app.folders.dir, cwd.join("api").display().to_string());
+    list_folders_for(&mut app, &[("src", false), ("tests", false)]);
+    assert_eq!(completion_names(&app), ["cd api/src/", "cd api/tests/"]);
+
+    // Enter opens what is typed, like a shell, not the first suggestion.
+    let action = app.on_key(press(KeyCode::Enter), false).unwrap();
+    assert_eq!(action, Action::OpenFolder(cwd.join("api/")));
+
+    // Unless a folder was picked with the arrows.
+    type_text(&mut app, "/cd api/");
+    list_folders_for(&mut app, &[("src", false), ("tests", false)]);
+    app.on_key(press(KeyCode::Down), false);
+    let action = app.on_key(press(KeyCode::Enter), false).unwrap();
+    assert_eq!(action, Action::OpenFolder(cwd.join("api/tests/")));
+}
+
+#[tokio::test]
+async fn cd_lists_hidden_folders_only_when_asked() {
+    let mut app = app();
+    type_text(&mut app, "/cd ");
+    assert!(!app.folders.hidden);
+    type_text(&mut app, ".");
+    assert!(
+        app.folders.hidden,
+        "a name starting with a dot lists hidden folders"
+    );
+    list_folders_for(&mut app, &[(".config", false), ("src", false)]);
+    assert_eq!(completion_names(&app), ["cd .config/"]);
+}
+
+#[test]
+fn cd_reads_local_folders() {
+    let dir = std::env::temp_dir().join(format!("malac-cd-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("Beta/.git")).unwrap();
+    std::fs::create_dir_all(dir.join("alpha")).unwrap();
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::write(dir.join("file.txt"), "").unwrap();
+    let names = super::app::list_folders(&dir, false).unwrap();
+    assert_eq!(
+        names,
+        [("alpha".to_owned(), false), ("Beta".to_owned(), true)]
+    );
+    let names = super::app::list_folders(&dir, true).unwrap();
+    assert_eq!(names.len(), 3);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn cd_asks_a_remote_daemon_for_its_folders() {
+    let mut app = app();
+    remote(&mut app);
+    app.backend.rests.lock().unwrap().clear();
+    type_text(&mut app, "/cd ~/sr");
+    let asked: Vec<Rest> = std::mem::take(&mut *app.backend.rests.lock().unwrap());
+    let dirs: Vec<String> = asked
+        .into_iter()
+        .filter_map(|r| match r {
+            Rest::Folders { dir, .. } => Some(dir),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dirs.last().map(String::as_str), Some("~"), "{dirs:?}");
+    let listing = json!({"entries": [
+        {"name": "src", "kind": "directory", "markers": [".git"]},
+        {"name": "srv", "kind": "directory", "markers": []},
+        {"name": "srt.txt", "kind": "file", "markers": []},
+    ]});
+    app.on_update(Update::Rest(
+        Rest::Folders {
+            dir: "~".into(),
+            hidden: false,
+        },
+        Ok(listing),
+    ));
+    assert_eq!(completion_names(&app), ["cd ~/src/", "cd ~/srv/"]);
+}
+
+/// The daemon's answer to a `/bash` command whose card is in `view`.
+fn shell_output(app: &mut App, view: &str, id: &str, command: &str, output: &str, code: i32) {
+    let reply = Reply::Shell {
+        tab: TAB.into(),
+        view: view.into(),
+        id: id.into(),
+        command: command.into(),
+        attach: true,
+    };
+    let message = ServerMessage::ShellOutput {
+        client_ref: None,
+        id: id.into(),
+        output: output.into(),
+        exit_code: Some(code),
+        timed_out: false,
+        cancelled: false,
+    };
+    app.on_update(Update::Reply(reply, Ok(message)));
+}
+
+#[tokio::test]
+async fn bang_runs_a_shell_command_and_attaches_its_output() {
+    let mut app = app();
+    sent(&app);
+    type_text(&mut app, "!cargo test");
+    assert_eq!(app.on_key(press(KeyCode::Enter), false), None);
+    let Some(Command::Shell {
+        tab,
+        id,
+        command,
+        timeout,
+    }) = sent(&app).pop()
+    else {
+        panic!("a shell command");
+    };
+    assert_eq!((tab.as_str(), command.as_str()), (TAB, "cargo test"));
+    assert_eq!(timeout, Some(120));
+    assert!(app.editor.is_empty());
+    assert!(render(&mut app, 90, 24).contains("$ cargo test"));
+
+    // Esc stops it, as it stops a turn.
+    let action = app.on_key(press(KeyCode::Esc), false).unwrap();
+    assert_eq!(action, Action::Stop);
+    app.perform(action).await;
+    let stopped = sent(&app);
+    assert!(
+        matches!(stopped.as_slice(), [Command::ShellCancel { id: s }] if *s == id),
+        "{stopped:?}"
+    );
+
+    shell_output(&mut app, AGENT, &id, "cargo test", "1 failed", 101);
+    let frame = render(&mut app, 90, 24);
+    assert!(
+        frame.contains("1 failed") && frame.contains("[exit code 101]"),
+        "{frame}"
+    );
+    assert!(app.tab().shells.is_empty());
+    // Its output goes along with the next prompt, as a file the chip stands for.
+    assert_eq!(app.attachments.len(), 1);
+    assert_eq!(app.attachments[0].name, "$ cargo test");
+    let saved = std::fs::read_to_string(&app.attachments[0].path).unwrap();
+    assert_eq!(saved, "$ cargo test\n1 failed\n[exit code 101]\n");
+}
+
+#[tokio::test]
+async fn bash_in_a_tab_without_an_agent_shows_its_own_view() {
+    let mut app = app_with(snapshot(), workspace(vec![tab(TAB, "project", &[])]));
+    assert!(
+        render(&mut app, 90, 24).contains("Describe a task"),
+        "the welcome screen"
+    );
+    sent(&app);
+    type_text(&mut app, "/bash ls");
+    app.on_key(press(KeyCode::Enter), false);
+    let Some(Command::Shell { id, .. }) = sent(&app).pop() else {
+        panic!("a shell command");
+    };
+    let view = app.tab().shell_view.clone().expect("a view of its own");
+    assert!(
+        app.tab().shown().is_none(),
+        "commands still go to a new agent"
+    );
+    shell_output(&mut app, &view, &id, "ls", "notes.txt", 0);
+    let frame = render(&mut app, 90, 24);
+    assert!(
+        frame.contains("$ ls") && frame.contains("notes.txt"),
+        "{frame}"
+    );
+    assert!(!frame.contains("[exit code"), "a command that succeeded");
+}
+
+#[tokio::test]
+async fn slash_malac_completes_and_runs_malac_commands() {
+    let mut app = app();
+    sent(&app);
+    type_text(&mut app, "/malac prov");
+    assert_eq!(completion_names(&app), ["malac provider"]);
+    key(&mut app, KeyCode::Tab).await;
+    assert_eq!(
+        app.editor.text(),
+        "/malac provider ",
+        "a command that takes more"
+    );
+    let subcommands = completion_names(&app);
+    assert!(
+        subcommands.contains(&"malac provider list".to_owned()),
+        "{subcommands:?}"
+    );
+    type_text(&mut app, "li");
+    assert_eq!(completion_names(&app), ["malac provider list"]);
+    app.on_key(press(KeyCode::Enter), false);
+    let Some(Command::Shell { command, .. }) = sent(&app).pop() else {
+        panic!("a shell command");
+    };
+    assert_eq!(command, "malac provider list");
+
+    // Arguments are passed on quoted, exactly as checked.
+    type_text(&mut app, "/malac sessions show 'my session'");
+    app.on_key(press(KeyCode::Esc), false);
+    app.on_key(press(KeyCode::Enter), false);
+    let Some(Command::Shell { command, id, .. }) = sent(&app).pop() else {
+        panic!("a shell command");
+    };
+    assert_eq!(command, "malac sessions show 'my session'");
+
+    // Its output stays on its card.
+    let reply = Reply::Shell {
+        tab: TAB.into(),
+        view: AGENT.into(),
+        id: id.clone(),
+        command,
+        attach: false,
+    };
+    let message = ServerMessage::ShellOutput {
+        client_ref: None,
+        id,
+        output: "no such session".into(),
+        exit_code: Some(1),
+        timed_out: false,
+        cancelled: false,
+    };
+    app.on_update(Update::Reply(reply, Ok(message)));
+    assert!(render(&mut app, 90, 24).contains("no such session"));
+    assert!(app.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn slash_malac_refuses_prompts_and_terminal_commands() {
+    let mut app = app();
+    sent(&app);
+    for (line, says) in [
+        ("/malac fix the tests", "not a malac command"),
+        ("/malac voice talk", "/talk"),
+        ("/malac daemon restart", "Connection menu"),
+        ("/malac models 'oops", "quote"),
+    ] {
+        type_text(&mut app, line);
+        app.on_key(press(KeyCode::Esc), false);
+        app.on_key(press(KeyCode::Enter), false);
+        assert!(sent(&app).is_empty(), "{line} must not run");
+        let frame = render(&mut app, 100, 24);
+        assert!(frame.contains(says), "{line}: {frame}");
+    }
+}
+
+#[tokio::test]
+async fn bash_needs_a_command() {
+    let mut app = app();
+    sent(&app);
+    type_text(&mut app, "/bash");
+    app.on_key(press(KeyCode::Enter), false);
+    assert!(sent(&app).is_empty());
+    assert!(render(&mut app, 90, 24).contains("type a command"));
+}
+
 #[tokio::test]
 async fn choosing_a_folder_opens_a_tab_there() {
     let mut app = app();

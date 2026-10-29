@@ -748,22 +748,23 @@ async fn client_socket(
             continue;
         };
         let reply = match serde_json::from_str::<ClientRequest>(text.as_str()) {
+            // A shell command can run for minutes: it answers once it ends,
+            // while this connection's other commands go on.
+            Ok(request) if matches!(request.command, Command::Shell { .. }) => {
+                let (hub, replies) = (hub.clone(), reply_tx.clone());
+                tokio::spawn(async move {
+                    let result = hub.execute(&mut Conn::default(), request.command).await;
+                    if let Some(reply) = reply_to(request.client_ref, result) {
+                        if let Ok(text) = serde_json::to_string(&reply) {
+                            let _ = replies.send(text);
+                        }
+                    }
+                });
+                continue;
+            }
             Ok(request) => {
-                let reference = request.client_ref.clone();
-                match hub.execute(&mut conn, request.command).await {
-                    Ok(Some(reply)) => Some(reply.answering(reference)),
-                    Ok(None) => reference.map(|r| ServerMessage::Ack {
-                        client_ref: Some(r),
-                        agent: None,
-                        tab: None,
-                        workspace: None,
-                        attachments: Vec::new(),
-                    }),
-                    Err(err) => Some(ServerMessage::Error {
-                        client_ref: reference,
-                        message: format!("{err:#}"),
-                    }),
-                }
+                let result = hub.execute(&mut conn, request.command).await;
+                reply_to(request.client_ref, result)
             }
             Err(err) => Some(ServerMessage::Error {
                 client_ref: None,
@@ -786,6 +787,28 @@ async fn client_socket(
     let abort = writer.abort_handle();
     let _ = tokio::time::timeout(std::time::Duration::from_millis(200), writer).await;
     abort.abort();
+}
+
+/// What a WebSocket request is answered with: its reply, an ack when it has
+/// none but was sent with a reference, or its error.
+fn reply_to(
+    reference: Option<String>,
+    result: anyhow::Result<Option<ServerMessage>>,
+) -> Option<ServerMessage> {
+    match result {
+        Ok(Some(reply)) => Some(reply.answering(reference)),
+        Ok(None) => reference.map(|r| ServerMessage::Ack {
+            client_ref: Some(r),
+            agent: None,
+            tab: None,
+            workspace: None,
+            attachments: Vec::new(),
+        }),
+        Err(err) => Some(ServerMessage::Error {
+            client_ref: reference,
+            message: format!("{err:#}"),
+        }),
+    }
 }
 
 fn open_browser(url: &str) {

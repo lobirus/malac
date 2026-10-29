@@ -61,6 +61,15 @@ pub enum Reply {
     Approve,
     /// `voice_listen`: this connection's listener id.
     Listen,
+    /// A `/bash` or `/malac` command, and where its card is; with
+    /// `attach`, its output goes along with the next prompt.
+    Shell {
+        tab: TabId,
+        view: AgentId,
+        id: String,
+        command: String,
+        attach: bool,
+    },
 }
 
 /// The sentences the daemon called off, and the one playing now.
@@ -80,6 +89,11 @@ pub enum Rest {
     /// The `@` index of a folder on the daemon's machine.
     Files {
         root: PathBuf,
+    },
+    /// The subfolders `/cd` completes from, on the daemon's machine.
+    Folders {
+        dir: String,
+        hidden: bool,
     },
     Sessions,
     Models,
@@ -202,6 +216,18 @@ impl Backend {
             path,
             Rest::Files {
                 root: root.to_owned(),
+            },
+        );
+    }
+
+    /// Asks the daemon for a folder's subfolders on its machine.
+    pub fn folders(&self, dir: &str, hidden: bool) {
+        let path = format!("/api/fs?path={}&hidden={hidden}", query(dir));
+        self.get(
+            path,
+            Rest::Folders {
+                dir: dir.to_owned(),
+                hidden,
             },
         );
     }
@@ -791,6 +817,30 @@ impl App {
             (Reply::Listen, ServerMessage::VoiceListening { listener, .. }) => {
                 self.listened(listener);
             }
+            (
+                Reply::Shell {
+                    tab,
+                    view,
+                    id,
+                    command,
+                    attach,
+                },
+                ServerMessage::ShellOutput {
+                    output,
+                    exit_code,
+                    timed_out,
+                    cancelled,
+                    ..
+                },
+            ) => {
+                let result = ShellResult {
+                    output,
+                    exit_code,
+                    timed_out,
+                    cancelled,
+                };
+                self.shell_ended((&tab, &view, &id, &command, attach), Ok(result));
+            }
             (Reply::Control, ServerMessage::Control { control, .. }) => {
                 self.control = control;
                 match self.control_issue() {
@@ -820,6 +870,13 @@ impl App {
             // Speech stays off here; `/voice` says why when asked.
             Reply::Listen => self.listened(None),
             Reply::JobOutput { .. } => {}
+            Reply::Shell {
+                tab,
+                view,
+                id,
+                command,
+                attach,
+            } => self.shell_ended((&tab, &view, &id, &command, attach), Err(err)),
             Reply::TabCreated { placeholder: true } => {
                 for tab in &mut self.tabs {
                     tab.creating = false;
@@ -896,6 +953,23 @@ impl App {
                     self.files.list = Some(index.files);
                     self.files.loading = false;
                 }
+            }
+            (Rest::Folders { dir, hidden }, result) => {
+                // `GET /api/fs`: `entries` with `name`, `kind` and `markers`.
+                let names = result.map(|listing| {
+                    let entries = listing["entries"].as_array().cloned().unwrap_or_default();
+                    entries
+                        .iter()
+                        .filter(|e| e["kind"] == "directory")
+                        .filter_map(|e| {
+                            let name = e["name"].as_str()?.to_owned();
+                            let markers = e["markers"].as_array();
+                            let repository = markers.is_some_and(|m| m.iter().any(|m| m == ".git"));
+                            Some((name, repository))
+                        })
+                        .collect()
+                });
+                self.listed_folders(dir, hidden, names);
             }
             (Rest::History { agent }, result) => {
                 // A new agent has no saved conversation yet.
@@ -1114,6 +1188,48 @@ impl App {
         }
         dirs.retain(|d| *d != self.tab_cwd());
         dirs
+    }
+
+    /// Lists the folder whose subfolders `/cd` completes, in the background,
+    /// unless it is already listed or being listed.
+    pub(super) fn list_cd_folder(&mut self) {
+        let Some(path) = cd_path(self.editor.text()) else {
+            return;
+        };
+        let (parent, prefix) = split_path(path);
+        let dir = self.cd_folder(parent);
+        let hidden = prefix.starts_with('.');
+        if self.folders.dir == dir && self.folders.hidden == hidden {
+            return;
+        }
+        self.folders = FolderList {
+            dir: dir.clone(),
+            hidden,
+            names: None,
+        };
+        // The folder is on the daemon's machine.
+        if self.backend.is_remote() {
+            self.backend.folders(&dir, hidden);
+            return;
+        }
+        let updates = self.backend.updates();
+        std::thread::spawn(move || {
+            let names = list_folders(Path::new(&dir), hidden);
+            let _ = updates.send(Update::Folders { dir, hidden, names });
+        });
+    }
+
+    /// Keeps a listing `/cd` asked for; a folder that cannot be listed (gone,
+    /// unreadable, outside what the daemon lists) just completes nothing.
+    pub(super) fn listed_folders(
+        &mut self,
+        dir: String,
+        hidden: bool,
+        names: Result<Vec<(String, bool)>, String>,
+    ) {
+        if self.folders.dir == dir && self.folders.hidden == hidden {
+            self.folders.names = Some(names.unwrap_or_default());
+        }
     }
 
     /// Indexes the tab's folder for the `@` picker in the background.

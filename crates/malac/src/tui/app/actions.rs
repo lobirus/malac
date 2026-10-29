@@ -20,6 +20,9 @@ pub enum Action {
     HideSuggestion,
     Jobs,
     StopJob(String),
+    /// Starts a prompt with this text, to finish and send: `!` for a shell
+    /// command, `/malac ` for one of malac's.
+    Compose(String),
     /// Attach the clipboard's image.
     PasteImage,
     CopySelection,
@@ -128,6 +131,14 @@ impl App {
                 Item::separator(),
                 Item::new("New agent in this tab", 'a', Action::NewAgent).hint("^N"),
                 Item::new("Compact conversation", 'c', Action::Compact).enabled(has_agent),
+                Item::separator(),
+                Item::new("Run a shell command…", 'b', Action::Compose("!".into())).hint("!"),
+                Item::new(
+                    "Run a malac command…",
+                    'm',
+                    Action::Compose("/malac ".into()),
+                )
+                .hint("/malac"),
                 Item::separator(),
                 Item::new("New workspace…", 'w', Action::NewWorkspace),
                 Item::new("Switch workspace…", 's', Action::Workspaces),
@@ -826,6 +837,13 @@ impl App {
                 }
             },
             Action::OpenFolder(dir) => self.open_folder(&dir),
+            Action::Compose(text) => {
+                self.overlay = None;
+                self.focus = Focus::Input;
+                self.editor.set_text(&text);
+                self.completion = 0;
+                self.completion_dismissed = false;
+            }
             Action::HideSuggestion => {
                 let cwd = self.tab_cwd();
                 self.hidden_suggestions.insert(cwd);
@@ -880,6 +898,10 @@ impl App {
                         0 => "stopping".to_owned(),
                         n => format!("stopping; dropped {n} queued"),
                     });
+                }
+                if !self.tab().shells.is_empty() {
+                    self.stop_shells();
+                    self.flash("stopping");
                 }
             }
             Action::Menu => match &self.overlay {

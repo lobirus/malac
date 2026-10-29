@@ -210,9 +210,16 @@ impl App {
                 None
             }
             Target::Completion(index) => {
-                let name = self.completions().get(index)?.name.clone();
-                self.editor.set_text(&format!("/{name}"));
-                self.submit()
+                let chosen = self.completions().into_iter().nth(index)?;
+                self.editor.set_text(&format!("/{}", chosen.name));
+                if chosen.folder.is_none() {
+                    return self.submit();
+                }
+                // A clicked folder is filled in, to go on into it or open it with Enter.
+                self.completion = 0;
+                self.completion_moved = false;
+                self.list_cd_folder();
+                None
             }
             Target::FileMatch(index) => {
                 self.choose_file(index);

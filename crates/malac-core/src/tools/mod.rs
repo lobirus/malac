@@ -31,6 +31,7 @@ use crate::runtime::Runtime;
 pub use mcp::McpTool;
 pub use settings::edit as edit_config_text;
 pub(crate) use shell::shell_command;
+pub use shell::{Outcome, ScriptRun, run_script, script_command};
 
 /// Output beyond this is cut from the middle before it reaches the model.
 pub const MAX_OUTPUT_CHARS: usize = 40_000;

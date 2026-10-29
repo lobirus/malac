@@ -199,6 +199,108 @@ enum Command {
     },
 }
 
+/// One of malac's commands, as `/malac` in the terminal UI completes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandHelp {
+    /// The words after `malac`, such as `provider list`.
+    pub path: String,
+    /// What it takes, such as `<command>` or `<name>`.
+    pub args: String,
+    pub about: String,
+}
+
+/// malac's commands and their subcommands, hidden ones left out.
+pub fn command_help() -> &'static [CommandHelp] {
+    use clap::CommandFactory;
+    static HELP: std::sync::OnceLock<Vec<CommandHelp>> = std::sync::OnceLock::new();
+    HELP.get_or_init(|| {
+        let cli = Cli::command();
+        let shown = |c: &&clap::Command| !c.is_hide_set() && c.get_name() != "help";
+        let mut help = Vec::new();
+        for command in cli.get_subcommands().filter(shown) {
+            help.push(help_of(command, command.get_name()));
+            for sub in command.get_subcommands().filter(shown) {
+                let path = format!("{} {}", command.get_name(), sub.get_name());
+                help.push(help_of(sub, &path));
+            }
+        }
+        help
+    })
+}
+
+fn help_of(command: &clap::Command, path: &str) -> CommandHelp {
+    let args = if command.has_subcommands() {
+        "<command>".to_owned()
+    } else {
+        let args: Vec<String> = command
+            .get_positionals()
+            .filter(|a| !a.is_hide_set())
+            .map(|a| {
+                let name = a
+                    .get_value_names()
+                    .and_then(|names| names.first())
+                    .map_or_else(|| a.get_id().to_string(), ToString::to_string)
+                    .to_lowercase();
+                if a.is_required_set() {
+                    format!("<{name}>")
+                } else {
+                    format!("[{name}]")
+                }
+            })
+            .collect();
+        args.join(" ")
+    };
+    CommandHelp {
+        path: path.to_owned(),
+        args,
+        about: command
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    }
+}
+
+/// Checks `words`, what follows `malac`, for `/malac` in the terminal UI:
+/// they must be one of its commands, never a prompt, and one that runs
+/// without a terminal and without stopping the daemon that runs it.
+pub fn check_subcommand(words: &[String]) -> std::result::Result<(), String> {
+    use clap::error::ErrorKind;
+    let Some(first) = words.first() else {
+        return Err("type a command: /malac models, /malac provider list, /malac help".into());
+    };
+    let args = std::iter::once("malac").chain(words.iter().map(String::as_str));
+    match Cli::try_parse_from(args) {
+        Ok(cli) if cli.command.is_some() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{first} is not a malac command; /malac help lists them"
+            ));
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) => {}
+        Err(err) => {
+            let text = err.to_string();
+            let line = text.lines().next().unwrap_or_default();
+            return Err(line.trim_start_matches("error: ").to_owned());
+        }
+    }
+    let second = words.get(1).map_or("", String::as_str);
+    match (first.as_str(), second) {
+        ("daemon", "run" | "stop" | "restart") => {
+            Err("use the Connection menu to restart or stop the daemon".into())
+        }
+        ("voice", "talk") => Err("talk mode needs this terminal: use /talk".into()),
+        ("voice", "dictate") => Err("dictation needs this terminal: press Ctrl-X".into()),
+        ("control", _) => Err("the control service runs in its own terminal".into()),
+        _ => Ok(()),
+    }
+}
+
 fn parse_args() -> Cli {
     let args: Vec<OsString> = std::env::args_os().collect();
     match Cli::try_parse_from(&args) {
@@ -300,6 +402,45 @@ mod tests {
             },
             Err(err) => panic!("{err}"),
         }
+    }
+
+    fn check(line: &str) -> std::result::Result<(), String> {
+        let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        check_subcommand(&words)
+    }
+
+    #[test]
+    fn slash_malac_takes_commands_only() {
+        assert_eq!(check("models"), Ok(()));
+        assert_eq!(check("provider list"), Ok(()));
+        assert_eq!(check("help"), Ok(()));
+        assert_eq!(check("provider"), Ok(()), "shows the provider help");
+        // What `malac` would take as a prompt is refused here.
+        let refused = check("fix the tests").unwrap_err();
+        assert!(refused.contains("not a malac command"), "{refused}");
+        let refused = check("web scraper for the docs").unwrap_err();
+        assert!(refused.contains("unexpected argument"), "{refused}");
+        assert!(check("").is_err());
+        // Commands that need a terminal or would stop the daemon running them.
+        assert!(
+            check("daemon restart")
+                .unwrap_err()
+                .contains("Connection menu")
+        );
+        assert!(check("voice talk").unwrap_err().contains("/talk"));
+        assert_eq!(check("daemon status"), Ok(()));
+    }
+
+    #[test]
+    fn command_help_lists_subcommands() {
+        let help = command_help();
+        let find = |path: &str| help.iter().find(|c| c.path == path).cloned();
+        let provider = find("provider").expect("provider");
+        assert_eq!(provider.args, "<command>");
+        assert!(!provider.about.is_empty());
+        assert!(find("provider list").is_some());
+        assert!(find("models").is_some_and(|m| m.args.is_empty()));
+        assert!(find("help").is_none());
     }
 
     #[test]

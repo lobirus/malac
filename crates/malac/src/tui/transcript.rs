@@ -267,7 +267,7 @@ impl Transcript {
         self.entry_mut(index)
     }
 
-    fn tool_mut(&mut self, call_id: &str) -> Option<&mut ToolCall> {
+    pub fn tool_mut(&mut self, call_id: &str) -> Option<&mut ToolCall> {
         let index = self
             .items
             .iter()

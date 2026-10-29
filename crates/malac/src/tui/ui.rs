@@ -244,7 +244,12 @@ fn draw_suggestion(frame: &mut Frame, app: &mut App, area: Rect, root: &Path) {
 fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let t = theme();
     let mut area = area;
-    let shown = app.tab().shown().map(str::to_owned).unwrap_or_default();
+    let tab = app.tab();
+    let shown = tab
+        .shown()
+        .or(tab.shell_view.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_default();
     if let Some(root) = app.suggested_root().map(Path::to_path_buf) {
         draw_suggestion(frame, app, Rect { height: 1, ..area }, &root);
         area.y += 1;
@@ -897,7 +902,10 @@ fn draw_completions(frame: &mut Frame, app: &mut App, input: Rect) {
             (false, true) => t.faint(),
             (false, false) => t.dim(),
         };
-        let name = format!(" /{}", completion.name);
+        let name = match &completion.folder {
+            Some(folder) => format!(" {folder}"),
+            None => format!(" /{}", completion.name),
+        };
         let args = match completion.args.as_str() {
             "" => String::new(),
             args => format!(" {args}"),
