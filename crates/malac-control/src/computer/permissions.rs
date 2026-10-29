@@ -1,8 +1,9 @@
 //! Privacy permissions for desktop control. macOS needs Screen Recording for
 //! screenshots (without it a capture silently contains only the wallpaper)
 //! and Accessibility for mouse and keyboard input. It grants both to the
-//! "responsible" app of the process tree, usually the terminal or editor
-//! that started it, not to `malac-control` itself.
+//! "responsible" app of the process tree, which is the terminal or editor
+//! that started it unless the process disclaims that: [`own_permissions`]
+//! makes `malac-control` hold them itself, whoever starts it.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,16 +39,29 @@ pub fn report(request: bool) -> Report {
     imp::report(request)
 }
 
+/// Makes this process hold its own permissions on macOS, so the system asks
+/// for and remembers them as `malac-control`'s, not as those of the
+/// terminal, editor or daemon that started it. When another app is
+/// responsible, the process re-executes itself in place (same pid,
+/// arguments and open files) with that responsibility disclaimed. Call it
+/// first thing in `main`: on success it does not return to the old image.
+/// Elsewhere, and when the process already holds them, it does nothing.
+pub fn own_permissions() -> anyhow::Result<()> {
+    imp::own_permissions()
+}
+
 #[cfg(target_os = "macos")]
 pub use imp::{accessibility_error, require_screen_recording};
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::ffi::{CStr, c_char, c_void};
+    use std::ffi::{CStr, CString, c_char, c_void};
+    use std::os::unix::ffi::OsStringExt;
     use std::path::Path;
     use std::process::Command;
+    use std::ptr;
 
-    use anyhow::{Error, Result, anyhow};
+    use anyhow::{Context, Error, Result, anyhow};
 
     use super::{App, Report};
 
@@ -88,11 +102,103 @@ mod imp {
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn proc_pidpath(pid: i32, buffer: *mut c_void, size: u32) -> i32;
+        fn posix_spawnattr_init(attr: *mut *mut c_void) -> i32;
+        fn posix_spawnattr_setflags(attr: *mut *mut c_void, flags: i16) -> i32;
+        fn posix_spawnattr_destroy(attr: *mut *mut c_void) -> i32;
+        fn posix_spawn(
+            pid: *mut i32,
+            path: *const c_char,
+            file_actions: *const c_void,
+            attr: *const *mut c_void,
+            argv: *const *const c_char,
+            envp: *const *const c_char,
+        ) -> i32;
     }
 
     /// `RTLD_DEFAULT` on Darwin.
     const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
     const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+    /// Apple's extension: `posix_spawn` replaces the calling process, like `execve`.
+    const POSIX_SPAWN_SETEXEC: i16 = 0x0040;
+    /// Set for the re-executed process, so a system that ignores the
+    /// disclaimer cannot make it re-execute forever.
+    const OWN_PERMISSIONS_ENV: &str = "MALAC_CONTROL_OWN_PERMISSIONS";
+
+    pub fn own_permissions() -> Result<()> {
+        if std::env::var_os(OWN_PERMISSIONS_ENV).is_some()
+            || responsible_pid().is_none_or(|pid| pid == std::process::id() as i32)
+        {
+            return Ok(());
+        }
+        type Disclaim = unsafe extern "C" fn(*mut *mut c_void, i32) -> i32;
+        let symbol = lookup(c"responsibility_spawnattrs_setdisclaim")
+            .context("this macOS cannot disclaim responsibility")?;
+        // SAFETY: the symbol has this signature on every macOS release that exports it.
+        let disclaim: Disclaim = unsafe { std::mem::transmute(symbol) };
+
+        let exe = std::env::current_exe().context("cannot find this executable")?;
+        let exe = CString::new(exe.into_os_string().into_vec())?;
+        let args = std::env::args_os()
+            .map(|arg| CString::new(arg.into_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut env = std::env::vars_os()
+            .map(|(key, value)| {
+                let mut entry = key.into_vec();
+                entry.push(b'=');
+                entry.extend(value.into_vec());
+                CString::new(entry)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        env.push(CString::new(format!("{OWN_PERMISSIONS_ENV}=1"))?);
+        let argv = null_terminated(&args);
+        let envp = null_terminated(&env);
+
+        let mut attr: *mut c_void = ptr::null_mut();
+        // SAFETY: `attr` is initialized before use and destroyed after; the
+        // path, argument and environment arrays are null-terminated and
+        // outlive the call, which on success never returns.
+        unsafe {
+            check(posix_spawnattr_init(&mut attr))?;
+            let result = check(posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_SETEXEC))
+                .and_then(|()| check(disclaim(&mut attr, 1)))
+                .and_then(|()| {
+                    let mut pid = 0;
+                    check(posix_spawn(
+                        &mut pid,
+                        exe.as_ptr(),
+                        ptr::null(),
+                        &attr,
+                        argv.as_ptr(),
+                        envp.as_ptr(),
+                    ))
+                });
+            posix_spawnattr_destroy(&mut attr);
+            result.context("cannot re-execute with its own permissions")
+        }
+    }
+
+    fn null_terminated(strings: &[CString]) -> Vec<*const c_char> {
+        strings
+            .iter()
+            .map(|string| string.as_ptr())
+            .chain([ptr::null()])
+            .collect()
+    }
+
+    /// The spawn functions return an error number instead of setting `errno`.
+    fn check(code: i32) -> std::io::Result<()> {
+        match code {
+            0 => Ok(()),
+            code => Err(std::io::Error::from_raw_os_error(code)),
+        }
+    }
+
+    /// A libSystem function by name; null when this macOS does not export it.
+    fn lookup(name: &CStr) -> Option<*mut c_void> {
+        // SAFETY: looks up a symbol by a null-terminated name.
+        let symbol = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+        (!symbol.is_null()).then_some(symbol)
+    }
 
     fn screen_recording() -> bool {
         // SAFETY: takes no arguments and only queries the permission state.
@@ -157,9 +263,8 @@ mod imp {
                 .filter_map(|(missing, name)| missing.then_some(name))
                 .collect();
             format!(
-                "Grant {} to {} in System Settings > Privacy & Security, then restart {}{}.",
+                "Grant {} to {} in System Settings > Privacy & Security, then {}.",
                 missing.join(" and "),
-                app.name,
                 app.name,
                 restart_hint(&app)
             )
@@ -191,25 +296,27 @@ mod imp {
     fn missing(permission: &str, pane: &str) -> Error {
         let app = responsible_app();
         anyhow!(
-            "macOS has not granted the {permission} permission to {} ({}), the app this control \
-             service runs under. Enable {} in System Settings > Privacy & Security > {pane}, adding \
-             it with + if it is not listed (`malac-control permissions --request` opens the pane), \
-             then restart {}{}.",
+            "macOS has not granted the {permission} permission to {} ({}), which holds this \
+             control service's permissions. Turn it on in System Settings > Privacy & Security > \
+             {pane}, adding it with + if it is not listed (`malac-control permissions --request` \
+             opens the pane), then {}. If it is listed and on, remove it with - and add it again: \
+             macOS forgets the grant when a build without a stable signature is replaced.",
             app.name,
             app.path,
-            app.name,
-            app.name,
             restart_hint(&app)
         )
     }
 
-    /// When the permissions belong to malac itself (a daemon started without
-    /// a terminal), restarting the daemon is what applies them.
-    fn restart_hint(app: &App) -> &'static str {
+    /// Restarting the daemon starts a new control service, which picks up
+    /// the grant; when another app holds the permissions, that app too.
+    fn restart_hint(app: &App) -> String {
         if app.name.starts_with("malac") {
-            " (`malac daemon restart`)"
+            "restart it (`malac daemon restart`)".into()
         } else {
-            " and the malac daemon (`malac daemon restart`)"
+            format!(
+                "restart {} and the malac daemon (`malac daemon restart`)",
+                app.name
+            )
         }
     }
 
@@ -238,12 +345,7 @@ mod imp {
 
     fn responsible_pid() -> Option<i32> {
         type Responsible = unsafe extern "C" fn(i32) -> i32;
-        let name = c"responsibility_get_pid_responsible_for_pid";
-        // SAFETY: looks up a libSystem function by name; a missing symbol yields null.
-        let symbol = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
-        if symbol.is_null() {
-            return None;
-        }
+        let symbol = lookup(c"responsibility_get_pid_responsible_for_pid")?;
         // SAFETY: the symbol has this signature on every macOS release that exports it.
         let responsible: Responsible = unsafe { std::mem::transmute(symbol) };
         let pid = unsafe { responsible(std::process::id() as i32) };
@@ -311,6 +413,10 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use super::Report;
+
+    pub fn own_permissions() -> anyhow::Result<()> {
+        Ok(())
+    }
 
     pub fn report(request: bool) -> Report {
         Report {

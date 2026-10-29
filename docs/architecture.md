@@ -87,7 +87,9 @@ When `[memory.vector]` and `[memory.embeddings]` are configured, saving a memory
 
 Its tools are added without a server prefix (`browser_click`, `computer_screenshot`). Read-only tools are annotated so they never need approval. `computer_permissions` (and `malac-control permissions`) reports the macOS Screen Recording and Accessibility state and the app holding them, and with `request` shows the system prompts.
 
-macOS grants these permissions to the process tree's responsible app, which is fixed when the tree starts and survives `setsid`. A daemon started from iTerm spawns `malac-control` as iTerm's, one started by the editor extension as the editor's. To make the grant stick no matter who starts the daemon, run `malac-control serve` from a terminal app that has both permissions: the daemon then connects to it through `~/.malac/control.json` instead of spawning its own. After granting, restart that app and the daemon (`malac daemon restart`).
+macOS grants these permissions to the process tree's responsible app, which is fixed when the tree starts and survives `setsid`, so they would belong to whatever started the daemon: a terminal, an editor, Claude Code. `malac-control` disclaims that first thing in `main` (`permissions::own_permissions`): when another app is responsible, it re-executes itself in place, same pid, arguments and pipes, through `posix_spawn` with `POSIX_SPAWN_SETEXEC` and `responsibility_spawnattrs_setdisclaim`. The permissions then belong to `malac-control` itself, whoever starts it. An environment variable stops a second attempt if macOS ignores the disclaimer.
+
+macOS remembers a grant by the binary's designated requirement. Release builds are signed with the project's certificate (`scripts/package.sh` with `MALAC_CODESIGN_IDENTITY`; the release workflow checks the certificate), so the requirement names the certificate and the grant survives updates. Ad-hoc builds (Homebrew, source) have a requirement that is a hash of the binary, so each new build needs the grant again. After granting, `malac daemon restart` starts a control service that sees it.
 
 ## Daemon
 

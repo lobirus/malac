@@ -9,6 +9,12 @@
 # in dist/malac-<version>-macos.pkg, which installs to /usr/local/bin. Set
 # MALAC_SIGN_IDENTITY to a "Developer ID Installer" identity to sign it.
 # --vscode also packages the editor extension as malac-vscode-<version>.vsix.
+#
+# macOS binaries are signed with MALAC_CODESIGN_IDENTITY (a code-signing
+# identity, from MALAC_CODESIGN_KEYCHAIN if set), else ad hoc. macOS keeps
+# malac-control's Screen Recording and Accessibility grants across updates
+# only while its designated requirement stays the same: with an identity it
+# names the certificate, ad hoc it is a hash of the binary.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -28,10 +34,29 @@ if [ -z "$targets" ]; then
     targets="$(rustc -vV | sed -n 's/^host: //p')"
 fi
 
+sign() {
+    for bin in malac malac-control; do
+        case "$bin" in
+            malac) identifier=io.malac.cli ;;
+            malac-control) identifier=io.malac.control ;;
+        esac
+        if [ -n "${MALAC_CODESIGN_IDENTITY:-}" ]; then
+            codesign --force --timestamp=none --sign "$MALAC_CODESIGN_IDENTITY" \
+                ${MALAC_CODESIGN_KEYCHAIN:+--keychain "$MALAC_CODESIGN_KEYCHAIN"} \
+                --identifier "$identifier" "$1/$bin"
+        else
+            codesign --force --sign - --identifier "$identifier" "$1/$bin"
+        fi
+    done
+}
+
 mkdir -p "$dist"
 for target in $targets; do
     echo "Building $target..."
     cargo build --release --locked --target "$target" -p malac -p malac-control
+    case "$target" in
+        *-apple-darwin) sign "target/$target/release" ;;
+    esac
     stage="$(mktemp -d)"
     name="malac-$version-$target"
     mkdir "$stage/$name"

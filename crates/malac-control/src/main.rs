@@ -55,12 +55,18 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // First, while this is the only thread: on macOS this may re-execute
+    // the process so that it holds its own permissions.
+    let owned = malac_control::permissions::own_permissions();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Err(err) = owned {
+        tracing::warn!("macOS will ask for permissions for the app that started this: {err:#}");
+    }
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

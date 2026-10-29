@@ -34,6 +34,14 @@ xcrun notarytool submit dist/malac-<version>-macos.pkg --keychain-profile <profi
 xcrun stapler staple dist/malac-<version>-macos.pkg
 ```
 
+## Signing the macOS binaries
+
+macOS keeps `malac-control`'s Screen Recording and Accessibility grants across updates only when its designated requirement stays the same. An ad-hoc signature's requirement is a hash of the binary, so the release workflow signs `malac` (`io.malac.cli`) and `malac-control` (`io.malac.control`) with the project's self-signed code-signing certificate instead. The certificate comes from two repository secrets: `MACOS_CODESIGN_P12_BASE64` (the PKCS12 file, base64) and `MACOS_CODESIGN_PASSWORD`.
+
+The workflow imports the certificate into a throwaway keychain and passes its SHA-1 as `MALAC_CODESIGN_IDENTITY` to `scripts/package.sh`. It then checks that every binary's requirement names that certificate (SHA-1 `41:00:12:ED:43:9E:0D:F6:D0:9E:75:B7:EB:B7:E7:B4:EB:09:AA:80`). Without the secrets the macOS job fails rather than ship ad-hoc binaries. Locally, `scripts/package.sh` signs ad hoc unless `MALAC_CODESIGN_IDENTITY` (and optionally `MALAC_CODESIGN_KEYCHAIN`) is set.
+
+Keep the certificate and its password outside the repository and backed up. Binaries signed with a new certificate lose every user's grant once.
+
 ## Signing the Android app
 
 The release workflow signs the APK with a PKCS12 keystore from two repository secrets: `ANDROID_KEYSTORE_BASE64` (the keystore, base64) and `ANDROID_KEYSTORE_PASSWORD`. The key alias is `malac`. The workflow checks the APK's certificate against the project's (SHA-256 `25:B7:1D:D6:94:F0:CC:57:4B:52:57:74:FA:5F:2F:33:5B:86:B2:09:EB:79:A2:40:D2:F1:27:83:B8:F1:BA:BA`), so a release can't go out signed with another key by mistake.

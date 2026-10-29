@@ -284,7 +284,7 @@ clone_from = "Profile 1"           # copy an existing Chrome profile on first la
 cdp_url = "http://127.0.0.1:9222"
 ```
 
-On macOS, desktop control needs Screen Recording and Accessibility. macOS grants them to the app that started the process tree: the terminal you started the daemon from, or your editor if its extension started it. Grant both to that app, then restart it and the daemon (`malac daemon restart`). To make it independent of who starts the daemon, run `malac-control serve` in a terminal that has the permissions; the daemon connects to it. The daemon's snapshot and the `computer_permissions` tool report the current state.
+On macOS, desktop control needs Screen Recording and Accessibility. They belong to `malac-control` itself, whoever starts it: `malac-control permissions --request` shows the macOS prompts and opens System Settings, where you turn on `malac-control` in both lists. Then run `malac daemon restart`. Release builds keep the grant across updates; a Homebrew or source build needs it again after each update. The daemon's snapshot and the `computer_permissions` tool report the current state.
 
 ## Web UI and VS Code
 
@@ -355,7 +355,7 @@ Ask malac: "switch to lora/smart", "add OpenRouter as a provider with my key", "
 - **Project config is restricted.** A repository's `.malac/config.toml` cannot set the mode, providers, MCP servers, control service, permissions, memory, web UI, update settings or profiles unless you set `trust_project_config = true`. Cloning a repository is never enough to make malac run its commands.
 - **Plugins are code.** Hooks and MCP servers from plugins run on your machine with your permissions once you approve them. Read what `malac plugin show` lists before approving, as you would before running a script from the internet.
 - **Your data stays local.** Transcripts are JSONL files in `~/.malac/sessions` and memories are Markdown files, both readable and deletable. Anything you paste into a prompt, including an API key, ends up in that session's transcript. Prefer `api_key_env` or `malac provider add --api-key-stdin`, which writes `~/.malac/credentials.toml` with owner-only permissions.
-- **Desktop control needs macOS permissions.** macOS grants Screen Recording and Accessibility to the app that started `malac-control`, usually your terminal. Grant both to the terminal you use, or run `malac-control serve` in one that has them; malac connects to it automatically.
+- **Desktop control needs macOS permissions.** Screen Recording and Accessibility belong to `malac-control` itself, not to your terminal or editor. Grant both to it once (`malac-control permissions --request`), then `malac daemon restart`.
 - **Browsers run in their own profiles.** Each malac browser profile is a separate Chrome data directory under `~/.malac/browser`. Chrome does not allow remote control of your everyday profile, so log in once inside the malac profile, or use `clone_from` to copy an existing profile.
 - **The web UI is local unless you say otherwise.** Its token works only on the daemon's machine. With remote access on, paired devices connect over plain HTTP unless a tunnel or proxy adds TLS; use an SSH tunnel, Tailscale or a TLS proxy outside trusted networks. A paired device can do everything you can, so revoke lost ones.
 - **Updating is safe while agents run.** Binaries are replaced with an atomic rename. Running sessions and the daemon keep their version until you restart them (`malac daemon restart`).
